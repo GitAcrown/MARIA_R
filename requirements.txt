@@ -1,0 +1,12 @@
+aiohttp
+discord.py
+python-dotenv
+openai
+tiktoken
+duckduckgo-search
+beautifulsoup4
+requests
+readability-lxml
+trafilatura
+lxml
+numexpr
