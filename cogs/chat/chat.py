@@ -211,22 +211,15 @@ class InfoView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
 
 
-class ProfileModal(discord.ui.Modal, title="Profil et préférences"):
-    """Modal d'édition du profil utilisateur.
-    Affiche les notes dynamiques en lecture seule via TextDisplay (discord.py ≥ 2.5).
-    """
-
-    def __init__(self, store: ProfileStore, user_id: int, profile: str, notes: str = ""):
+class ProfileModal(discord.ui.Modal, title="Modifier le profil"):
+    def __init__(self, store: ProfileStore, user_id: int, profile: str):
         super().__init__()
         self.store = store
         self.user_id = user_id
-        if notes:
-            preview = notes[:300] + ("…" if len(notes) > 300 else "")
-            self.add_item(discord.ui.TextDisplay(f"**Notes gérées par Maria :**\n{preview}"))
         self.profile_input = discord.ui.TextInput(
             label="Profil (identité, préférences, compétences…)",
             style=discord.TextStyle.paragraph,
-            placeholder="Ex: Théo, 24 ans, dev à Lyon, tutoiement",
+            placeholder="Ex. Maria, 2 ans, au chômage, préfère le tutoiement...",
             default=profile,
             max_length=1000,
             required=False,
@@ -235,7 +228,63 @@ class ProfileModal(discord.ui.Modal, title="Profil et préférences"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self.store.set_profile(self.user_id, self.profile_input.value.strip())
-        await interaction.response.send_message("Profil mis à jour.", ephemeral=True)
+        await interaction.response.edit_message(view=PreferencesView(self.store, self.user_id))
+
+
+class _EditProfileButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, user_id: int):
+        super().__init__(label="Modifier le profil", style=discord.ButtonStyle.primary)
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            ProfileModal(self.store, self.user_id, self.store.get_profile(self.user_id))
+        )
+
+
+class _ResetNotesButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, user_id: int, has_notes: bool):
+        super().__init__(
+            label="Réinitialiser les notes",
+            style=discord.ButtonStyle.danger,
+            disabled=not has_notes,
+        )
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Ce profil ne vous appartient pas.", ephemeral=True)
+        self.store.set_notes(self.user_id, "")
+        await interaction.response.edit_message(view=PreferencesView(self.store, self.user_id))
+
+
+class PreferencesView(discord.ui.LayoutView):
+    """Vue profil + notes avec actions."""
+
+    def __init__(self, store: ProfileStore, user_id: int):
+        super().__init__(timeout=180)
+        profile = store.get_profile(user_id)
+        notes = store.get_notes(user_id)
+
+        children = [discord.ui.TextDisplay("### Profil")]
+        children.append(discord.ui.TextDisplay(
+            profile[:600] + ("…" if len(profile) > 600 else "") if profile
+            else "-# Aucun profil défini."
+        ))
+        if notes:
+            children += [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("### Notes de Maria"),
+                discord.ui.TextDisplay(notes[:800] + ("…" if len(notes) > 800 else "")),
+            ]
+
+        self.add_item(discord.ui.Container(*children))
+        self.add_item(discord.ui.ActionRow(
+            _EditProfileButton(store, user_id),
+            _ResetNotesButton(store, user_id, bool(notes)),
+        ))
 
 
 class PersonalityModal(discord.ui.Modal, title="Personnalité du salon"):
@@ -756,15 +805,11 @@ class Chat(commands.Cog):
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="preferences", description="Édite ton profil et consulte tes notes")
+    @app_commands.command(name="preferences", description="Consulte et édite ton profil et les notes de Maria")
     async def cmd_preferences(self, interaction: discord.Interaction) -> None:
-        uid = interaction.user.id
-        await interaction.response.send_modal(
-            ProfileModal(
-                self.profiles, uid,
-                profile=self.profiles.get_profile(uid),
-                notes=self.profiles.get_notes(uid),
-            )
+        await interaction.response.send_message(
+            view=PreferencesView(self.profiles, interaction.user.id),
+            ephemeral=True,
         )
 
     @app_commands.command(name="rappels", description="Liste tes rappels en attente")
