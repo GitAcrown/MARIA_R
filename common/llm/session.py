@@ -30,6 +30,27 @@ USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
 
 
+def _embed_to_text(emb: discord.Embed) -> str:
+    """Convertit un embed Discord en texte lisible pour le contexte."""
+    lines: list[str] = []
+    if emb.author and emb.author.name:
+        lines.append(f"[{emb.author.name}]")
+    if emb.title:
+        title = emb.title
+        if emb.url:
+            title += f" ({emb.url})"
+        lines.append(title)
+    if emb.description:
+        lines.append(emb.description[:500] + ("…" if len(emb.description) > 500 else ""))
+    for field in emb.fields[:6]:
+        if field.name and field.value:
+            val = str(field.value)
+            lines.append(f"{field.name}: {val[:200] + ('…' if len(val) > 200 else '')}")
+    if emb.footer and emb.footer.text:
+        lines.append(f"({emb.footer.text[:120]})")
+    return "\n".join(lines)
+
+
 class ChannelSession:
     """Session par salon."""
 
@@ -62,14 +83,44 @@ class ChannelSession:
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
         """Ingère un message dans le contexte et le cache."""
-        parts = []
+        parts: list[ContentComponent] = []
         text = message.content or ""
         user_name = USER_FORMAT.format(message=message)
         prefix = "[CONTEXTE] " if is_context_only else ""
+
+        # ---- Référence (reply) ----
+        if message.reference and message.reference.resolved:
+            ref = message.reference.resolved
+            ref_author = getattr(ref, "author", None)
+            ref_is_bot = getattr(ref_author, "bot", False)
+            ref_name = getattr(ref_author, "name", "?") if ref_author else "?"
+
+            ref_lines: list[str] = []
+            ref_text = (ref.content or "").strip()
+            if ref_text:
+                ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
+            for emb in getattr(ref, "embeds", []):
+                t = _embed_to_text(emb)
+                if t:
+                    ref_lines.append(t[:300])
+            preview = " | ".join(ref_lines)[:500] if ref_lines else "(sans texte)"
+            label = "ton message" if ref_is_bot else ref_name
+            parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
+
+            # Images de la référence
+            for att in getattr(ref, "attachments", []):
+                fn = (att.filename or "").lower()
+                if (att.content_type or "").startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    parts.append(ImageComponent(att.url, detail="low"))
+
+        # ---- Texte principal ----
         if text.strip():
             parts.append(TextComponent(f"{prefix}{user_name}: {message.clean_content}"))
+        elif message.embeds or message.stickers or message.attachments:
+            # Message sans texte mais avec contenu visuel — header auteur
+            parts.append(TextComponent(f"{prefix}{user_name}:"))
 
-        # URLs d'images dans le texte
+        # ---- URLs d'images dans le texte ----
         for m in re.finditer(r"https?://[^\s]+", text):
             url = re.sub(r"\?.*$", "", m.group(0))
             if url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
@@ -77,14 +128,11 @@ class ChannelSession:
             elif url.lower().endswith(".gif"):
                 parts.append(ImageComponent(f"{url}?format=png" if "?" not in url else f"{url}&format=png", detail="auto"))
 
-        # Embeds
+        # ---- Embeds ----
         for emb in message.embeds:
-            if emb.title or emb.description or emb.url:
-                parts.append(
-                    MetadataComponent(
-                        "EMBED", embed_title=emb.title, embed_description=emb.description, embed_url=emb.url
-                    )
-                )
+            emb_text = _embed_to_text(emb)
+            if emb_text:
+                parts.append(TextComponent(f"[EMBED]\n{emb_text[:800]}"))
             if emb.image and emb.image.url:
                 url = emb.image.url
                 if url.lower().endswith(".gif"):
@@ -95,13 +143,15 @@ class ChannelSession:
                 if url.lower().endswith(".gif"):
                     url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
                 parts.append(ImageComponent(url, detail="low"))
+            if emb.video and emb.video.url:
+                parts.append(TextComponent(f"[VIDEO: {emb.video.url}]"))
 
-        # Stickers
+        # ---- Stickers ----
         for st in message.stickers:
             if st.url:
                 parts.append(ImageComponent(st.url, detail="auto"))
 
-        # Attachments images
+        # ---- Attachments images ----
         for att in message.attachments:
             ct = att.content_type or ""
             fn = (att.filename or "").lower()
@@ -111,30 +161,22 @@ class ChannelSession:
                     url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
                 parts.append(ImageComponent(url, detail="auto"))
 
-        # Référence
-        if message.reference and message.reference.resolved:
-            ref = message.reference.resolved
-            cnt = (ref.content or "").strip()
-            for emb in getattr(ref, "embeds", []):
-                if emb.description:
-                    cnt = emb.description
-                    break
-            preview = (cnt[:200] + "...") if len(cnt) > 200 else (cnt or "(sans texte)")
-            if getattr(ref.author, "bot", False):
-                parts.append(TextComponent(f"[Répond à ton message : \"{preview}\"]"))
-            else:
-                parts.append(TextComponent(f"[Répond à {ref.author.name} : \"{preview}\"]"))
+        if not parts:
+            parts.append(TextComponent(f"{prefix}{user_name}: (message vide)"))
 
         record = self.context.add_user_message(components=parts, name=user_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
 
-        # Push dans le cache pour la nano
-        if text.strip():
+        # Push dans le cache pour la nano (texte ou résumé embed)
+        cache_text = text.strip()
+        if not cache_text and message.embeds:
+            cache_text = _embed_to_text(message.embeds[0])[:200]
+        if cache_text:
             created = message.created_at
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
-            self.message_cache.push(self.channel_id, user_name, message.clean_content, created)
+            self.message_cache.push(self.channel_id, user_name, cache_text, created)
 
         return record
 
