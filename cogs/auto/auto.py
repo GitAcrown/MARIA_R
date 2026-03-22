@@ -1,7 +1,7 @@
 """Cog Auto — transcription audio à la demande (réaction 📜)."""
 
 import io
-from datetime import datetime, timezone
+import time
 
 import discord
 from discord.ext import commands
@@ -55,15 +55,15 @@ class Auto(commands.Cog):
         if not has_audio or not audio_att:
             return
         key = audio_att.url
-        import time
         if key in self._cache and time.time() < self._expiration.get(key, 0):
             transcript = self._cache[key]
         else:
             try:
-                buf = io.BytesIO()
-                buf.name = audio_att.filename
-                await audio_att.save(buf, seek_begin=True)
-                transcript = await self._get_client().transcribe(buf)
+                async with msg.channel.typing():
+                    buf = io.BytesIO()
+                    buf.name = audio_att.filename
+                    await audio_att.save(buf, seek_begin=True)
+                    transcript = await self._get_client().transcribe(buf)
                 self._cache[key] = transcript
                 self._expiration[key] = time.time() + self.EXPIRY_SEC
             except Exception as e:
@@ -73,7 +73,7 @@ class Auto(commands.Cog):
         await reaction.remove(user)
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
-        await msg.reply(f"> {transcript}\n-# Transcription demandée par {user.display_name}", mention_author=False)
+        await msg.reply(f"> *{transcript}*\n-# Transcription demandée par {user.display_name}", mention_author=False)
 
     async def cog_unload(self):
         if self._client:
