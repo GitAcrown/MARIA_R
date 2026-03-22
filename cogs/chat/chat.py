@@ -171,25 +171,45 @@ class RappelsView(discord.ui.LayoutView):
 class InfoView(discord.ui.LayoutView):
     """Stats de la session en cours — lecture seule."""
 
-    def __init__(self, stats: Optional[dict], channel):
+    def __init__(
+        self,
+        stats: Optional[dict],
+        channel,
+        *,
+        mode: str = "strict",
+        personality: str = "",
+    ):
         super().__init__(timeout=60)
         ch_name = getattr(channel, "name", str(getattr(channel, "id", "?")))
-        header = discord.ui.TextDisplay(f"### Session · #{ch_name}")
+
+        # --- En-tête ---
+        header = discord.ui.TextDisplay(f"### #{ch_name}")
         sep = discord.ui.Separator()
+
+        # --- Config salon ---
+        mode_labels = {"off": "Désactivé", "strict": "Mention uniquement", "greedy": "Mention + nom"}
+        mode_str = mode_labels.get(mode, mode)
+        config_lines = [f"**Mode** · {mode_str}"]
+        if personality:
+            preview = personality[:200] + ("…" if len(personality) > 200 else "")
+            config_lines.append(f"**Personnalité** · {preview}")
+        config = discord.ui.TextDisplay("\n".join(config_lines))
+
+        # --- Session ---
         if stats:
             ctx = stats["context_stats"]
             pct = ctx["window_usage_pct"]
-            bar_len = 20
-            filled = int(bar_len * pct / 100)
-            bar = "█" * filled + "░" * (bar_len - filled)
-            body = discord.ui.TextDisplay(
+            filled = int(20 * pct / 100)
+            bar = "█" * filled + "░" * (20 - filled)
+            session = discord.ui.TextDisplay(
                 f"**Messages** · {ctx['total_messages']}\n"
                 f"**Tokens** · {ctx['total_tokens']:,} / {ctx['context_window']:,}\n"
                 f"`{bar}` {pct:.0f}%"
             )
         else:
-            body = discord.ui.TextDisplay("Aucune session active pour ce salon.")
-        self.add_item(discord.ui.Container(header, sep, body))
+            session = discord.ui.TextDisplay("-# Aucune session active.")
+
+        self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
 
 
 class ProfileModal(discord.ui.Modal, title="Profil et préférences"):
@@ -639,6 +659,26 @@ class Chat(commands.Cog):
         age = (datetime.now(timezone.utc) - recent[-2]["created_at"]).total_seconds()
         return age > threshold
 
+    async def _seed_cache_from_history(self, channel, limit: int = 300) -> None:
+        """Pré-alimente le MessageCache (nano) avec l'historique Discord du salon.
+        Ne touche pas au contexte principal — uniquement le cache de recherche."""
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        message_cache = self.gpt_api.session_manager.message_cache
+        history: list[discord.Message] = []
+        try:
+            async for msg in channel.history(limit=limit):
+                if not msg.author.bot and msg.content.strip():
+                    history.append(msg)
+        except Exception:
+            return
+        history.reverse()  # du plus vieux au plus récent
+        for msg in history:
+            created = msg.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            message_cache.push(channel.id, msg.author.display_name, msg.clean_content, created)
+
     # ------------------------------------------------------------------
     # Événements
     # ------------------------------------------------------------------
@@ -651,6 +691,11 @@ class Chat(commands.Cog):
         if key in self._processed:
             return
         self._processed.append(key)
+
+        # Pré-alimenter le cache nano si le salon n'a pas encore d'historique chargé
+        cache = self.gpt_api.session_manager.message_cache
+        if not cache.get_recent(message.channel.id, 1):
+            await self._seed_cache_from_history(message.channel)
 
         should_respond = self._should_respond(message)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
@@ -736,8 +781,21 @@ class Chat(commands.Cog):
     @app_commands.command(name="info", description="Statistiques de la session en cours")
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         session = self.gpt_api.session_manager.get(interaction.channel_id)
+        ch = interaction.channel
+        target = ch.parent if isinstance(ch, discord.Thread) else ch
+        mode = "strict"
+        personality = ""
+        if interaction.guild:
+            mode = self.data.get(interaction.guild).settings("guild_config").get("chatbot_mode", "strict")
+        if isinstance(target, discord.TextChannel):
+            personality = self.data.get(target).settings("channel_config").get("personality", "")
         await interaction.response.send_message(
-            view=InfoView(session.get_stats() if session else None, interaction.channel),
+            view=InfoView(
+                session.get_stats() if session else None,
+                interaction.channel,
+                mode=mode,
+                personality=personality,
+            ),
             ephemeral=True,
         )
 
