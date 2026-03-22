@@ -50,14 +50,12 @@ class MariaLLMClient:
         model: Optional[str] = None,
         tools: Optional[list] = None,
         max_tokens: Optional[int] = None,
-        verbosity: str = "low",
     ) -> Any:
         """Complétion chat."""
         kwargs = {
             "model": model or self.completion_model,
             "messages": messages,
             "max_completion_tokens": max_tokens or self.max_tokens,
-            "text": {"verbosity": verbosity},
         }
         if tools:
             kwargs["tools"] = tools
