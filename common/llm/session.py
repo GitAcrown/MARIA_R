@@ -82,13 +82,36 @@ class ChannelSession:
         self.trigger_message: Optional[discord.Message] = None
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
-        """Ingère un message dans le contexte et le cache."""
-        parts: list[ContentComponent] = []
+        """Ingère un message.
+        - is_context_only=True  → uniquement le cache nano (jamais dans la fenêtre principale)
+        - is_context_only=False → fenêtre principale + cache nano
+        """
         text = message.content or ""
         user_name = USER_FORMAT.format(message=message)
-        prefix = "[CONTEXTE] " if is_context_only else ""
 
-        # ---- Référence (reply) ----
+        # ---- Cache nano (tous les messages, toujours) ----
+        cache_text = text.strip()
+        if not cache_text and message.embeds:
+            cache_text = _embed_to_text(message.embeds[0])[:200]
+        if cache_text:
+            created = message.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            self.message_cache.push(self.channel_id, user_name, cache_text, created)
+
+        # ---- Messages contexte-seul : on s'arrête ici ----
+        if is_context_only:
+            return MessageRecord(
+                role="user",
+                components=[],
+                created_at=datetime.now(timezone.utc),
+                name=user_name,
+            )
+
+        # ---- Contexte principal (messages adressés au bot uniquement) ----
+        parts: list[ContentComponent] = []
+
+        # Référence (reply)
         if message.reference and message.reference.resolved:
             ref = message.reference.resolved
             ref_author = getattr(ref, "author", None)
@@ -107,20 +130,18 @@ class ChannelSession:
             label = "ton message" if ref_is_bot else ref_name
             parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
 
-            # Images de la référence
             for att in getattr(ref, "attachments", []):
                 fn = (att.filename or "").lower()
                 if (att.content_type or "").startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".webp")):
                     parts.append(ImageComponent(att.url, detail="low"))
 
-        # ---- Texte principal ----
+        # Texte principal
         if text.strip():
-            parts.append(TextComponent(f"{prefix}{user_name}: {message.clean_content}"))
+            parts.append(TextComponent(f"{user_name}: {message.clean_content}"))
         elif message.embeds or message.stickers or message.attachments:
-            # Message sans texte mais avec contenu visuel — header auteur
-            parts.append(TextComponent(f"{prefix}{user_name}:"))
+            parts.append(TextComponent(f"{user_name}:"))
 
-        # ---- URLs d'images dans le texte ----
+        # URLs d'images dans le texte
         for m in re.finditer(r"https?://[^\s]+", text):
             url = re.sub(r"\?.*$", "", m.group(0))
             if url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
@@ -128,7 +149,7 @@ class ChannelSession:
             elif url.lower().endswith(".gif"):
                 parts.append(ImageComponent(f"{url}?format=png" if "?" not in url else f"{url}&format=png", detail="auto"))
 
-        # ---- Embeds ----
+        # Embeds
         for emb in message.embeds:
             emb_text = _embed_to_text(emb)
             if emb_text:
@@ -146,12 +167,12 @@ class ChannelSession:
             if emb.video and emb.video.url:
                 parts.append(TextComponent(f"[VIDEO: {emb.video.url}]"))
 
-        # ---- Stickers ----
+        # Stickers
         for st in message.stickers:
             if st.url:
                 parts.append(ImageComponent(st.url, detail="auto"))
 
-        # ---- Attachments images ----
+        # Attachments images
         for att in message.attachments:
             ct = att.content_type or ""
             fn = (att.filename or "").lower()
@@ -162,22 +183,11 @@ class ChannelSession:
                 parts.append(ImageComponent(url, detail="auto"))
 
         if not parts:
-            parts.append(TextComponent(f"{prefix}{user_name}: (message vide)"))
+            parts.append(TextComponent(f"{user_name}: (message vide)"))
 
         record = self.context.add_user_message(components=parts, name=user_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
-
-        # Push dans le cache pour la nano (texte ou résumé embed)
-        cache_text = text.strip()
-        if not cache_text and message.embeds:
-            cache_text = _embed_to_text(message.embeds[0])[:200]
-        if cache_text:
-            created = message.created_at
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            self.message_cache.push(self.channel_id, user_name, cache_text, created)
-
         return record
 
     async def process_attachments(self, message: discord.Message) -> list:
