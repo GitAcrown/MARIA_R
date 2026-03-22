@@ -1,4 +1,4 @@
-"""Cog Auto — transcription audio à la demande (réaction 💡)."""
+"""Cog Auto — transcription audio à la demande (réaction 📜)."""
 
 import io
 from datetime import datetime, timezone
@@ -10,7 +10,7 @@ from common.llm import MariaLLMClient
 
 
 class Auto(commands.Cog):
-    """Transcription audio — réaction 💡 sur message audio pour transcrire."""
+    """Transcription audio — réaction 📜 sur message audio pour transcrire."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -38,11 +38,11 @@ class Auto(commands.Cog):
             return
         has_audio = any(self._is_audio(a) for a in message.attachments)
         if has_audio:
-            await message.add_reaction("💡")
+            await message.add_reaction("📜")
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
-        if user.bot or str(reaction.emoji) != "💡":
+        if user.bot or str(reaction.emoji) != "📜":
             return
         msg = reaction.message
         has_audio = False
@@ -67,13 +67,13 @@ class Auto(commands.Cog):
                 self._cache[key] = transcript
                 self._expiration[key] = time.time() + self.EXPIRY_SEC
             except Exception as e:
-                await msg.channel.send(f"Erreur transcription: {e}", delete_after=15)
+                await msg.channel.send(f"Erreur de transcription : `{e}`", delete_after=15)
                 await reaction.remove(user)
                 return
         await reaction.remove(user)
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
-        await msg.reply(f"**Transcription:**\n{transcript}", mention_author=False)
+        await msg.reply(f"> {transcript}\n-# Transcription demandée par {user.display_name}", mention_author=False)
 
     async def cog_unload(self):
         if self._client:
