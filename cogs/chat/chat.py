@@ -21,8 +21,19 @@ PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "get_user_profile", "math_eval", "search_context_cache",
-    "update_user_notes", "schedule_reminder", "cancel_reminder",
+    "update_user_notes", "list_reminders",
 })
+
+def _fmt_delay(minutes: int) -> str:
+    """Convertit un délai en minutes en texte lisible."""
+    if minutes < 60:
+        return f"{minutes} min"
+    h, m = divmod(minutes, 60)
+    if h < 24:
+        return f"{h}h{m:02d}" if m else f"{h}h"
+    d, h = divmod(h, 24)
+    return f"{d}j{h}h" if h else f"{d}j"
+
 
 DEV_PROMPT_BASE = """Tu es Maria. Tu traînes sur un serveur Discord et tu discutes avec les membres — pas comme un assistant, comme quelqu'un qui est là.
 
@@ -294,31 +305,22 @@ class Chat(commands.Cog):
         channel = self.bot.get_channel(r.channel_id)
         if not channel:
             return
-        try:
-            user = await self.bot.fetch_user(r.user_id)
-        except Exception:
-            user = None
-        self._get_dev_prompt._profiles = (
-            f"**{user.name}** (auteur):\n{self.profiles.get_full(r.user_id)}\n" if user else ""
-        )
-        prompt = (
-            f"[RAPPEL]\nDemande de {user.name if user else r.user_id} : {r.description}\n"
-            "Exécute la tâche. Pas de questions. Utilise les outils si besoin. Réponds directement."
-        )
-        try:
-            resp = await self.gpt_api.run_autonomous_task(
-                channel, user.name if user else "User", r.user_id, prompt
-            )
-        finally:
-            self._get_dev_prompt._profiles = ""
+
+        ts = int(r.execute_at.timestamp())
+        content = f"{r.description}\n-# Rappel · <@{r.user_id}> · <t:{ts}:R>"
+        mentions = discord.AllowedMentions(users=True)
+
         orig = None
         if r.message_id:
             try:
                 orig = await channel.fetch_message(r.message_id)
             except Exception:
                 pass
-        suffix = "" if orig else f"\n\n-# <@{r.user_id}>"
-        await send_long(channel, resp.text + suffix, reply_to=orig)
+
+        if orig:
+            await orig.reply(content, allowed_mentions=mentions)
+        else:
+            await channel.send(content, allowed_mentions=mentions)
 
     # ------------------------------------------------------------------
     # Outils
@@ -395,13 +397,33 @@ class Chat(commands.Cog):
 
         tools.append(Tool(
             name="schedule_reminder",
-            description="Programme un rappel/tâche différée.",
+            description="Programme un rappel pour un utilisateur.",
             properties={
                 "task_description": {"type": "string", "description": "Description de la tâche"},
                 "delay_minutes": {"type": "integer", "description": "Délai en minutes"},
                 "delay_hours": {"type": "integer", "description": "Délai en heures"},
             },
             function=_tool_schedule,
+        ))
+
+        async def _tool_list_reminders(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+            if not ctx or not ctx.trigger_message:
+                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
+            rappels = self.rappels.get_user_rappels(ctx.trigger_message.author.id)
+            if not rappels:
+                return ToolResponseRecord(tc.id, {"reminders": []}, datetime.now(timezone.utc))
+            return ToolResponseRecord(tc.id, {
+                "reminders": [
+                    {"id": r.id, "description": r.description, "execute_at": r.execute_at.isoformat()}
+                    for r in rappels
+                ]
+            }, datetime.now(timezone.utc))
+
+        tools.append(Tool(
+            name="list_reminders",
+            description="Liste les rappels en attente de l'utilisateur. À appeler avant cancel_reminder pour obtenir les IDs.",
+            properties={},
+            function=_tool_list_reminders,
         ))
 
         async def _tool_cancel(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -413,7 +435,7 @@ class Chat(commands.Cog):
 
         tools.append(Tool(
             name="cancel_reminder",
-            description="Annule un rappel par son ID.",
+            description="Annule un rappel par son ID. Appelle list_reminders d'abord si tu n'as pas l'ID.",
             properties={"task_id": {"type": "integer", "description": "ID du rappel"}},
             function=_tool_cancel,
         ))
@@ -667,6 +689,14 @@ class Chat(commands.Cog):
                 except Exception:
                     domain = ""
                 label = f"**Lecture** — {domain} · <{url}>" if domain else "**Lecture de page**"
+            elif name == "schedule_reminder":
+                desc = args.get("task_description", "").strip()
+                total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
+                delay_str = f" · dans {_fmt_delay(total)}" if total else ""
+                label = f'**Rappel planifié** — "{desc}"{delay_str}' if desc else "**Rappel planifié**"
+            elif name == "cancel_reminder":
+                tid = args.get("task_id", "")
+                label = f"**Rappel #{tid} annulé**" if tid else "**Rappel annulé**"
             else:
                 label = f"**{name.replace('_', ' ').capitalize()}**"
             if label not in visible_parts:
