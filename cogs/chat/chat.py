@@ -155,17 +155,16 @@ class RappelsView(discord.ui.LayoutView):
 
     def __init__(self, rappels: list[Rappel], user_id: int, store: RappelStore):
         super().__init__(timeout=120)
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("### Tes rappels en attente"),
-                discord.ui.Separator(),
-            )
-        )
+        children = [
+            discord.ui.TextDisplay("### Tes rappels en attente"),
+            discord.ui.Separator(),
+        ]
         for r in rappels:
             ts = int(r.execute_at.timestamp())
             desc = r.description[:100] + ("…" if len(r.description) > 100 else "")
             text = discord.ui.TextDisplay(f"**#{r.id}** · <t:{ts}:f> (<t:{ts}:R>)\n{desc}")
-            self.add_item(discord.ui.Section(text, accessory=_CancelButton(r.id, user_id, store)))
+            children.append(discord.ui.Section(text, accessory=_CancelButton(r.id, user_id, store)))
+        self.add_item(discord.ui.Container(*children))
 
 
 class InfoView(discord.ui.LayoutView):
@@ -183,7 +182,7 @@ class InfoView(discord.ui.LayoutView):
         ch_name = getattr(channel, "name", str(getattr(channel, "id", "?")))
 
         # --- En-tête ---
-        header = discord.ui.TextDisplay(f"### #{ch_name}")
+        header = discord.ui.TextDisplay(f"## {ch_name}")
         sep = discord.ui.Separator()
 
         # --- Config salon ---
