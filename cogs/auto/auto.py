@@ -38,12 +38,16 @@ class Auto(commands.Cog):
         return ct.startswith("audio/") or ext.endswith((".mp3", ".wav", ".ogg", ".m4a", ".flac"))
 
     def _is_voice_message(self, message: discord.Message) -> discord.Attachment | None:
-        """Retourne la pièce jointe si le message est un message vocal Discord (< 2 min)."""
+        """Retourne la pièce jointe si le message est un message vocal Discord (< 2 min).
+        Utilise le flag voice_message et, si disponible, duration_secs pour filtrer les trop longs."""
         if not message.flags.voice_message:
             return None
         for att in message.attachments:
+            if not self._is_audio(att):
+                continue
             duration = getattr(att, "duration_secs", None)
-            if duration is not None and duration <= AUTO_TRANSCRIBE_MAX_SECS:
+            # Si duration_secs est absent, on fait confiance au flag voice_message
+            if duration is None or duration <= AUTO_TRANSCRIBE_MAX_SECS:
                 return att
         return None
 
@@ -84,13 +88,15 @@ class Auto(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
-        has_audio = any(self._is_audio(a) for a in message.attachments)
-        if has_audio:
-            await message.add_reaction("📜")
 
         voice_att = self._is_voice_message(message)
         if voice_att and self._auto_transcribe_enabled(message.channel):
             await self._do_transcribe(voice_att, message)
+            return  # pas de réaction si on transcrit automatiquement
+
+        has_audio = any(self._is_audio(a) for a in message.attachments)
+        if has_audio:
+            await message.add_reaction("📜")
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
