@@ -752,11 +752,7 @@ class Chat(commands.Cog):
                 label = f'**Recherche web** — "{q}"' if q else "**Recherche web**"
             elif name == "read_web_page":
                 url = args.get("url", "")
-                try:
-                    domain = urlparse(url).netloc.removeprefix("www.")
-                except Exception:
-                    domain = ""
-                label = f"**Lecture** — {domain} · <{url}>" if domain else "**Lecture de page**"
+                label = f"**Lecture** — <{url}>"
             elif name == "schedule_reminder":
                 desc = args.get("task_description", "").strip()
                 total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
