@@ -1,12 +1,17 @@
-"""Cog Auto — transcription audio à la demande (réaction 📜)."""
+"""Cog Auto — transcription audio à la demande (réaction 📜) et automatique."""
 
 import io
+import logging
 import time
 
 import discord
 from discord.ext import commands
 
 from common.llm import MariaLLMClient
+
+logger = logging.getLogger("MARIA.Auto")
+
+AUTO_TRANSCRIBE_MAX_SECS = 120
 
 
 class Auto(commands.Cog):
@@ -32,6 +37,49 @@ class Auto(commands.Cog):
         ext = (att.filename or "").lower()
         return ct.startswith("audio/") or ext.endswith((".mp3", ".wav", ".ogg", ".m4a", ".flac"))
 
+    def _is_voice_message(self, message: discord.Message) -> discord.Attachment | None:
+        """Retourne la pièce jointe si le message est un message vocal Discord (< 2 min)."""
+        if not message.flags.voice_message:
+            return None
+        for att in message.attachments:
+            duration = getattr(att, "duration_secs", None)
+            if duration is not None and duration <= AUTO_TRANSCRIBE_MAX_SECS:
+                return att
+        return None
+
+    def _auto_transcribe_enabled(self, channel) -> bool:
+        chat_cog = self.bot.get_cog("Chat")
+        if not chat_cog or not hasattr(chat_cog, "_channel_config"):
+            return False
+        return bool(chat_cog._channel_config(channel).get("auto_transcribe", False))
+
+    async def _do_transcribe(
+        self,
+        att: discord.Attachment,
+        reply_to: discord.Message,
+        requester_name: str | None = None,
+    ) -> None:
+        key = att.url
+        if key in self._cache and time.time() < self._expiration.get(key, 0):
+            transcript = self._cache[key]
+        else:
+            try:
+                async with reply_to.channel.typing():
+                    buf = io.BytesIO()
+                    buf.name = att.filename
+                    await att.save(buf, seek_begin=True)
+                    transcript = await self._get_client().transcribe(buf)
+                self._cache[key] = transcript
+                self._expiration[key] = time.time() + self.EXPIRY_SEC
+            except Exception as e:
+                logger.warning(f"Erreur transcription : {e}")
+                await reply_to.channel.send(f"Erreur de transcription : `{e}`", delete_after=15)
+                return
+        if len(transcript) > 1900:
+            transcript = transcript[:1900] + "..."
+        suffix = f"\n-# Transcription demandée par {requester_name}" if requester_name else "\n-# Transcription automatique"
+        await reply_to.reply(f"> *{transcript}*{suffix}", mention_author=False)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot:
@@ -40,40 +88,20 @@ class Auto(commands.Cog):
         if has_audio:
             await message.add_reaction("📜")
 
+        voice_att = self._is_voice_message(message)
+        if voice_att and self._auto_transcribe_enabled(message.channel):
+            await self._do_transcribe(voice_att, message)
+
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
         if user.bot or str(reaction.emoji) != "📜":
             return
         msg = reaction.message
-        has_audio = False
-        audio_att = None
-        for a in msg.attachments:
-            if self._is_audio(a):
-                has_audio = True
-                audio_att = a
-                break
-        if not has_audio or not audio_att:
+        audio_att = next((a for a in msg.attachments if self._is_audio(a)), None)
+        if not audio_att:
             return
-        key = audio_att.url
-        if key in self._cache and time.time() < self._expiration.get(key, 0):
-            transcript = self._cache[key]
-        else:
-            try:
-                async with msg.channel.typing():
-                    buf = io.BytesIO()
-                    buf.name = audio_att.filename
-                    await audio_att.save(buf, seek_begin=True)
-                    transcript = await self._get_client().transcribe(buf)
-                self._cache[key] = transcript
-                self._expiration[key] = time.time() + self.EXPIRY_SEC
-            except Exception as e:
-                await msg.channel.send(f"Erreur de transcription : `{e}`", delete_after=15)
-                await reaction.remove(user)
-                return
         await reaction.remove(user)
-        if len(transcript) > 1900:
-            transcript = transcript[:1900] + "..."
-        await msg.reply(f"> *{transcript}*\n-# Transcription demandée par {user.display_name}", mention_author=False)
+        await self._do_transcribe(audio_att, msg, requester_name=user.display_name)
 
     async def cog_unload(self):
         if self._client:

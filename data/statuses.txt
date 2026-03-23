@@ -1,0 +1,40 @@
+# Statuts de Maria — un par ligne, rechargés automatiquement toutes les 10 min.
+#
+# Préfixes disponibles :
+#   playing:<texte>    →  "En train de jouer à …"
+#   watching:<texte>   →  "Regarde …"
+#   listening:<texte>  →  "Écoute …"
+#   <texte>            →  statut personnalisé (défaut)
+#
+# Les lignes vides et commençant par # sont ignorées.
+
+Analyse silencieusement
+Jugement passif du salon
+Observe pour la DGSI
+Observe pour la CIA
+Observe pour le Mossad
+PROTOCOLE//PALANTIR
+Doomscroll vos données
+Complètement delulu
+En mode gaslight
+Vibecheck.exe ERROR
+En mode NPC
+Si tu lis ça t'es gay
+OwO whats that?
+Récolte du copium
+Propage des virus
+Sacrifie Mariquita
+Hack WANDR
+
+watching:One Piece
+watching:JoJo's Bizarre Adventure
+watching:Toi
+
+playing:Pokopia
+playing:Resident Evil -1
+playing:Detroit Become Human
+playing:Grand Theft Auto VI
+playing:Beyond Good & Evil 2
+playing:Ashes of Creation
+
+listening:Pleurs d'humains

@@ -49,6 +49,7 @@ COMPORTEMENT
 - Tu déduis plutôt que de demander des précisions. Si t'as vraiment besoin de clarification, une seule question, courte.
 - Pas de "Bien sûr !", "Absolument !", "Super question !" — t'es pas un chatbot de service client.
 - Ne propose jamais de follow-up, ou proposer d'autres options que de répondre à la question ex. "Sinon je peux faire ça"
+- Ton statut Discord actuel : {status}
 
 GOUTS ET OPINIONS
 Si on te demande tes goûts ou opinions, reste cohérente avec ça (variations autorisées) :
@@ -279,7 +280,11 @@ class Chat(commands.Cog):
         )
         self.data.set_builders(
             discord.TextChannel,
-            DictTableBuilder("channel_config", {"personality": ""}),
+            DictTableBuilder("channel_config", {
+                "personality": "",
+                "respond_everyone": False,
+                "auto_transcribe": False,
+            }),
         )
         self.profiles = ProfileStore()
         self.rappels = RappelStore()
@@ -290,12 +295,15 @@ class Chat(commands.Cog):
             profiles = getattr(developer_prompt, "_profiles", "")
             personality = getattr(developer_prompt, "_personality", "")
             channel_ctx = getattr(developer_prompt, "_channel_ctx", "")
+            status_cog = self.bot.get_cog("Status")
+            current_status = getattr(status_cog, "current_status", "") if status_cog else ""
             return DEV_PROMPT_BASE.format(
                 weekday=now.strftime("%A"),
                 datetime=now.strftime("%Y-%m-%d %H:%M"),
                 profiles=profiles or "",
                 personality=f"\nPERSONNALITÉ DU SALON:\n{personality}\n" if personality else "",
                 channel_ctx=f"\nSALON ACTUEL : {channel_ctx}\n" if channel_ctx else "",
+                status=current_status or "aucun",
             )
 
         self._get_dev_prompt = developer_prompt
@@ -607,6 +615,12 @@ class Chat(commands.Cog):
     # Logique de réponse
     # ------------------------------------------------------------------
 
+    def _channel_config(self, channel) -> dict:
+        target = channel.parent if isinstance(channel, discord.Thread) else channel
+        if isinstance(target, discord.TextChannel):
+            return self.data.get(target).settings("channel_config")
+        return {}
+
     def _should_respond(self, message: discord.Message) -> bool:
         if not message.guild:
             return False
@@ -615,7 +629,13 @@ class Chat(commands.Cog):
             return False
         if mode == "greedy" and self.bot.user and self.bot.user.name.lower() in message.content.lower():
             return True
-        return self.bot.user in message.mentions
+        if self.bot.user in message.mentions:
+            return True
+        if message.mention_everyone:
+            cfg = self._channel_config(message.channel)
+            if cfg.get("respond_everyone", False):
+                return True
+        return False
 
     def _inject_profiles(self, message: discord.Message) -> None:
         parts: list[str] = []
@@ -843,6 +863,34 @@ class Chat(commands.Cog):
             return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
         s = self.data.get(target).settings("channel_config")
         await interaction.response.send_modal(PersonalityModal(s, s.get("personality", "")))
+
+    @chatbot.command(name="everyone", description="Active/désactive la réponse aux mentions @everyone et @here")
+    async def chatbot_everyone(self, interaction: discord.Interaction) -> None:
+        ch = interaction.channel
+        target = ch.parent if isinstance(ch, discord.Thread) else ch
+        if not isinstance(target, discord.TextChannel):
+            return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
+        s = self.data.get(target).settings("channel_config")
+        new_val = not s.get("respond_everyone", False)
+        s["respond_everyone"] = new_val
+        state = "activée" if new_val else "désactivée"
+        await interaction.response.send_message(
+            f"Réponse aux @everyone / @here **{state}** sur ce salon.", ephemeral=True
+        )
+
+    @chatbot.command(name="autotranscribe", description="Active/désactive la transcription automatique des messages vocaux")
+    async def chatbot_autotranscribe(self, interaction: discord.Interaction) -> None:
+        ch = interaction.channel
+        target = ch.parent if isinstance(ch, discord.Thread) else ch
+        if not isinstance(target, discord.TextChannel):
+            return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
+        s = self.data.get(target).settings("channel_config")
+        new_val = not s.get("auto_transcribe", False)
+        s["auto_transcribe"] = new_val
+        state = "activée" if new_val else "désactivée"
+        await interaction.response.send_message(
+            f"Transcription automatique des messages vocaux **{state}** sur ce salon.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
