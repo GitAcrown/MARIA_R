@@ -864,30 +864,28 @@ class Chat(commands.Cog):
         s = self.data.get(target).settings("channel_config")
         await interaction.response.send_modal(PersonalityModal(s, s.get("personality", "")))
 
-    @chatbot.command(name="everyone", description="Active/désactive la réponse aux mentions @everyone et @here")
-    async def chatbot_everyone(self, interaction: discord.Interaction) -> None:
+    @chatbot.command(name="everyone", description="Définit si Maria répond aux mentions @everyone et @here")
+    @app_commands.describe(actif="Activer ou désactiver la réponse aux @everyone / @here")
+    async def chatbot_everyone(self, interaction: discord.Interaction, actif: bool) -> None:
         ch = interaction.channel
         target = ch.parent if isinstance(ch, discord.Thread) else ch
         if not isinstance(target, discord.TextChannel):
             return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
-        s = self.data.get(target).settings("channel_config")
-        new_val = not s.get("respond_everyone", False)
-        s["respond_everyone"] = new_val
-        state = "activée" if new_val else "désactivée"
+        self.data.get(target).settings("channel_config")["respond_everyone"] = actif
+        state = "activée" if actif else "désactivée"
         await interaction.response.send_message(
             f"Réponse aux @everyone / @here **{state}** sur ce salon.", ephemeral=True
         )
 
-    @chatbot.command(name="autotranscribe", description="Active/désactive la transcription automatique des messages vocaux")
-    async def chatbot_autotranscribe(self, interaction: discord.Interaction) -> None:
+    @chatbot.command(name="autotranscribe", description="Définit si Maria transcrit automatiquement les messages vocaux")
+    @app_commands.describe(actif="Activer ou désactiver la transcription automatique")
+    async def chatbot_autotranscribe(self, interaction: discord.Interaction, actif: bool) -> None:
         ch = interaction.channel
         target = ch.parent if isinstance(ch, discord.Thread) else ch
         if not isinstance(target, discord.TextChannel):
             return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
-        s = self.data.get(target).settings("channel_config")
-        new_val = not s.get("auto_transcribe", False)
-        s["auto_transcribe"] = new_val
-        state = "activée" if new_val else "désactivée"
+        self.data.get(target).settings("channel_config")["auto_transcribe"] = actif
+        state = "activée" if actif else "désactivée"
         await interaction.response.send_message(
             f"Transcription automatique des messages vocaux **{state}** sur ce salon.", ephemeral=True
         )
