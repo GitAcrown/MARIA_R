@@ -39,8 +39,8 @@ class Auto(commands.Cog):
 
     def _is_voice_message(self, message: discord.Message) -> discord.Attachment | None:
         """Retourne la pièce jointe si le message est un message vocal Discord (< 2 min).
-        Utilise le flag voice_message et, si disponible, duration_secs pour filtrer les trop longs."""
-        if not message.flags.voice_message:
+        Le flag voice_message correspond au bit 13 de MessageFlags."""
+        if not (message.flags.value & (1 << 13)):
             return None
         for att in message.attachments:
             if not self._is_audio(att):
@@ -66,18 +66,31 @@ class Auto(commands.Cog):
         key = att.url
         if key in self._cache and time.time() < self._expiration.get(key, 0):
             transcript = self._cache[key]
+            logger.debug(f"Transcription depuis cache : {att.filename}")
         else:
+            logger.info(f"Transcription de {att.filename!r} ({getattr(att, 'duration_secs', '?')}s) dans #{reply_to.channel}")
             try:
                 async with reply_to.channel.typing():
                     buf = io.BytesIO()
                     buf.name = att.filename
                     await att.save(buf, seek_begin=True)
+                    size = buf.seek(0, 2)
+                    buf.seek(0)
+                    if size == 0:
+                        logger.error(f"Buffer vide après att.save() pour {att.filename!r} — URL : {att.url}")
+                        await reply_to.channel.send("Erreur de transcription : fichier vide.", delete_after=15)
+                        return
+                    logger.debug(f"Fichier téléchargé ({size} octets), envoi à l'API...")
                     transcript = await self._get_client().transcribe(buf)
+                    logger.info(f"Transcription réussie : {len(transcript)} caractères")
                 self._cache[key] = transcript
                 self._expiration[key] = time.time() + self.EXPIRY_SEC
             except Exception as e:
-                logger.warning(f"Erreur transcription : {e}")
-                await reply_to.channel.send(f"Erreur de transcription : `{e}`", delete_after=15)
+                logger.error(f"Erreur transcription : {e}", exc_info=True)
+                try:
+                    await reply_to.channel.send(f"Erreur de transcription : `{e}`", delete_after=15)
+                except Exception:
+                    pass
                 return
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
@@ -90,9 +103,12 @@ class Auto(commands.Cog):
             return
 
         voice_att = self._is_voice_message(message)
-        if voice_att and self._auto_transcribe_enabled(message.channel):
-            await self._do_transcribe(voice_att, message)
-            return  # pas de réaction si on transcrit automatiquement
+        if voice_att:
+            if self._auto_transcribe_enabled(message.channel):
+                logger.info(f"Message vocal détecté dans #{message.channel} — transcription auto")
+                await self._do_transcribe(voice_att, message)
+                return  # pas de réaction si on transcrit automatiquement
+            logger.debug(f"Message vocal dans #{message.channel} — auto-transcription désactivée")
 
         has_audio = any(self._is_audio(a) for a in message.attachments)
         if has_audio:
