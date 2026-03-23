@@ -92,6 +92,13 @@ class Status(commands.Cog):
         self.current_status = text
         logger.debug(f"Statut → [{kind}] {text}")
 
+    @commands.command(name="status", hidden=True)
+    @commands.is_owner()
+    async def cmd_status(self, ctx: commands.Context) -> None:
+        """Force un nouveau statut aléatoire immédiatement."""
+        self._rotate_task.restart()
+        await ctx.message.delete()
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Status(bot))
