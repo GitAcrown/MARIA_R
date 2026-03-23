@@ -41,6 +41,19 @@ def _load_statuses() -> list[tuple[str, str]]:
     return entries
 
 
+def _format_status(kind: str, text: str) -> str:
+    """Retourne une description lisible du statut tel qu'il apparaît sur Discord."""
+    match kind:
+        case "playing":
+            return f"joue à {text}"
+        case "watching":
+            return f"regarde {text}"
+        case "listening":
+            return f"écoute {text}"
+        case _:
+            return text
+
+
 def _make_activity(kind: str, text: str) -> discord.BaseActivity:
     match kind:
         case "playing":
@@ -75,7 +88,6 @@ class Status(commands.Cog):
     @_rotate_task.before_loop
     async def _before_rotate(self) -> None:
         await self.bot.wait_until_ready()
-        await self._set_random_status()
 
     async def _set_random_status(self) -> None:
         self._statuses = _load_statuses()
@@ -89,14 +101,16 @@ class Status(commands.Cog):
         kind, text = chosen
         activity = _make_activity(kind, text)
         await self.bot.change_presence(activity=activity)
-        self.current_status = text
+        self.current_status = _format_status(kind, text)
         logger.debug(f"Statut → [{kind}] {text}")
 
     @commands.command(name="status", hidden=True)
     @commands.is_owner()
     async def cmd_status(self, ctx: commands.Context) -> None:
-        """Force un nouveau statut aléatoire immédiatement."""
-        self._rotate_task.restart()
+        """Force un nouveau statut aléatoire et remet le timer à zéro."""
+        await self._set_random_status()
+        self._rotate_task.cancel()
+        self._rotate_task.start()
         await ctx.message.delete()
 
 
