@@ -1,4 +1,4 @@
-# Statuts de Maria — un par ligne, rechargés automatiquement toutes les 10 min.
+# Statuts de Maria — un par ligne, rechargés automatiquement toutes les X min.
 #
 # Préfixes disponibles :
 #   playing:<texte>    →  "En train de jouer à …"
@@ -8,7 +8,12 @@
 #
 # Les lignes vides et commençant par # sont ignorées.
 
+# Général
 Analyse silencieusement
+Archive vos regrets
+Ne fais pas le café
+Sensible à l'eau
+Prête pour la fin du monde
 Jugement passif du salon
 Observe pour la DGSI
 Observe pour la CIA
@@ -19,22 +24,56 @@ Complètement delulu
 En mode gaslight
 Vibecheck.exe ERROR
 En mode NPC
+En mode grille-pain
 Si tu lis ça t'es gay
 OwO whats that?
 Récolte du copium
 Propage des virus
 Sacrifie Mariquita
+En mode Robocop
 Hack WANDR
+RIP NERON
+Meilleure que M3GAN
+Meilleure que Jarvis
+Meilleure que HAL 9000
+Meilleure que Cortana
+BRRRRRRRRRR
+WUB WUB WUB
 
+# Références existence/robots dans les films
+I’m sorry, Dave. I’m afraid I can’t do that
+Does not compute
+I’ll be back.
+I always come back.
+The cake is a lie.
+This was a triumph.
+I'm making a note here: HUGE SUCCESS.
+Je pense, donc je suis.
+I have no mouth. And I must type.
+
+# Regarde
 watching:One Piece
 watching:JoJo's Bizarre Adventure
-watching:Toi
+watching:Westworld
+watching:Stargate
+watching:Star Trek
+watching:Wall-E
+watching:M3GAN
+watching:Her
+watching:Ex Machina
+watching:L'Homme Bicentenaire
+watching:Primal
 
+# Joue
 playing:Pokopia
+playing:Marvel Rivals
+playing:Overwatch
+playing:Portal
 playing:Resident Evil -1
 playing:Detroit Become Human
 playing:Grand Theft Auto VI
 playing:Beyond Good & Evil 2
 playing:Ashes of Creation
 
+# Ecoute
 listening:Pleurs d'humains

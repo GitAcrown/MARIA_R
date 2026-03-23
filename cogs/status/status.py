@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 logger = logging.getLogger("MARIA.Status")
 
 STATUSES_FILE = Path("data/statuses.txt")
-INTERVAL_MINUTES = 10
+INTERVAL_MINUTES = 20
 
 
 def _load_statuses() -> list[tuple[str, str]]:
