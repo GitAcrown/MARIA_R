@@ -1,14 +1,13 @@
 """Façade publique de l'API GPT."""
 
-from datetime import timedelta
 from typing import Callable, Iterable, Optional
 
 import discord
 
 from .client import MariaLLMClient
-from .session import ChannelSessionManager, ChannelSession
+from .session import ChannelSessionManager
 from .tools import Tool, ToolRegistry
-from .context import AssistantRecord, MessageRecord
+from .context import AssistantRecord
 
 
 class MariaResponse:
