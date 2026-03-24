@@ -95,7 +95,7 @@ class Auto(commands.Cog):
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
         suffix = f"\n-# Transcription demandée par {requester_name}" if requester_name else "\n-# Transcription automatique"
-        await reply_to.reply(f"> *{transcript}*{suffix}", mention_author=False)
+        await reply_to.reply(f"> {transcript}{suffix}", mention_author=False)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
