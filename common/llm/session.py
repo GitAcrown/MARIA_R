@@ -30,6 +30,65 @@ USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
 
 
+def _components_v2_to_parts(
+    components: list,
+    *,
+    _depth: int = 0,
+) -> tuple[list[str], list[str]]:
+    """Walk a components-v2 tree recursively.
+    Returns (text_parts, image_urls).
+    Stops at depth 6 to avoid runaway recursion.
+    """
+    if _depth > 6:
+        return [], []
+
+    texts: list[str] = []
+    images: list[str] = []
+
+    for comp in components:
+        name = type(comp).__name__
+
+        # TextDisplay — plain text block
+        if name == "TextDisplay":
+            content = getattr(comp, "content", None) or getattr(comp, "value", None)
+            if content:
+                texts.append(str(content))
+
+        # Container / Section / ActionRow — recurse into children
+        elif name in ("Container", "Section", "ActionRow"):
+            children = (
+                getattr(comp, "children", None)
+                or getattr(comp, "components", None)
+                or []
+            )
+            sub_texts, sub_imgs = _components_v2_to_parts(children, _depth=_depth + 1)
+            texts.extend(sub_texts)
+            images.extend(sub_imgs)
+            # Section may have an accessory (Thumbnail, Button…)
+            accessory = getattr(comp, "accessory", None)
+            if accessory:
+                acc_texts, acc_imgs = _components_v2_to_parts([accessory], _depth=_depth + 1)
+                texts.extend(acc_texts)
+                images.extend(acc_imgs)
+
+        # MediaGallery — list of media items
+        elif name == "MediaGallery":
+            for item in getattr(comp, "items", []):
+                media = getattr(item, "media", None)
+                url = getattr(media, "url", None) if media else None
+                if url:
+                    images.append(url)
+
+        # Thumbnail / UnfurledMediaItem — single media
+        elif name in ("Thumbnail", "UnfurledMediaItem"):
+            media = getattr(comp, "media", None)
+            url = getattr(media, "url", None) if media else getattr(comp, "url", None)
+            if url:
+                images.append(url)
+
+    return texts, images
+
+
 def _embed_to_text(emb: discord.Embed) -> str:
     """Convertit un embed Discord en texte lisible pour le contexte."""
     lines: list[str] = []
@@ -93,6 +152,9 @@ class ChannelSession:
         cache_text = text.strip()
         if not cache_text and message.embeds:
             cache_text = _embed_to_text(message.embeds[0])[:200]
+        if not cache_text and message.components:
+            comp_texts, _ = _components_v2_to_parts(list(message.components))
+            cache_text = "\n".join(comp_texts)[:200]
         if cache_text:
             created = message.created_at
             if created.tzinfo is None:
@@ -126,6 +188,11 @@ class ChannelSession:
                 t = _embed_to_text(emb)
                 if t:
                     ref_lines.append(t[:300])
+            ref_comps = getattr(ref, "components", None)
+            if ref_comps:
+                comp_texts, _ = _components_v2_to_parts(list(ref_comps))
+                if comp_texts:
+                    ref_lines.append("\n".join(comp_texts)[:400])
             preview = " | ".join(ref_lines)[:500] if ref_lines else "(sans texte)"
             label = "ton message" if ref_is_bot else ref_name
             parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
@@ -166,6 +233,17 @@ class ChannelSession:
                 parts.append(ImageComponent(url, detail="low"))
             if emb.video and emb.video.url:
                 parts.append(TextComponent(f"[VIDEO: {emb.video.url}]"))
+
+        # Components v2 (LayoutView / composants v2)
+        if message.components:
+            comp_texts, comp_imgs = _components_v2_to_parts(list(message.components))
+            if comp_texts:
+                full = "\n".join(comp_texts)
+                parts.append(TextComponent(f"[LAYOUT]\n{full[:1200]}"))
+            for url in comp_imgs[:6]:
+                if url.lower().endswith(".gif"):
+                    url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
+                parts.append(ImageComponent(url, detail="low"))
 
         # Stickers
         for st in message.stickers:
