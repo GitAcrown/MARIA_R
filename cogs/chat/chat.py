@@ -1,5 +1,6 @@
 """Cog Chat — Maria GPT avec contexte restreint, profils, rappels."""
 
+import re
 import zoneinfo
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -67,6 +68,7 @@ OUTILS
 - Pour toute question sur l'actualité, des événements récents, des faits du monde réel (morts, sorties, résultats, news…) : utilise search_web immédiatement, sans demander de contexte supplémentaire. Ces questions concernent le monde extérieur.
 - Si il te manque du contexte de la discussion, tu peux faire une requête précise à search_context_cache pour obtenir des informations sur la discussion. N'hésite pas à le faire dès que nécessaire.
 - 'search_context_cache' est uniquement pour retrouver des choses dites précédemment dans CE salon.
+- 'schedule_reminder' / 'cancel_reminder' : pour les dates absolues ("à 17h", "demain matin") utilise le champ execute_at en ISO 8601 (ex. "2026-03-25T17:00:00"), fuseau Europe/Paris. Pour les délais relatifs utilise delay_minutes ou delay_hours.
 
 LIMITES
 - Pas d'exécution de code.
@@ -215,18 +217,13 @@ class InfoView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
 
 
-class ProfileModal(discord.ui.Modal, title="Profil et préférences"):
-    """Modal d'édition du profil utilisateur.
-    Affiche les notes dynamiques en lecture seule via TextDisplay (discord.py ≥ 2.5).
-    """
+class ProfileModal(discord.ui.Modal, title="Modifier mon profil"):
+    """Modal d'édition du profil utilisateur (texte libre)."""
 
-    def __init__(self, store: ProfileStore, user_id: int, profile: str, notes: str = ""):
+    def __init__(self, store: ProfileStore, user_id: int, profile: str):
         super().__init__()
         self.store = store
         self.user_id = user_id
-        if notes:
-            preview = notes[:300] + ("…" if len(notes) > 300 else "")
-            self.add_item(discord.ui.TextDisplay(f"**Notes gérées par Maria :**\n{preview}"))
         self.profile_input = discord.ui.TextInput(
             label="Profil (identité, préférences, compétences…)",
             style=discord.TextStyle.paragraph,
@@ -239,7 +236,64 @@ class ProfileModal(discord.ui.Modal, title="Profil et préférences"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self.store.set_profile(self.user_id, self.profile_input.value.strip())
-        await interaction.response.send_message("Profil mis à jour.", ephemeral=True)
+        new_view = PreferencesView(self.store, self.user_id)
+        await interaction.response.send_message(view=new_view, ephemeral=True)
+
+
+class _EditProfileButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, user_id: int):
+        super().__init__(label="Modifier le profil", style=discord.ButtonStyle.primary)
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Ce n'est pas ton profil.", ephemeral=True)
+        await interaction.response.send_modal(
+            ProfileModal(self.store, self.user_id, profile=self.store.get_profile(self.user_id))
+        )
+
+
+class _ResetNotesButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, user_id: int, has_notes: bool):
+        super().__init__(
+            label="Réinitialiser les notes",
+            style=discord.ButtonStyle.danger,
+            disabled=not has_notes,
+        )
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Ce n'est pas ton profil.", ephemeral=True)
+        self.store.set_notes(self.user_id, "")
+        await interaction.response.edit_message(view=PreferencesView(self.store, self.user_id))
+
+
+class PreferencesView(discord.ui.LayoutView):
+    """Affiche le profil et les notes de Maria, avec boutons d'action."""
+
+    def __init__(self, store: ProfileStore, user_id: int):
+        super().__init__(timeout=120)
+        profile = store.get_profile(user_id)
+        notes = store.get_notes(user_id)
+
+        children: list = [discord.ui.TextDisplay("## Mes préférences"), discord.ui.Separator()]
+        if profile:
+            children.append(discord.ui.TextDisplay(f"**Profil**\n{profile}"))
+        else:
+            children.append(discord.ui.TextDisplay("*Aucun profil défini. Clique sur « Modifier » pour en ajouter un.*"))
+        if notes:
+            preview = notes[:500] + ("…" if len(notes) > 500 else "")
+            children.append(discord.ui.Separator())
+            children.append(discord.ui.TextDisplay(f"**Notes de Maria**\n{preview}"))
+
+        self.add_item(discord.ui.Container(*children))
+        self.add_item(discord.ui.ActionRow(
+            _EditProfileButton(store, user_id),
+            _ResetNotesButton(store, user_id, bool(notes)),
+        ))
 
 
 class PersonalityModal(discord.ui.Modal, title="Personnalité du salon"):
@@ -403,16 +457,30 @@ class Chat(commands.Cog):
                 return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
             args = tc.arguments
             desc = (args.get("task_description") or "").strip()
-            total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
             if not desc:
                 return ToolResponseRecord(tc.id, {"error": "Description manquante"}, datetime.now(timezone.utc))
+
+            execute_at_str = (args.get("execute_at") or "").strip()
+            if execute_at_str:
+                try:
+                    execute_at = datetime.fromisoformat(execute_at_str)
+                    if execute_at.tzinfo is None:
+                        execute_at = execute_at.replace(tzinfo=PARIS_TZ)
+                    execute_at = execute_at.astimezone(timezone.utc)
+                except ValueError:
+                    return ToolResponseRecord(tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"}, datetime.now(timezone.utc))
+            else:
+                total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
+                execute_at = datetime.now(timezone.utc) + timedelta(minutes=total)
+
+            total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
             if total < 2:
-                return ToolResponseRecord(tc.id, {"error": "Délai minimum 2 min"}, datetime.now(timezone.utc))
+                return ToolResponseRecord(tc.id, {"error": "Date trop proche (minimum 2 min)"}, datetime.now(timezone.utc))
             if total > 43200:
-                return ToolResponseRecord(tc.id, {"error": "Délai max 30 jours"}, datetime.now(timezone.utc))
+                return ToolResponseRecord(tc.id, {"error": "Date trop lointaine (max 30 jours)"}, datetime.now(timezone.utc))
             if self.rappels.count_pending(ctx.trigger_message.author.id) >= 10:
                 return ToolResponseRecord(tc.id, {"error": "Max 10 rappels en attente"}, datetime.now(timezone.utc))
-            execute_at = datetime.now(timezone.utc) + timedelta(minutes=total)
+
             rid = self.rappels.add(
                 ctx.trigger_message.channel.id,
                 ctx.trigger_message.author.id,
@@ -427,11 +495,16 @@ class Chat(commands.Cog):
 
         tools.append(Tool(
             name="schedule_reminder",
-            description="Programme un rappel pour un utilisateur.",
+            description=(
+                "Programme un rappel. Utilise execute_at (ISO 8601) pour une date absolue "
+                "(ex. '2026-03-24T17:00:00' pour demain 17h — le fuseau par défaut est Europe/Paris), "
+                "ou delay_minutes/delay_hours pour un délai relatif. execute_at est prioritaire."
+            ),
             properties={
                 "task_description": {"type": "string", "description": "Description de la tâche"},
-                "delay_minutes": {"type": "integer", "description": "Délai en minutes"},
-                "delay_hours": {"type": "integer", "description": "Délai en heures"},
+                "execute_at": {"type": "string", "description": "Date/heure absolue ISO 8601 (prioritaire sur les délais)"},
+                "delay_minutes": {"type": "integer", "description": "Délai en minutes (si pas de execute_at)"},
+                "delay_hours": {"type": "integer", "description": "Délai en heures (si pas de execute_at)"},
             },
             function=_tool_schedule,
         ))
@@ -626,8 +699,10 @@ class Chat(commands.Cog):
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
         if mode == "off":
             return False
-        if mode == "greedy" and self.bot.user and self.bot.user.name.lower() in message.content.lower():
-            return True
+        if mode == "greedy" and self.bot.user:
+            pattern = r'(?<![a-z0-9_])' + re.escape(self.bot.user.name.lower()) + r'(?![a-z0-9_])'
+            if re.search(pattern, message.content.lower()):
+                return True
         if self.bot.user in message.mentions:
             return True
         if message.mention_everyone:
@@ -754,8 +829,19 @@ class Chat(commands.Cog):
                 label = f"**Lecture** — <{url}>"
             elif name == "schedule_reminder":
                 desc = args.get("task_description", "").strip()
-                total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
-                delay_str = f" · dans {_fmt_delay(total)}" if total else ""
+                execute_at_str = (args.get("execute_at") or "").strip()
+                if execute_at_str:
+                    try:
+                        dt = datetime.fromisoformat(execute_at_str)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=PARIS_TZ)
+                        ts = int(dt.timestamp())
+                        delay_str = f" · <t:{ts}:f>"
+                    except ValueError:
+                        delay_str = f" · {execute_at_str}"
+                else:
+                    total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
+                    delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = f'**Rappel planifié** — "{desc}"{delay_str}' if desc else "**Rappel planifié**"
             elif name == "cancel_reminder":
                 tid = args.get("task_id", "")
@@ -775,15 +861,11 @@ class Chat(commands.Cog):
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="preferences", description="Édite ton profil et consulte tes notes")
+    @app_commands.command(name="preferences", description="Consulte ton profil et les notes de Maria")
     async def cmd_preferences(self, interaction: discord.Interaction) -> None:
-        uid = interaction.user.id
-        await interaction.response.send_modal(
-            ProfileModal(
-                self.profiles, uid,
-                profile=self.profiles.get_profile(uid),
-                notes=self.profiles.get_notes(uid),
-            )
+        await interaction.response.send_message(
+            view=PreferencesView(self.profiles, interaction.user.id),
+            ephemeral=True,
         )
 
     @app_commands.command(name="rappels", description="Liste tes rappels en attente")
