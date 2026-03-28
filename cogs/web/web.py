@@ -308,29 +308,11 @@ class Web(commands.Cog):
             datetime.now(timezone.utc),
         )
 
-    def _screenshot_url(self, url: str) -> str | None:
-        """Vérifie que thum.io répond bien avant de renvoyer l'URL screenshot."""
-        screenshot_url = SCREENSHOT_API + url
-        try:
-            r = requests.head(screenshot_url, timeout=10, allow_redirects=True)
-            if r.status_code == 200:
-                return screenshot_url
-        except Exception as e:
-            logger.warning(f"Screenshot head check failed ({url}): {e}")
-        return None
-
     async def _tool_screenshot(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
             return ToolResponseRecord(tc.id, {"error": "URL invalide"}, datetime.now(timezone.utc))
-        loop = asyncio.get_event_loop()
-        screenshot_url = await loop.run_in_executor(None, self._screenshot_url, url)
-        if not screenshot_url:
-            return ToolResponseRecord(
-                tc.id,
-                {"error": f"Impossible de capturer {urlparse(url).netloc}"},
-                datetime.now(timezone.utc),
-            )
+        screenshot_url = SCREENSHOT_API + url
         logger.info(f"Screenshot: {url}")
         return ToolResponseRecord(
             tc.id,
