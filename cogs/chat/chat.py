@@ -1,7 +1,9 @@
 """Cog Chat — Maria GPT avec contexte restreint, profils, rappels."""
 
+import io
 import re
 import zoneinfo
+import requests as _req
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -868,10 +870,17 @@ class Chat(commands.Cog):
         # Envoyer les captures d'écran produites par screenshot_page
         for tr in resp.tool_responses:
             data = getattr(tr, "response_data", None)
-            if isinstance(data, dict) and "screenshot_url" in data:
-                embed = discord.Embed(url=data.get("source_url", data["screenshot_url"]))
-                embed.set_image(url=data["screenshot_url"])
-                await message.channel.send(embed=embed)
+            if not isinstance(data, dict) or "screenshot_url" not in data:
+                continue
+            try:
+                loop = asyncio.get_event_loop()
+                raw = await loop.run_in_executor(
+                    None,
+                    lambda u=data["screenshot_url"]: _req.get(u, timeout=20).content,
+                )
+                await message.channel.send(file=discord.File(io.BytesIO(raw), filename="screenshot.png"))
+            except Exception as e:
+                logger.warning(f"Envoi screenshot échoué : {e}")
 
     # ------------------------------------------------------------------
     # Slash commands
