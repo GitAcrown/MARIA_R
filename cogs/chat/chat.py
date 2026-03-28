@@ -865,6 +865,14 @@ class Chat(commands.Cog):
         quiet = self._is_quiet_channel(message.channel.id)
         await send_long(message.channel, text, reply_to=None if quiet else message)
 
+        # Envoyer les captures d'écran produites par screenshot_page
+        for tr in resp.tool_responses:
+            data = getattr(tr, "response_data", None)
+            if isinstance(data, dict) and "screenshot_url" in data:
+                embed = discord.Embed(url=data.get("source_url", data["screenshot_url"]))
+                embed.set_image(url=data["screenshot_url"])
+                await message.channel.send(embed=embed)
+
     # ------------------------------------------------------------------
     # Slash commands
     # ------------------------------------------------------------------
