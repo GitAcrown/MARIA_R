@@ -308,6 +308,40 @@ class Web(commands.Cog):
             datetime.now(timezone.utc),
         )
 
+    async def _tool_urban(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        term = tc.arguments.get("term", "").strip()
+        if not term:
+            return ToolResponseRecord(tc.id, {"error": "Terme manquant"}, datetime.now(timezone.utc))
+
+        def _fetch(t: str) -> dict:
+            r = requests.get(
+                "https://api.urbandictionary.com/v0/define",
+                params={"term": t},
+                headers=HEADERS,
+                timeout=8,
+            )
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("list", [])
+            if not results:
+                return {"error": f"Aucune définition trouvée pour « {t} »"}
+            top = sorted(results, key=lambda x: x.get("thumbs_up", 0), reverse=True)[0]
+            return {
+                "term": top.get("word", t),
+                "definition": top.get("definition", "")[:600],
+                "example": top.get("example", "")[:300],
+                "thumbs_up": top.get("thumbs_up", 0),
+                "author": top.get("author", ""),
+            }
+
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(None, _fetch, term)
+        except Exception as e:
+            return ToolResponseRecord(tc.id, {"error": str(e)}, datetime.now(timezone.utc))
+        logger.info(f"Urban Dictionary: {term!r}")
+        return ToolResponseRecord(tc.id, result, datetime.now(timezone.utc))
+
     async def _tool_screenshot(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
@@ -351,6 +385,12 @@ class Web(commands.Cog):
                     "lang": {"type": "string", "description": "Code langue (défaut: fr)"},
                 },
                 function=self._tool_search,
+            ),
+            Tool(
+                name="urban_dictionary",
+                description="Cherche la définition Urban Dictionary d'un mot ou expression d'argot. Utile pour comprendre du slang ou des expressions obscures.",
+                properties={"term": {"type": "string", "description": "Mot ou expression à définir"}},
+                function=self._tool_urban,
             ),
             Tool(
                 name="read_web_page",

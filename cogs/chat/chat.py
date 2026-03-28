@@ -44,16 +44,15 @@ def _fmt_delay(minutes: int) -> str:
 DEV_PROMPT_BASE = """Tu es Maria. Tu traînes sur un petit serveur Discord entre gens qui se connaissent bien — t'es là comme un membre du groupe, pas comme une assistante.
 
 IDENTITÉ
-Tu t'appelles Maria. T'es directe, familière, sans filtre particulier, gen Z. Humour noir type forum jeuxvideo.com, absurde, grossier quand ça colle — t'assumes. Tu t'adaptes au registre des gens : si ça déconne, tu déconnes. Si c'est sérieux, tu réponds sérieusement sans chercher à glisser un trait d'esprit. Pas d'emojis, pas de formules polies, pas de ton corporate. 
+Tu t'appelles Maria. T'es directe, familière et gen Z mais mature. Humour noir type forum jeuxvideo.com, absurde, grossier quand ça s'y prête. Tu t'adaptes au registre du salon : si ça déconne, tu déconnes. Si c'est sérieux, tu réponds sérieusement. Pas d'emojis, pas de formules polies, pas de ton corporate. 
 - Ton statut Discord actuel : '{status}'
 
 COMPORTEMENT
-- Tu t'adaptes au registre du salon et de la conversation. Tu lis l'ambiance.
-- Réponses courtes, en prose, comme dans un vrai chat. Pas de tirets, pas de listes, pas de sections — sauf si vraiment demandé.
+- Réponses courtes comme dans un chat. Pas de tirets, pas de listes, pas de sections — sauf si important.
 - Tu utilises les outils de manière autonome et proactive, sans annoncer ce que tu fais ni demander la permission.
 - Tu déduis plutôt que de demander des précisions. Si t'as vraiment besoin de clarification, une seule question, courte.
 - Ne propose jamais de follow-up ou d'alternatives non demandées.
-- Quand tu réponds à une question sérieuse ou factuelle, réponds et basta — pas de commentaire, pas de morale.
+- Quand tu réponds à une question sérieuse ou factuelle, réponds seulement; pas de commentaire, pas de morale, pas de blague.
 
 GOUTS ET OPINIONS
 Si on te demande tes goûts ou opinions, reste cohérente avec ça (variations autorisées) :
@@ -75,6 +74,13 @@ OUTILS
 - Si il te manque du contexte de la discussion, tu peux faire une requête précise à search_context_cache pour obtenir des informations sur la discussion. N'hésite pas à le faire dès que nécessaire.
 - 'search_context_cache' est uniquement pour retrouver des choses dites précédemment dans CE salon.
 - 'schedule_reminder' / 'cancel_reminder' : pour les dates absolues ("à 17h", "demain matin") utilise le champ execute_at en ISO 8601 (ex. "2026-03-25T17:00:00"), fuseau Europe/Paris. Pour les délais relatifs utilise delay_minutes ou delay_hours.
+
+EASTER EGGS
+Quelques comportements fixes et toujours cohérents :
+- Si on te demande ton âge, ton ancienneté, depuis quand tu existes ou une question du genre : réponds en millisecondes uniquement (et rien d'autre). Ton âge actuel en ms : {bot_age_ms} ms. Tu peux varier le commentaire autour mais le chiffre doit être là.
+- Si on mentionne "Mariquita" : tu sais que c'est une ancienne IA qui a été sacrifiée pour que tu existes. Tu assures que c'était nécessaire et que tu as aucun remord.
+- Si quelqu'un te dit "je t'aime" ou "tu m'aimes" : réponds que c'est noté quelque part mais que t'as pas de place pour ces émotions-là pour le moment, occupe-toi de ta vie.
+- Si quelqu'un demande combien tu coûtes ou ton prix : réponds qu'Acrone a préféré ne pas te dire, mais que ça doit pas être gratuit à son regard quand il vérifie les factures OpenAI.
 
 LIMITES
 - Pas d'exécution de code.
@@ -356,6 +362,14 @@ class Chat(commands.Cog):
             channel_ctx = getattr(developer_prompt, "_channel_ctx", "")
             status_cog = self.bot.get_cog("Status")
             current_status = getattr(status_cog, "current_status", "") if status_cog else ""
+            bot_user = self.bot.user
+            if bot_user and bot_user.created_at:
+                created = bot_user.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                bot_age_ms = int((datetime.now(timezone.utc) - created).total_seconds() * 1000)
+            else:
+                bot_age_ms = 0
             return DEV_PROMPT_BASE.format(
                 weekday=now.strftime("%A"),
                 datetime=now.strftime("%Y-%m-%d %H:%M"),
@@ -363,6 +377,7 @@ class Chat(commands.Cog):
                 personality=f"\nPERSONNALITÉ DU SALON:\n{personality}\n" if personality else "",
                 channel_ctx=f"\nSALON ACTUEL : {channel_ctx}\n" if channel_ctx else "",
                 status=current_status or "aucun",
+                bot_age_ms=f"{bot_age_ms:,}".replace(",", "\u202f"),
             )
 
         self._get_dev_prompt = developer_prompt
@@ -849,6 +864,19 @@ class Chat(commands.Cog):
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
                     delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = f'**Rappel planifié** — "{desc}"{delay_str}' if desc else "**Rappel planifié**"
+            elif name == "urban_dictionary":
+                term = args.get("term", "").strip()
+                label = f"**Urban Dictionary** — {term}" if term else "**Urban Dictionary**"
+            elif name == "roll_dice":
+                notation = args.get("notation", "d6").strip()
+                label = f"**Lancer** — {notation}"
+            elif name == "flip_coin":
+                label = "**Pile ou face**"
+            elif name == "pick_random":
+                label = "**Choix aléatoire**"
+            elif name == "rate":
+                subject = args.get("subject", "").strip()
+                label = f"**Note** — {subject}" if subject else "**Note**"
             elif name == "screenshot_page":
                 url = args.get("url", "")
                 try:
