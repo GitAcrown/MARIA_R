@@ -360,7 +360,7 @@ class Web(commands.Cog):
             ),
             Tool(
                 name="screenshot_page",
-                description="Prend une capture d'écran d'une page web et l'affiche. Utile pour voir le rendu visuel d'un site.",
+                description="Prend une capture d'écran d'une page web. Le système envoie l'image automatiquement — ne répète pas l'URL, décris simplement ce que tu vois.",
                 properties={"url": {"type": "string", "description": "URL complète de la page à capturer"}},
                 function=self._tool_screenshot,
             ),

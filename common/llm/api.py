@@ -94,6 +94,8 @@ class MariaGptApi:
                             used_tools.insert(0, {"name": tc.function_name, "args": tc.arguments or {}})
                             seen_names.add(tc.function_name)
             elif m.role == "user":
+                if getattr(m, "name", None) == "system":
+                    continue  # message injecté par un outil (ex. screenshot vision), pas le vrai trigger
                 break
 
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)

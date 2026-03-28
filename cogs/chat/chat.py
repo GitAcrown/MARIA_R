@@ -1,15 +1,18 @@
 """Cog Chat — Maria GPT avec contexte restreint, profils, rappels."""
 
+import asyncio
 import io
+import logging
 import re
 import zoneinfo
-import requests as _req
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
 import discord
+
+logger = logging.getLogger("MARIA.Chat")
 from discord import app_commands
 from discord.ext import commands
 
@@ -868,19 +871,30 @@ class Chat(commands.Cog):
         await send_long(message.channel, text, reply_to=None if quiet else message)
 
         # Envoyer les captures d'écran produites par screenshot_page
-        for tr in resp.tool_responses:
-            data = getattr(tr, "response_data", None)
-            if not isinstance(data, dict) or "screenshot_url" not in data:
+        for t in resp.used_tools:
+            if t["name"] != "screenshot_page":
                 continue
+            src_url = t["args"].get("url", "").strip()
+            if not src_url:
+                continue
+            screenshot_url = f"https://image.thum.io/get/width/1280/crop/900/{src_url}"
             try:
                 loop = asyncio.get_event_loop()
-                raw = await loop.run_in_executor(
-                    None,
-                    lambda u=data["screenshot_url"]: _req.get(u, timeout=20).content,
-                )
+
+                def _download(u: str) -> bytes:
+                    import requests as _req
+                    r = _req.get(u, timeout=30, allow_redirects=True)
+                    r.raise_for_status()
+                    ct = r.headers.get("content-type", "")
+                    if "image" not in ct:
+                        raise ValueError(f"Content-Type inattendu : {ct}")
+                    return r.content
+
+                raw = await loop.run_in_executor(None, _download, screenshot_url)
+                logger.info(f"Screenshot téléchargé : {len(raw)} octets pour {src_url}")
                 await message.channel.send(file=discord.File(io.BytesIO(raw), filename="screenshot.png"))
             except Exception as e:
-                logger.warning(f"Envoi screenshot échoué : {e}")
+                logger.error(f"Envoi screenshot échoué ({src_url}): {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # Slash commands
