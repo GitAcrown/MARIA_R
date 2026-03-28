@@ -843,6 +843,13 @@ class Chat(commands.Cog):
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
                     delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = f'**Rappel planifié** — "{desc}"{delay_str}' if desc else "**Rappel planifié**"
+            elif name == "screenshot_page":
+                url = args.get("url", "")
+                try:
+                    domain = urlparse(url).netloc.removeprefix("www.")
+                except Exception:
+                    domain = ""
+                label = f"**Capture d'écran** — {domain}" if domain else "**Capture d'écran**"
             elif name == "cancel_reminder":
                 tid = args.get("task_id", "")
                 label = f"**Rappel #{tid} annulé**" if tid else "**Rappel annulé**"

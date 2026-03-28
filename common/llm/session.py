@@ -359,6 +359,14 @@ class ChannelSession:
             try:
                 resp = await tool.execute(tc, self)
                 self.context.add_message(resp)
+                # Si le tool fournit une image (ex. screenshot_page), l'injecter en vision
+                if isinstance(getattr(resp, "response_data", None), dict):
+                    img_url = resp.response_data.get("screenshot_url")
+                    if img_url:
+                        self.context.add_user_message(
+                            components=[ImageComponent(img_url, detail="high")],
+                            name="system",
+                        )
             except Exception as e:
                 logger.error(f"Outil {tc.function_name}: {e}")
                 self.context.add_message(

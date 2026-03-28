@@ -34,6 +34,7 @@ DIFFICULT_DOMAINS = {"twitter.com", "x.com", "facebook.com", "instagram.com", "r
 SEARCH_CACHE_SEC = 300
 PAGE_CACHE_HOURS = 12
 CHUNK_SIZE = 2000
+SCREENSHOT_API = "https://image.thum.io/get/width/1280/crop/900/"
 
 
 class Web(commands.Cog):
@@ -307,6 +308,36 @@ class Web(commands.Cog):
             datetime.now(timezone.utc),
         )
 
+    def _screenshot_url(self, url: str) -> str | None:
+        """Vérifie que thum.io répond bien avant de renvoyer l'URL screenshot."""
+        screenshot_url = SCREENSHOT_API + url
+        try:
+            r = requests.head(screenshot_url, timeout=10, allow_redirects=True)
+            if r.status_code == 200:
+                return screenshot_url
+        except Exception as e:
+            logger.warning(f"Screenshot head check failed ({url}): {e}")
+        return None
+
+    async def _tool_screenshot(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        url = tc.arguments.get("url", "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            return ToolResponseRecord(tc.id, {"error": "URL invalide"}, datetime.now(timezone.utc))
+        loop = asyncio.get_event_loop()
+        screenshot_url = await loop.run_in_executor(None, self._screenshot_url, url)
+        if not screenshot_url:
+            return ToolResponseRecord(
+                tc.id,
+                {"error": f"Impossible de capturer {urlparse(url).netloc}"},
+                datetime.now(timezone.utc),
+            )
+        logger.info(f"Screenshot: {url}")
+        return ToolResponseRecord(
+            tc.id,
+            {"screenshot_url": screenshot_url, "source_url": url},
+            datetime.now(timezone.utc),
+        )
+
     async def _tool_read(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
@@ -344,6 +375,12 @@ class Web(commands.Cog):
                 description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants.",
                 properties={"url": {"type": "string", "description": "URL complète"}},
                 function=self._tool_read,
+            ),
+            Tool(
+                name="screenshot_page",
+                description="Prend une capture d'écran d'une page web et l'affiche. Utile pour voir le rendu visuel d'un site.",
+                properties={"url": {"type": "string", "description": "URL complète de la page à capturer"}},
+                function=self._tool_screenshot,
             ),
         ]
 
