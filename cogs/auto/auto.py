@@ -1,4 +1,4 @@
-"""Cog Auto — transcription audio à la demande (réaction 📜) et automatique."""
+"""Cog Auto — transcription audio à la demande (réaction 🎙️) et automatique."""
 
 import io
 import logging
@@ -15,7 +15,7 @@ AUTO_TRANSCRIBE_MAX_SECS = 120
 
 
 class Auto(commands.Cog):
-    """Transcription audio — réaction 📜 sur message audio pour transcrire."""
+    """Transcription audio — réaction 🎙️ sur message audio pour transcrire."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -95,7 +95,7 @@ class Auto(commands.Cog):
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
         suffix = f"\n-# Transcription demandée par {requester_name}" if requester_name else "\n-# Transcription automatique"
-        await reply_to.reply(f"> {transcript}{suffix}", mention_author=False)
+        await reply_to.reply(f"```\n{transcript}\n```{suffix}", mention_author=False)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -112,11 +112,11 @@ class Auto(commands.Cog):
 
         has_audio = any(self._is_audio(a) for a in message.attachments)
         if has_audio:
-            await message.add_reaction("📜")
+            await message.add_reaction("🎙️")
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
-        if user.bot or str(reaction.emoji) != "📜":
+        if user.bot or str(reaction.emoji) != "🎙️":
             return
         msg = reaction.message
         audio_att = next((a for a in msg.attachments if self._is_audio(a)), None)
