@@ -159,7 +159,12 @@ class ChannelSession:
             created = message.created_at
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
-            self.message_cache.push(self.channel_id, user_name, cache_text, created)
+            reply_to: Optional[str] = None
+            if message.reference and message.reference.resolved:
+                ref_author = getattr(message.reference.resolved, "author", None)
+                if ref_author:
+                    reply_to = getattr(ref_author, "display_name", None) or getattr(ref_author, "name", None)
+            self.message_cache.push(self.channel_id, user_name, cache_text, created, reply_to=reply_to)
 
         # ---- Messages contexte-seul : on s'arrête ici ----
         if is_context_only:

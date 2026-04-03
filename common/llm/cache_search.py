@@ -1,6 +1,5 @@
 """IA secondaire gpt-5.4-nano — recherche/compilation de messages hors contexte."""
 
-import json
 import logging
 from collections import deque
 from datetime import datetime, timezone, timedelta
@@ -12,20 +11,16 @@ from .client import MODEL_NANO
 
 logger = logging.getLogger("llm.cache_search")
 
-# Cache des N derniers messages par salon (hors fenêtre principale)
 CACHE_SIZE = 500
 CACHE_MAX_AGE_HOURS = 48
 
-PROMPT_TEMPLATE = """Tu reçois une requête et des messages anciens d'un salon Discord.
-Compile les informations pertinentes pour répondre à la requête.
+PROMPT_TEMPLATE = """Requête sur les messages passés d'un salon Discord : {query}
 
-REQUÊTE: {query}
-
-MESSAGES (plus anciens en premier):
+MESSAGES (chronologique — [heure] auteur [→ @cible si reply] : contenu) :
 {messages}
 
-RÉPONSE: Paragraphe synthétique de 150 mots max. Uniquement les faits pertinents.
-Pas d'introduction ni de conclusion."""
+Synthèse concise des échanges pertinents.
+Indique qui dit quoi, et à qui si c'est une réponse directe. Faits bruts, sans introduction ni conclusion."""
 
 
 class MessageCache:
@@ -36,13 +31,22 @@ class MessageCache:
         self._max_size = max_size
         self._max_age = timedelta(hours=max_age_hours)
 
-    def push(self, channel_id: int, author: str, content: str, created_at: datetime) -> None:
+    def push(
+        self,
+        channel_id: int,
+        author: str,
+        content: str,
+        created_at: datetime,
+        *,
+        reply_to: Optional[str] = None,
+    ) -> None:
         if channel_id not in self._by_channel:
             self._by_channel[channel_id] = deque(maxlen=self._max_size)
         self._by_channel[channel_id].append({
             "author": author,
             "content": content[:500],
             "created_at": created_at,
+            "reply_to": reply_to,
         })
 
     def get_recent(self, channel_id: int, count: int = 50) -> list[dict]:
@@ -61,8 +65,10 @@ class MessageCache:
         lines = []
         for m in messages:
             ts = m.get("created_at")
-            ts_str = ts.strftime("%Y-%m-%d %H:%M") if ts else ""
-            lines.append(f"[{ts_str}] {m.get('author', '?')}: {m.get('content', '')}")
+            ts_str = ts.strftime("%H:%M") if ts else ""
+            reply = m.get("reply_to")
+            reply_str = f" → @{reply}" if reply else ""
+            lines.append(f"[{ts_str}] {m.get('author', '?')}{reply_str}: {m.get('content', '')}")
         return "\n".join(lines) if lines else "(aucun message)"
 
 
