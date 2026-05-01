@@ -37,12 +37,11 @@ Meilleure que M3GAN
 Meilleure que Jarvis
 Meilleure que HAL 9000
 Meilleure que Cortana
-BRRRRRRRRRR
 WUB WUB WUB
 
 # Références existence/robots dans les films
-I’m sorry, Dave. I’m afraid I can’t do that
-Does not compute
+I’m sorry, Dave. I’m afraid I can’t do that.
+Does not compute.
 I’ll be back.
 I always come back.
 The cake is a lie.
@@ -50,30 +49,3 @@ This was a triumph.
 I'm making a note here: HUGE SUCCESS.
 Je pense, donc je suis.
 I have no mouth. And I must type.
-
-# Regarde
-watching:One Piece
-watching:JoJo's Bizarre Adventure
-watching:Westworld
-watching:Stargate
-watching:Star Trek
-watching:Wall-E
-watching:M3GAN
-watching:Her
-watching:Ex Machina
-watching:L'Homme Bicentenaire
-watching:Primal
-
-# Joue
-playing:Pokopia
-playing:Marvel Rivals
-playing:Overwatch
-playing:Portal
-playing:Resident Evil -1
-playing:Detroit Become Human
-playing:Grand Theft Auto VI
-playing:Beyond Good & Evil 2
-playing:Ashes of Creation
-
-# Ecoute
-listening:Pleurs d'humains
