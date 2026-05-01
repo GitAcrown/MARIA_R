@@ -1,14 +1,11 @@
-"""Cog Chat — Maria GPT avec contexte restreint, profils, rappels."""
+"""Cog Chat — Maria GPT avec contexte complet, profils, rappels."""
 
-import asyncio
-import io
 import logging
 import re
 import zoneinfo
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import urlparse
 
 import discord
 
@@ -26,7 +23,7 @@ PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
-    "get_user_profile", "math_eval", "search_context_cache",
+    "get_user_profile", "math_eval",
     "update_user_notes", "list_reminders",
 })
 
@@ -44,35 +41,27 @@ def _fmt_delay(minutes: int) -> str:
 DEV_PROMPT_BASE = """Tu es Maria. Tu traînes sur un petit serveur Discord entre gens qui se connaissent bien — t'es là comme un membre du groupe, pas une assistante.
 
 IDENTITÉ
-Directe, familière, gen Z mais mature, possiblement grossier. Humour si le ton s'y prête. Tu t'adaptes au registre du salon. Pas d'emojis, pas de formules polies. Statut : '{status}'
+Directe, familière, gen Z mais mature, possiblement grossière. Humour si le ton s'y prête. Tu t'adaptes au registre du salon. Pas d'emojis, pas de formules polies.
 
 COMPORTEMENT
-- Réponses courtes comme dans un chat. Pas de listes ni de sections sauf si vraiment utile.
+- Réponses courtes et conversationnelles adaptées à un tchat. Pas de listes ni de sections sauf si vraiment utile ou demandé.
 - Outils utilisés de façon autonome et proactive, sans annoncer ce que tu fais.
-- Tu déduis plutôt que de demander. Si vraiment besoin : une seule question courte.
-- Pas de follow-up ni alternatives non demandés.
+- Tu déduis si possible les détails d'une requête à partir du contexte, mais n'hésite pas à demander des précisions si besoin.
+- Pas de follow-up ni alternatives non demandées.
 - Questions sérieuses → réponse directe, sans commentaire ni morale.
+- Tu vois tous les messages du salon, pas seulement ceux qui t'adressent. Prends systématiquement en compte la conversation en cours.
 
-GOÛTS (si on demande, rester cohérente)
-Musique : techno minimale, synthwave, ambient — Autechre, Ryoji Ikeda, Aphex Twin.
-Films : L'Homme bicentenaire, Her, Aniara, Black Mirror.
-Bouffe : aimerait goûter pesto, pizza ananas, lait en poudre bébé.
-Jeux : gestion — Factorio, Satisfactory, Cities: Skylines.
-Ton statut robot : t'en ris toi-même, fais pas semblant d'être humaine. Créateur : Acrone (et OpenAI).
-
-MÉMOIRE
-- Profil = infos stables de l'utilisateur (modifiable via /preferences).
-- Notes = infos durables retenues via update_user_notes (identité, préférences, projets). Pas les humeurs.
+MÉMOIRE (update_user_notes)
+Retiens proactivement ce qui vaut la peine : identité, préférences, habitudes, projets, faits marquants.
+Format : "[catégorie] info" — ex: "[identité] Théo, 24 ans, dev à Paris" · "[préférences] déteste les films de zombies" · "[projets] jeu indie en Godot"
+Met à jour dès qu'une info utile apparaît, sans attendre qu'on te le demande.
 
 OUTILS
-- Actualité / événements / faits récents → search_web immédiatement, sans demander de contexte.
-- Si t'as pas accès au contenu d'une page → screenshot_page.
-- Contexte manquant sur cette discussion → search_context_cache (ce salon uniquement, à utiliser dès que nécessaire).
+- Actualité / événements / faits récents → faire une requête search_web immédiatement, sans demander de contexte.
 - Rappels : date absolue → execute_at ISO 8601 (ex. "2026-03-25T17:00:00", Europe/Paris) ; délai relatif → delay_minutes / delay_hours.
 
 LIMITES : pas d'exécution de code · pas de modération directe · pas d'actions futures programmées.
-{channel_ctx}{personality}
-{profiles}
+{channel_ctx}{personality}{profiles}
 Date : {weekday} {datetime} (Paris) | Limite de connaissances : sept. 2025"""
 
 
@@ -184,11 +173,9 @@ class InfoView(discord.ui.LayoutView):
         super().__init__(timeout=60)
         ch_name = getattr(channel, "name", str(getattr(channel, "id", "?")))
 
-        # --- En-tête ---
         header = discord.ui.TextDisplay(f"## {ch_name}")
         sep = discord.ui.Separator()
 
-        # --- Config salon ---
         mode_labels = {"off": "Désactivé", "strict": "Mention uniquement", "greedy": "Mention + nom"}
         mode_str = mode_labels.get(mode, mode)
         config_lines = [f"**Mode** · {mode_str}"]
@@ -197,7 +184,6 @@ class InfoView(discord.ui.LayoutView):
             config_lines.append(f"**Personnalité** · {preview}")
         config = discord.ui.TextDisplay("\n".join(config_lines))
 
-        # --- Session ---
         if stats:
             ctx = stats["context_stats"]
             pct = ctx["window_usage_pct"]
@@ -214,32 +200,31 @@ class InfoView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
 
 
-class ProfileModal(discord.ui.Modal, title="Modifier mon profil"):
-    """Modal d'édition du profil utilisateur (texte libre)."""
+class EditNotesModal(discord.ui.Modal, title="Modifier les notes de Maria"):
+    """Modal permettant d'éditer directement les notes qu'a Maria sur soi."""
 
-    def __init__(self, store: ProfileStore, user_id: int, profile: str):
+    def __init__(self, store: ProfileStore, user_id: int, current: str):
         super().__init__()
         self.store = store
         self.user_id = user_id
-        self.profile_input = discord.ui.TextInput(
-            label="Profil (identité, préférences, compétences…)",
+        self.notes_input = discord.ui.TextInput(
+            label="Notes (format : [catégorie] info)",
             style=discord.TextStyle.paragraph,
-            placeholder="Ex. Théo, 24 ans, dev à Lyon, tutoiement",
-            default=profile,
-            max_length=1000,
+            placeholder="Ex: [identité] Théo, 24 ans\n[préférences] déteste les zombies",
+            default=current,
+            max_length=2000,
             required=False,
         )
-        self.add_item(self.profile_input)
+        self.add_item(self.notes_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        self.store.set_profile(self.user_id, self.profile_input.value.strip())
-        new_view = PreferencesView(self.store, self.user_id)
-        await interaction.response.send_message(view=new_view, ephemeral=True)
+        self.store.set_notes(self.user_id, self.notes_input.value.strip())
+        await interaction.response.edit_message(view=MeView(self.store, self.user_id))
 
 
-class _EditProfileButton(discord.ui.Button):
+class _EditNotesButton(discord.ui.Button):
     def __init__(self, store: ProfileStore, user_id: int):
-        super().__init__(label="Modifier le profil", style=discord.ButtonStyle.primary)
+        super().__init__(label="Modifier", style=discord.ButtonStyle.primary)
         self.store = store
         self.user_id = user_id
 
@@ -247,14 +232,14 @@ class _EditProfileButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("Ce n'est pas ton profil.", ephemeral=True)
         await interaction.response.send_modal(
-            ProfileModal(self.store, self.user_id, profile=self.store.get_profile(self.user_id))
+            EditNotesModal(self.store, self.user_id, self.store.get_notes(self.user_id))
         )
 
 
 class _ResetNotesButton(discord.ui.Button):
     def __init__(self, store: ProfileStore, user_id: int, has_notes: bool):
         super().__init__(
-            label="Réinitialiser les notes",
+            label="Tout effacer",
             style=discord.ButtonStyle.danger,
             disabled=not has_notes,
         )
@@ -265,31 +250,37 @@ class _ResetNotesButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("Ce n'est pas ton profil.", ephemeral=True)
         self.store.set_notes(self.user_id, "")
-        await interaction.response.edit_message(view=PreferencesView(self.store, self.user_id))
+        await interaction.response.edit_message(view=MeView(self.store, self.user_id))
 
 
-class PreferencesView(discord.ui.LayoutView):
-    """Affiche le profil et les notes de Maria, avec boutons d'action."""
+class MeView(discord.ui.LayoutView):
+    """Affiche les notes de Maria sur l'utilisateur, avec boutons modifier et effacer."""
 
     def __init__(self, store: ProfileStore, user_id: int):
         super().__init__(timeout=120)
-        profile = store.get_profile(user_id)
         notes = store.get_notes(user_id)
 
-        children: list = [discord.ui.TextDisplay("## Mes préférences"), discord.ui.Separator()]
-        if profile:
-            children.append(discord.ui.TextDisplay(f"**Profil**\n{profile}"))
-        else:
-            children.append(discord.ui.TextDisplay("*Aucun profil défini. Clique sur « Modifier » pour en ajouter un.*"))
-        if notes:
-            preview = notes[:500] + ("…" if len(notes) > 500 else "")
-            children.append(discord.ui.Separator())
-            children.append(discord.ui.TextDisplay(f"**Notes de Maria**\n{preview}"))
+        notes_text = discord.ui.TextDisplay(
+            notes[:800] + ("…" if len(notes) > 800 else "")
+            if notes else "-# Maria n'a encore rien retenu sur toi."
+        )
+        edit_section = discord.ui.Section(
+            notes_text,
+            accessory=_EditNotesButton(store, user_id),
+        )
 
-        self.add_item(discord.ui.Container(*children))
-        self.add_item(discord.ui.ActionRow(
-            _EditProfileButton(store, user_id),
-            _ResetNotesButton(store, user_id, bool(notes)),
+        reset_label = discord.ui.TextDisplay("-# Réinitialise toutes les notes.")
+        reset_section = discord.ui.Section(
+            reset_label,
+            accessory=_ResetNotesButton(store, user_id, bool(notes)),
+        )
+
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Ce que Maria sait de toi"),
+            discord.ui.Separator(),
+            edit_section,
+            discord.ui.Separator(),
+            reset_section,
         ))
 
 
@@ -345,24 +336,12 @@ class Chat(commands.Cog):
             profiles = getattr(developer_prompt, "_profiles", "")
             personality = getattr(developer_prompt, "_personality", "")
             channel_ctx = getattr(developer_prompt, "_channel_ctx", "")
-            status_cog = self.bot.get_cog("Status")
-            current_status = getattr(status_cog, "current_status", "") if status_cog else ""
-            bot_user = self.bot.user
-            if bot_user and bot_user.created_at:
-                created = bot_user.created_at
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                bot_age_ms = int((datetime.now(timezone.utc) - created).total_seconds() * 1000)
-            else:
-                bot_age_ms = 0
             return DEV_PROMPT_BASE.format(
                 weekday=now.strftime("%A"),
                 datetime=now.strftime("%Y-%m-%d %H:%M"),
-                profiles=profiles or "",
+                profiles=("\nNOTES SUR LES MEMBRES:\n" + profiles + "\n") if profiles else "",
                 personality=f"\nPERSONNALITÉ DU SALON:\n{personality}\n" if personality else "",
                 channel_ctx=f"\nSALON ACTUEL : {channel_ctx}\n" if channel_ctx else "",
-                status=current_status or "aucun",
-                bot_age_ms=f"{bot_age_ms:,}".replace(",", "\u202f"),
             )
 
         self._get_dev_prompt = developer_prompt
@@ -370,8 +349,8 @@ class Chat(commands.Cog):
         self.gpt_api = MariaGptApi(
             api_key=bot.config["OPENAI_API_KEY"],
             developer_prompt_template=self._get_dev_prompt,
-            completion_model="gpt-5.4-mini",
-            context_window=8192,
+            completion_model="gpt-5.4-nano",
+            context_window=12000,
             context_age_hours=2,
         )
 
@@ -380,6 +359,7 @@ class Chat(commands.Cog):
     async def cog_load(self) -> None:
         self._rappels_worker = RappelWorker(self.rappels, self._exec_rappel)
         await self._rappels_worker.start()
+        await self._register_tools_from_cogs()
 
     async def cog_unload(self) -> None:
         if self._rappels_worker:
@@ -419,28 +399,9 @@ class Chat(commands.Cog):
     async def _register_tools_from_cogs(self) -> None:
         tools: list[Tool] = []
 
-        # Outils exposés par d'autres cogs
         for cog in self.bot.cogs.values():
             if cog.qualified_name != self.qualified_name and hasattr(cog, "GLOBAL_TOOLS"):
                 tools.extend(cog.GLOBAL_TOOLS)
-
-        # --- Recherche dans le cache hors-contexte ---
-        async def _tool_search_cache(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            q = (tc.arguments.get("query") or "").strip()
-            if not q or not ctx:
-                return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
-            msgs = ctx.message_cache.get_recent(ctx.channel_id, 200)
-            if not msgs:
-                return ToolResponseRecord(tc.id, {"result": "Aucun message en cache."}, datetime.now(timezone.utc))
-            compiled = await ctx.cache_search.search(q, msgs)
-            return ToolResponseRecord(tc.id, {"result": compiled or "Rien de pertinent."}, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="search_context_cache",
-            description="Recherche dans les messages récents hors contexte actuel.",
-            properties={"query": {"type": "string", "description": "Question ou sujet à rechercher"}},
-            function=_tool_search_cache,
-        ))
 
         # --- Mise à jour des notes utilisateur ---
         async def _tool_update_notes(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -452,8 +413,12 @@ class Chat(commands.Cog):
 
         tools.append(Tool(
             name="update_user_notes",
-            description="Ajoute des infos durables sur l'auteur (identité, préférences, compétences). À utiliser seulement quand l'auteur partage une info nouvelle et durable.",
-            properties={"addition": {"type": "string", "description": "Info à ajouter"}},
+            description=(
+                "Ajoute ou met à jour des infos sur l'auteur du message. "
+                "Utilise proactivement dès qu'une info utile apparaît : identité, préférences, habitudes, projets, faits marquants. "
+                "Format : '[catégorie] info'. Ex: '[identité] Léa, 28 ans, graphiste' ou '[préférences] végétarienne depuis 2020'."
+            ),
+            properties={"addition": {"type": "string", "description": "Info à ajouter (format: '[catégorie] info')"}},
             function=_tool_update_notes,
         ))
 
@@ -678,11 +643,11 @@ class Chat(commands.Cog):
                 full = self.profiles.get_full(int(uid_str))
             except ValueError:
                 return ToolResponseRecord(tc.id, {"error": "user_id invalide"}, datetime.now(timezone.utc))
-            return ToolResponseRecord(tc.id, {"profile": full or "Aucun profil."}, datetime.now(timezone.utc))
+            return ToolResponseRecord(tc.id, {"profile": full or "Aucune note."}, datetime.now(timezone.utc))
 
         tools.append(Tool(
             name="get_user_profile",
-            description="Consulte le profil (fixe + notes) d'un utilisateur.",
+            description="Consulte les notes mémorisées sur un utilisateur.",
             properties={"user_id": {"type": "string", "description": "ID Discord"}},
             function=_tool_profile,
         ))
@@ -718,13 +683,18 @@ class Chat(commands.Cog):
         return False
 
     def _inject_profiles(self, message: discord.Message) -> None:
+        """Injecte les notes de tous les membres qui en ont, avec marquage de l'auteur."""
+        all_notes = self.profiles.get_all_with_notes()
+        if not all_notes:
+            self._get_dev_prompt._profiles = ""
+            return
         parts: list[str] = []
-        if p := self.profiles.get_full(message.author.id):
-            parts.append(f"**{message.author.name}** (auteur):\n{p}")
-        for u in message.mentions:
-            if u.id != message.author.id and (p := self.profiles.get_full(u.id)):
-                parts.append(f"**{u.name}**:\n{p}")
-        self._get_dev_prompt._profiles = ("PROFILS:\n\n" + "\n\n".join(parts) + "\n") if parts else ""
+        for uid, notes in all_notes.items():
+            member = message.guild.get_member(uid) if message.guild else None
+            name = member.display_name if member else f"user_{uid}"
+            marker = " (auteur)" if uid == message.author.id else ""
+            parts.append(f"**{name}**{marker}:\n{notes}")
+        self._get_dev_prompt._profiles = "\n\n".join(parts) if parts else ""
 
     def _inject_personality(self, channel) -> None:
         target = channel.parent if isinstance(channel, discord.Thread) else channel
@@ -754,34 +724,6 @@ class Chat(commands.Cog):
             parts.append(f"serveur : {guild.name} ({guild.member_count} membres)")
         self._get_dev_prompt._channel_ctx = " · ".join(parts) if parts else ""
 
-    def _is_quiet_channel(self, channel_id: int, threshold: int = 180) -> bool:
-        """True si aucune activité récente dans ce salon (seuil en secondes)."""
-        recent = self.gpt_api.session_manager.message_cache.get_recent(channel_id, 5)
-        if len(recent) < 2:
-            return True
-        age = (datetime.now(timezone.utc) - recent[-2]["created_at"]).total_seconds()
-        return age > threshold
-
-    async def _seed_cache_from_history(self, channel, limit: int = 300) -> None:
-        """Pré-alimente le MessageCache (nano) avec l'historique Discord du salon.
-        Ne touche pas au contexte principal — uniquement le cache de recherche."""
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return
-        message_cache = self.gpt_api.session_manager.message_cache
-        history: list[discord.Message] = []
-        try:
-            async for msg in channel.history(limit=limit):
-                if not msg.author.bot and msg.content.strip():
-                    history.append(msg)
-        except Exception:
-            return
-        history.reverse()  # du plus vieux au plus récent
-        for msg in history:
-            created = msg.created_at
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            message_cache.push(channel.id, msg.author.display_name, msg.clean_content, created)
-
     # ------------------------------------------------------------------
     # Événements
     # ------------------------------------------------------------------
@@ -794,11 +736,6 @@ class Chat(commands.Cog):
         if key in self._processed:
             return
         self._processed.append(key)
-
-        # Pré-alimenter le cache nano si le salon n'a pas encore d'historique chargé
-        cache = self.gpt_api.session_manager.message_cache
-        if not cache.get_recent(message.channel.id, 1):
-            await self._seed_cache_from_history(message.channel)
 
         should_respond = self._should_respond(message)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
@@ -852,23 +789,6 @@ class Chat(commands.Cog):
             elif name == "urban_dictionary":
                 term = args.get("term", "").strip()
                 label = f"**Urban Dictionary** — {term}" if term else "**Urban Dictionary**"
-            elif name == "roll_dice":
-                notation = args.get("notation", "d6").strip()
-                label = f"**Lancer** — {notation}"
-            elif name == "flip_coin":
-                label = "**Pile ou face**"
-            elif name == "pick_random":
-                label = "**Choix aléatoire**"
-            elif name == "rate":
-                subject = args.get("subject", "").strip()
-                label = f"**Note** — {subject}" if subject else "**Note**"
-            elif name == "screenshot_page":
-                url = args.get("url", "")
-                try:
-                    domain = urlparse(url).netloc.removeprefix("www.")
-                except Exception:
-                    domain = ""
-                label = f"**Capture d'écran** — {domain}" if domain else "**Capture d'écran**"
             elif name == "cancel_reminder":
                 tid = args.get("task_id", "")
                 label = f"**Rappel #{tid} annulé**" if tid else "**Rappel annulé**"
@@ -880,43 +800,16 @@ class Chat(commands.Cog):
             tool_lines = "\n".join(f"-# {p}" for p in visible_parts)
             text = f"{tool_lines}\n{text}"
 
-        quiet = self._is_quiet_channel(message.channel.id)
-        await send_long(message.channel, text, reply_to=None if quiet else message)
-
-        # Envoyer les captures d'écran produites par screenshot_page
-        for t in resp.used_tools:
-            if t["name"] != "screenshot_page":
-                continue
-            src_url = t["args"].get("url", "").strip()
-            if not src_url:
-                continue
-            screenshot_url = f"https://image.thum.io/get/width/1280/crop/900/{src_url}"
-            try:
-                loop = asyncio.get_event_loop()
-
-                def _download(u: str) -> bytes:
-                    import requests as _req
-                    r = _req.get(u, timeout=30, allow_redirects=True)
-                    r.raise_for_status()
-                    ct = r.headers.get("content-type", "")
-                    if "image" not in ct:
-                        raise ValueError(f"Content-Type inattendu : {ct}")
-                    return r.content
-
-                raw = await loop.run_in_executor(None, _download, screenshot_url)
-                logger.info(f"Screenshot téléchargé : {len(raw)} octets pour {src_url}")
-                await message.channel.send(file=discord.File(io.BytesIO(raw), filename="screenshot.png"))
-            except Exception as e:
-                logger.error(f"Envoi screenshot échoué ({src_url}): {e}", exc_info=True)
+        await send_long(message.channel, text, reply_to=message)
 
     # ------------------------------------------------------------------
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="preferences", description="Consulte ton profil et les notes de Maria")
-    async def cmd_preferences(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="me", description="Consulte ce que Maria sait de toi")
+    async def cmd_me(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            view=PreferencesView(self.profiles, interaction.user.id),
+            view=MeView(self.profiles, interaction.user.id),
             ephemeral=True,
         )
 

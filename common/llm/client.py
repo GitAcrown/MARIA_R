@@ -9,7 +9,7 @@ import openai
 logger = logging.getLogger("llm.client")
 
 # Modèles
-MODEL_MAIN = "gpt-5.4-mini"
+MODEL_MAIN = "gpt-5.4-nano"
 MODEL_NANO = "gpt-5.4-nano"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
 

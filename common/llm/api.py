@@ -39,10 +39,10 @@ class MariaGptApi:
         api_key: str,
         developer_prompt_template: Callable[[], str],
         *,
-        completion_model: str = "gpt-5.4-mini",
+        completion_model: str = "gpt-5.4-nano",
         transcription_model: str = "gpt-4o-transcribe",
-        max_tokens: int = 1024,
-        context_window: int = 8192,
+        max_tokens: int = 1536,
+        context_window: int = 12000,
         context_age_hours: float = 2,
     ):
         self.client = MariaLLMClient(
@@ -56,16 +56,9 @@ class MariaGptApi:
             client=self.client,
             tool_registry=self.tool_registry,
             developer_prompt_template=developer_prompt_template,
-            api_key=api_key,
             context_window=context_window,
             context_age_hours=context_age_hours,
         )
-
-    async def ingest_message(
-        self, channel: discord.abc.Messageable, message: discord.Message, is_context_only: bool = False
-    ) -> None:
-        session = self.session_manager.get_or_create(channel)
-        await session.ingest_message(message, is_context_only)
 
     async def run_completion(
         self,
@@ -95,26 +88,10 @@ class MariaGptApi:
                             seen_names.add(tc.function_name)
             elif m.role == "user":
                 if getattr(m, "name", None) == "system":
-                    continue  # message injecté par un outil (ex. screenshot vision), pas le vrai trigger
+                    continue
                 break
 
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
-
-    async def run_autonomous_task(
-        self,
-        channel: discord.abc.Messageable,
-        user_name: str,
-        user_id: int,
-        task_prompt: str,
-    ) -> MariaResponse:
-        session = self.session_manager.get_or_create(channel)
-        assistant = await session.run_autonomous_task(user_name, user_id, task_prompt)
-        return MariaResponse(assistant.full_text, assistant, [])
-
-    async def forget(self, channel: discord.abc.Messageable) -> None:
-        session = self.session_manager.get(channel.id)
-        if session:
-            session.forget()
 
     def add_tools(self, *tools: Tool) -> None:
         self.tool_registry.register_multiple(*tools)

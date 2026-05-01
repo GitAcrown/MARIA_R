@@ -34,8 +34,6 @@ DIFFICULT_DOMAINS = {"twitter.com", "x.com", "facebook.com", "instagram.com", "r
 SEARCH_CACHE_SEC = 300
 PAGE_CACHE_HOURS = 12
 CHUNK_SIZE = 2000
-SCREENSHOT_API = "https://image.thum.io/get/width/1280/crop/900/"
-
 
 class Web(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -342,18 +340,6 @@ class Web(commands.Cog):
         logger.info(f"Urban Dictionary: {term!r}")
         return ToolResponseRecord(tc.id, result, datetime.now(timezone.utc))
 
-    async def _tool_screenshot(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-        url = tc.arguments.get("url", "").strip()
-        if not url or not url.startswith(("http://", "https://")):
-            return ToolResponseRecord(tc.id, {"error": "URL invalide"}, datetime.now(timezone.utc))
-        screenshot_url = SCREENSHOT_API + url
-        logger.info(f"Screenshot: {url}")
-        return ToolResponseRecord(
-            tc.id,
-            {"screenshot_url": screenshot_url, "source_url": url},
-            datetime.now(timezone.utc),
-        )
-
     async def _tool_read(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
@@ -397,12 +383,6 @@ class Web(commands.Cog):
                 description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants.",
                 properties={"url": {"type": "string", "description": "URL complète"}},
                 function=self._tool_read,
-            ),
-            Tool(
-                name="screenshot_page",
-                description="Prend une capture d'écran d'une page web. Le système envoie l'image automatiquement — ne répète pas l'URL, décris simplement ce que tu vois.",
-                properties={"url": {"type": "string", "description": "URL complète de la page à capturer"}},
-                function=self._tool_screenshot,
             ),
         ]
 
