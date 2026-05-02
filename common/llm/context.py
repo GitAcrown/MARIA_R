@@ -155,9 +155,12 @@ class ToolResponseRecord(MessageRecord):
         created_at: datetime,
         **kwargs,
     ):
+        # Utiliser _llm_summary si disponible pour le token_count (cohérent avec to_payload)
+        summary = response_data.get("_llm_summary")
+        content = summary if summary else json.dumps(response_data, ensure_ascii=False)
         super().__init__(
             role="tool",
-            components=[TextComponent(json.dumps(response_data, ensure_ascii=False))],
+            components=[TextComponent(content)],
             created_at=created_at,
             **kwargs,
         )
@@ -165,8 +168,6 @@ class ToolResponseRecord(MessageRecord):
         self.response_data = response_data
 
     def to_payload(self) -> dict:
-        # Si un résumé LLM est fourni, l'utiliser à la place du JSON brut
-        # pour éviter de polluer le contexte avec des données volumineuses
         summary = self.response_data.get("_llm_summary")
         content = summary if summary else json.dumps(self.response_data, ensure_ascii=False)
         return {
