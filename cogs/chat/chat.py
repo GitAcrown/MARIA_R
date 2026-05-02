@@ -227,7 +227,7 @@ class EditNotesModal(discord.ui.Modal, title="Modifier les notes de Maria"):
             label="Notes (format : [catégorie] info)",
             style=discord.TextStyle.paragraph,
             placeholder="Ex: [identité] Théo, 24 ans\n[préférences] déteste les zombies",
-            default=current,
+            default=current[:2000],
             max_length=2000,
             required=False,
         )

@@ -13,8 +13,8 @@ logger = logging.getLogger("profiles")
 # Les notes sont maintenues exclusivement par le modèle via update_user_notes.
 
 NOTES_MAX = 2000
-NOTES_KEEP_HEAD = 800   # infos stables (début) toujours conservées
-NOTES_KEEP_TAIL = 1200  # infos récentes (fin)
+NOTES_KEEP_HEAD = 800    # infos stables (début) toujours conservées
+NOTES_KEEP_TAIL = 1193   # infos récentes (fin) — 2000 - 800 - 7 (séparateur \n[…]\n)
 
 
 class ProfileStore:
