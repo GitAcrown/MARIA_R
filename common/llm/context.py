@@ -268,6 +268,15 @@ class ConversationContext:
         # Plafond de messages (garde les plus récents)
         if self.max_messages > 0 and len(kept) > self.max_messages:
             kept = kept[-self.max_messages:]
+        # Retirer les messages 'tool' orphelins en tête (sans assistant tool_call précédent)
+        while kept and kept[0].role == "tool":
+            kept.pop(0)
+        # Retirer les messages 'assistant' avec tool_calls en tête (leurs réponses d'outils
+        # ont été supprimées, la séquence serait incomplète)
+        while kept and kept[0].role == "assistant" and getattr(kept[0], "tool_calls", []):
+            kept.pop(0)
+            while kept and kept[0].role == "tool":
+                kept.pop(0)
         self._messages = kept
         self._needs_trim = False
 
