@@ -349,6 +349,17 @@ class ChannelSession:
         self.context.developer_prompt = self.developer_prompt_template()
 
         messages = self.context.prepare_payload()
+
+        # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM
+        if depth == 0 and trigger:
+            author = trigger.author.display_name
+            content = trigger.content.strip()
+            if content:
+                hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"
+            else:
+                hint = f"[FOCUS] Tu réponds à {author}."
+            messages = messages + [{"role": "user", "content": hint, "name": "system"}]
+
         tools = self.tool_registry.get_compiled() if len(self.tool_registry) > 0 else []
 
         try:
