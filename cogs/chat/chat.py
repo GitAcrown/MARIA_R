@@ -216,7 +216,7 @@ class InfoView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
 
 
-class EditNotesModal(discord.ui.Modal, title="Modifier les notes de Maria"):
+class EditNotesModal(discord.ui.Modal, title="Modifier les notes de MARIA"):
     """Modal permettant d'éditer directement les notes qu'a Maria sur soi."""
 
     def __init__(self, store: ProfileStore, user_id: int, current: str):
@@ -278,7 +278,7 @@ class MeView(discord.ui.LayoutView):
 
         notes_text = discord.ui.TextDisplay(
             notes[:800] + ("…" if len(notes) > 800 else "")
-            if notes else "-# Maria n'a encore rien retenu sur toi."
+            if notes else "-# MARIA n'a encore rien retenu sur toi."
         )
         edit_section = discord.ui.Section(
             notes_text,
@@ -292,7 +292,7 @@ class MeView(discord.ui.LayoutView):
         )
 
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("## Ce que Maria sait de toi"),
+            discord.ui.TextDisplay("## Ce que MARIA sait de toi"),
             discord.ui.Separator(),
             edit_section,
             discord.ui.Separator(),
@@ -885,7 +885,7 @@ class Chat(commands.Cog):
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="me", description="Consulte ce que Maria sait de toi")
+    @app_commands.command(name="me", description="Consulte ce que MARIA sait de toi")
     async def cmd_me(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             view=MeView(self.profiles, interaction.user.id),
@@ -965,7 +965,7 @@ class Chat(commands.Cog):
         s = self.data.get(target).settings("channel_config")
         await interaction.response.send_modal(PersonalityModal(s, s.get("personality", "")))
 
-    @chatbot.command(name="everyone", description="Définit si Maria répond aux mentions @everyone et @here")
+    @chatbot.command(name="everyone", description="Définit si MARIA répond aux mentions @everyone et @here")
     @app_commands.describe(actif="Activer ou désactiver la réponse aux @everyone / @here")
     async def chatbot_everyone(self, interaction: discord.Interaction, actif: bool) -> None:
         ch = interaction.channel
@@ -978,7 +978,7 @@ class Chat(commands.Cog):
             f"Réponse aux @everyone / @here **{state}** sur ce salon.", ephemeral=True
         )
 
-    @chatbot.command(name="autotranscribe", description="Définit si Maria transcrit automatiquement les messages vocaux")
+    @chatbot.command(name="autotranscribe", description="Définit si MARIA transcrit automatiquement les messages vocaux")
     @app_commands.describe(actif="Activer ou désactiver la transcription automatique")
     async def chatbot_autotranscribe(self, interaction: discord.Interaction, actif: bool) -> None:
         ch = interaction.channel
