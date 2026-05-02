@@ -28,13 +28,6 @@ logger = logging.getLogger("llm.session")
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
 
-SUMMARIZE_THRESHOLD = 32   # messages avant de déclencher un résumé
-SUMMARIZE_CHUNK = 12       # messages les plus anciens condensés en 1 résumé
-SUMMARIZE_PROMPT = (
-    "Résume en 2-3 phrases ces échanges Discord "
-    "(qui dit quoi, faits bruts, sans intro ni conclusion) :\n\n{messages}"
-)
-
 
 def _components_v2_to_parts(
     components: list,
@@ -284,39 +277,6 @@ class ChannelSession:
         self._ingested_ids.add(message.id)
         return record
 
-    async def _maybe_summarize(self) -> None:
-        """Condense les SUMMARIZE_CHUNK plus anciens messages en un résumé nano si le contexte est chargé."""
-        if len(self.context._messages) < SUMMARIZE_THRESHOLD:
-            return
-        to_summarize = self.context._messages[:SUMMARIZE_CHUNK]
-        remaining = self.context._messages[SUMMARIZE_CHUNK:]
-
-        lines: list[str] = []
-        for m in to_summarize:
-            name = getattr(m, "name", None) or m.role
-            if name == "system":
-                continue
-            text = m.full_text[:200].strip()
-            if text:
-                lines.append(f"{name}: {text}")
-        if not lines:
-            return
-
-        summary = await self.client.summarize(
-            SUMMARIZE_PROMPT.format(messages="\n".join(lines))
-        )
-        if not summary:
-            return
-
-        summary_record = MessageRecord(
-            role="user",
-            components=[TextComponent(f"[Résumé des échanges précédents]\n{summary}")],
-            created_at=to_summarize[-1].created_at,
-            name="system",
-        )
-        self.context._messages = [summary_record] + remaining
-        logger.debug(f"Contexte résumé : {SUMMARIZE_CHUNK} messages → 1")
-
     async def run_completion(
         self, trigger_message: Optional[discord.Message] = None, *, model: Optional[str] = None
     ) -> AssistantRecord:
@@ -328,10 +288,6 @@ class ChannelSession:
             return self.context.add_assistant_message(
                 components=[TextComponent("Limite d'outils atteinte. Reformule ta demande.")],
             )
-
-        # Résumé des anciens messages si contexte trop chargé (depth=0 uniquement)
-        if depth == 0:
-            await self._maybe_summarize()
 
         self.trigger_message = trigger
 
@@ -353,7 +309,7 @@ class ChannelSession:
         # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM
         if depth == 0 and trigger:
             author = trigger.author.display_name
-            content = trigger.content.strip()
+            content = trigger.clean_content.strip()
             if content:
                 hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"
             else:
