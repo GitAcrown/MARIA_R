@@ -8,6 +8,11 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+try:
+    from cogs.meteo.meteo import build_weather_view as _build_weather_view
+except ImportError:
+    _build_weather_view = None
+
 import discord
 
 logger = logging.getLogger("MARIA.Chat")
@@ -32,6 +37,7 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "get_user_profile", "math_eval",
     "update_user_notes", "list_reminders",
+    "get_weather",
 })
 
 def _fmt_delay(minutes: int) -> str:
@@ -807,7 +813,20 @@ class Chat(commands.Cog):
             tool_lines = "\n".join(f"-# {p}" for p in visible_parts)
             text = f"{tool_lines}\n{text}"
 
-        await send_long(message.channel, text, reply_to=message)
+        # Si l'outil météo a été utilisé : LayoutView uniquement, pas de texte
+        weather_view_sent = False
+        if _build_weather_view is not None:
+            for tr in resp.tool_responses:
+                rd = getattr(tr, "response_data", None)
+                if isinstance(rd, dict) and rd.get("_tool") == "get_weather":
+                    view = _build_weather_view(rd)
+                    if view is not None:
+                        await message.channel.send(view=view)
+                        weather_view_sent = True
+                    break
+
+        if not weather_view_sent:
+            await send_long(message.channel, text, reply_to=message)
 
     # ------------------------------------------------------------------
     # Événements
