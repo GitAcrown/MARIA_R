@@ -233,8 +233,17 @@ class Meteo(commands.Cog):
         # Récupérer le nom normalisé par OWM
         city_name = raw.get("name") or raw.get("city", {}).get("name") or city
 
+        if weather_type == "forecast":
+            llm_summary = f"Prévisions 5 jours affichées pour {city_name}. LayoutView envoyé dans le salon."
+        else:
+            main = raw.get("main", {})
+            temp = round(main.get("temp", 0))
+            desc = (raw.get("weather") or [{}])[0].get("description", "")
+            llm_summary = f"Météo actuelle affichée pour {city_name} : {temp}°C, {desc}. LayoutView envoyé dans le salon."
+
         return ToolResponseRecord(tc.id, {
             "_tool": "get_weather",
+            "_llm_summary": llm_summary,
             "type": weather_type,
             "city": city_name,
             "data": raw,
@@ -248,7 +257,10 @@ class Meteo(commands.Cog):
                 description=(
                     "Affiche la météo d'une ville via OpenWeatherMap. "
                     "type='current' pour maintenant, 'forecast' pour les 5 prochains jours. "
-                    "Utilise dès qu'on demande la météo, le temps qu'il fait, les prévisions."
+                    "Utilise dès qu'on demande la météo, le temps qu'il fait, les prévisions, "
+                    "ou une question de suivi sur une météo déjà affichée (ex: 'et la semaine ?', "
+                    "'les prochains jours ?', 'etr la suite ?') — dans ce cas, réutilise la ville "
+                    "du dernier appel get_weather visible dans le contexte."
                 ),
                 properties={
                     "city": {"type": "string", "description": "Ville (ex: Paris, Lyon, Tokyo)"},

@@ -165,9 +165,13 @@ class ToolResponseRecord(MessageRecord):
         self.response_data = response_data
 
     def to_payload(self) -> dict:
+        # Si un résumé LLM est fourni, l'utiliser à la place du JSON brut
+        # pour éviter de polluer le contexte avec des données volumineuses
+        summary = self.response_data.get("_llm_summary")
+        content = summary if summary else json.dumps(self.response_data, ensure_ascii=False)
         return {
             "role": "tool",
-            "content": json.dumps(self.response_data, ensure_ascii=False),
+            "content": content,
             "tool_call_id": self.tool_call_id,
         }
 
