@@ -138,6 +138,8 @@ class ChannelSession:
         )
         self._lock = asyncio.Lock()
         self.trigger_message: Optional[discord.Message] = None
+        # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence)
+        self._ingested_ids: set[int] = set()
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
         """Ingère un message dans le contexte GPT principal.
@@ -160,32 +162,49 @@ class ChannelSession:
 
         parts: list = []
 
-        # --- Référence (reply) — toujours incluse ---
+        # --- Référence (reply) ---
         if message.reference and message.reference.resolved:
             ref = message.reference.resolved
             ref_author = getattr(ref, "author", None)
             ref_is_bot = getattr(ref_author, "bot", False)
             ref_name = getattr(ref_author, "name", "?") if ref_author else "?"
-
-            ref_lines: list[str] = []
-            ref_text = (ref.content or "").strip()
-            if ref_text:
-                ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
-
-            if not is_context_only:
-                for emb in getattr(ref, "embeds", []):
-                    t = _embed_to_text(emb)
-                    if t:
-                        ref_lines.append(t[:300])
-                ref_comps = getattr(ref, "components", None)
-                if ref_comps:
-                    comp_texts, _ = _components_v2_to_parts(list(ref_comps))
-                    if comp_texts:
-                        ref_lines.append("\n".join(comp_texts)[:400])
-
-            preview = " | ".join(ref_lines)[:500] if ref_lines else "(sans texte)"
+            ref_id = getattr(ref, "id", None)
             label = "ton message" if ref_is_bot else ref_name
-            parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
+
+            if ref_id and ref_id in self._ingested_ids:
+                # Message déjà dans le contexte de cette session : pas de doublon
+                parts.append(TextComponent(f"[Suite de : {label}]"))
+            else:
+                # Message hors contexte (avant restart, autre session…)
+                ref_text = (ref.content or "").strip()
+
+                if ref_is_bot:
+                    # Message du bot : si texte présent → le citer, sinon note générique
+                    # Ne jamais dumper les composants v2 (LayoutView) — c'est du markdown illisible
+                    if ref_text:
+                        parts.append(TextComponent(
+                            f"[Répond à {label} : \"{ref_text[:300]}\"]"
+                        ))
+                    else:
+                        parts.append(TextComponent(f"[Répond à la dernière réponse du bot]"))
+                else:
+                    # Message utilisateur → aperçu complet
+                    ref_lines: list[str] = []
+                    if ref_text:
+                        ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
+                    if not is_context_only:
+                        for emb in getattr(ref, "embeds", []):
+                            t = _embed_to_text(emb)
+                            if t:
+                                ref_lines.append(t[:300])
+                        ref_comps = getattr(ref, "components", None)
+                        if ref_comps:
+                            comp_texts, _ = _components_v2_to_parts(list(ref_comps))
+                            if comp_texts:
+                                ref_lines.append("\n".join(comp_texts)[:400])
+                    if ref_lines:
+                        preview = " | ".join(ref_lines)[:500]
+                        parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
 
             if not is_context_only:
                 for att in getattr(ref, "attachments", []):
@@ -262,6 +281,7 @@ class ChannelSession:
         record = self.context.add_user_message(components=parts, name=user_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
+        self._ingested_ids.add(message.id)
         return record
 
     async def _maybe_summarize(self) -> None:

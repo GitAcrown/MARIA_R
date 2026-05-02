@@ -97,6 +97,26 @@ class MariaGptApi:
 
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
 
+    def inject_context_note(self, channel: discord.abc.Messageable, note: str) -> None:
+        """Injecte une note système synchrone (sans garantie de séquençage)."""
+        from .context import TextComponent
+        session = self.session_manager.get_or_create(channel)
+        session.context.add_user_message(
+            components=[TextComponent(f"[SYSTEM] {note}")],
+            name="system",
+        )
+
+    async def inject_context_note_async(self, channel: discord.abc.Messageable, note: str) -> None:
+        """Injecte une note système en acquérant le lock de session.
+        Garantit que la note est visible pour le prochain run_completion."""
+        from .context import TextComponent
+        session = self.session_manager.get_or_create(channel)
+        async with session._lock:
+            session.context.add_user_message(
+                components=[TextComponent(f"[SYSTEM] {note}")],
+                name="system",
+            )
+
     def add_tools(self, *tools: Tool) -> None:
         self.tool_registry.register_multiple(*tools)
 

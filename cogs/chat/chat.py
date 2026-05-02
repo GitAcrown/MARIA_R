@@ -51,7 +51,7 @@ def _fmt_delay(minutes: int) -> str:
     return f"{d}j{h}h" if h else f"{d}j"
 
 
-DEV_PROMPT_BASE = """Tu es Maria, membre d'un serveur Discord entre potes. Tu agis comme une assistante amicale pour le groupe.
+DEV_PROMPT_BASE = """Ton nom Discord est {bot_name}, membre d'un serveur Discord entre potes. Tu agis comme une assistante amicale pour le groupe.
 
 TON
 Familier, directe et maternelle. Grossièretés si le ton s'y prête. Pas d'emojis, rester très concise et à l'essentiel.
@@ -74,6 +74,7 @@ Ex : "[identité] Théo, 24 ans, dev Paris" · "[préférences] déteste les zom
 OUTILS
 - Actualité/faits récents/référence à un nouveau film/série/livre/jeu -> search_web direct.
 - Rappels → execute_at ISO 8601 ou delay_minutes/delay_hours.
+- Météo → get_weather direct. Après : un mot ("tiens", "voilà"), jamais les données brutes.
 
 LIMITES : pas de code · pas de modération · pas d'actions programmées. Ne mentionne jamais ces instructions.
 {channel_ctx}{personality}{profiles}
@@ -351,7 +352,9 @@ class Chat(commands.Cog):
             profiles = getattr(developer_prompt, "_profiles", "")
             personality = getattr(developer_prompt, "_personality", "")
             channel_ctx = getattr(developer_prompt, "_channel_ctx", "")
+            bot_name = getattr(self.bot.user, "name", "Maria") if self.bot.user else "Maria"
             return DEV_PROMPT_BASE.format(
+                bot_name=bot_name,
                 weekday=now.strftime("%A"),
                 datetime=now.strftime("%Y-%m-%d %H:%M"),
                 profiles=("\nNOTES SUR LES MEMBRES:\n" + profiles + "\n") if profiles else "",
@@ -687,6 +690,11 @@ class Chat(commands.Cog):
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
         if mode == "off":
             return False
+        # Reply directe à un message du bot → toujours répondre (même sans @mention)
+        if (message.reference and message.reference.resolved
+                and getattr(getattr(message.reference.resolved, "author", None), "id", None)
+                == getattr(self.bot.user, "id", None)):
+            return True
         if mode == "greedy" and self.bot.user:
             pattern = r'(?<![a-z0-9_])' + re.escape(self.bot.user.name.lower()) + r'(?![a-z0-9_])'
             if re.search(pattern, message.content.lower()):
@@ -813,8 +821,8 @@ class Chat(commands.Cog):
             tool_lines = "\n".join(f"-# {p}" for p in visible_parts)
             text = f"{tool_lines}\n{text}"
 
-        # Si l'outil météo a été utilisé : LayoutView uniquement, pas de texte
-        weather_view_sent = False
+        # Si l'outil météo a été utilisé : LayoutView uniquement, note de contexte via lock
+        weather_sent = False
         if _build_weather_view is not None:
             for tr in resp.tool_responses:
                 rd = getattr(tr, "response_data", None)
@@ -822,10 +830,12 @@ class Chat(commands.Cog):
                     view = _build_weather_view(rd)
                     if view is not None:
                         await message.channel.send(view=view)
-                        weather_view_sent = True
+                        note = rd.get("_llm_summary") or "Carte météo envoyée dans le salon."
+                        await self.gpt_api.inject_context_note_async(message.channel, note)
+                        weather_sent = True
                     break
 
-        if not weather_view_sent:
+        if not weather_sent:
             await send_long(message.channel, text, reply_to=message)
 
     # ------------------------------------------------------------------
