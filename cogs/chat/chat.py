@@ -26,7 +26,7 @@ from common.rappels import Rappel, RappelStore, RappelWorker
 
 PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 
-DEBOUNCE_SECONDS: float = 1.5
+DEBOUNCE_SECONDS: float = 1.0
 
 # Patterns pour la sélection du modèle nano (tâches structurées simples)
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
@@ -375,6 +375,7 @@ class Chat(commands.Cog):
 
         self._processed: deque = deque(maxlen=100)
         self._pending_responses: dict[int, asyncio.Task] = {}
+        self._first_triggers: dict[int, discord.Message] = {}
 
     async def cog_load(self) -> None:
         self._rappels_worker = RappelWorker(self.rappels, self._exec_rappel)
@@ -760,7 +761,7 @@ class Chat(commands.Cog):
             return "gpt-5.4-nano"
         return "gpt-5.4-mini"
 
-    async def _send_response(self, message: discord.Message) -> None:
+    async def _send_response(self, message: discord.Message, *, use_reply: bool = True) -> None:
         """Génère et envoie la réponse au message déclencheur."""
         self._inject_profiles(message)
         self._inject_personality(message.channel)
@@ -836,7 +837,7 @@ class Chat(commands.Cog):
                     break
 
         if not weather_sent:
-            await send_long(message.channel, text, reply_to=message)
+            await send_long(message.channel, text, reply_to=message if use_reply else None)
 
     # ------------------------------------------------------------------
     # Événements
@@ -862,11 +863,15 @@ class Chat(commands.Cog):
         pending = self._pending_responses.pop(message.channel.id, None)
         if pending:
             pending.cancel()
+        else:
+            # Premier trigger de cette fenêtre
+            self._first_triggers[message.channel.id] = message
 
         async def _delayed(msg: discord.Message) -> None:
             try:
                 await asyncio.sleep(DEBOUNCE_SECONDS)
-                await self._send_response(msg)
+                first = self._first_triggers.pop(msg.channel.id, msg)
+                await self._send_response(msg, use_reply=(first.id == msg.id))
             except asyncio.CancelledError:
                 pass
             except Exception as e:
