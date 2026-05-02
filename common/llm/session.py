@@ -9,7 +9,7 @@ from typing import Callable, Optional
 
 import discord
 
-from .client import MariaLLMClient, MariaOpenAIError
+from .client import MariaLLMClient, MariaOpenAIError, MODEL_NANO
 from .context import (
     ConversationContext,
     MessageRecord,
@@ -27,6 +27,13 @@ logger = logging.getLogger("llm.session")
 
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
+
+SUMMARIZE_THRESHOLD = 32   # messages avant de déclencher un résumé
+SUMMARIZE_CHUNK = 12       # messages les plus anciens condensés en 1 résumé
+SUMMARIZE_PROMPT = (
+    "Résume en 2-3 phrases ces échanges Discord "
+    "(qui dit quoi, faits bruts, sans intro ni conclusion) :\n\n{messages}"
+)
 
 
 def _components_v2_to_parts(
@@ -116,6 +123,7 @@ class ChannelSession:
         developer_prompt_template: Callable[[], str],
         context_window: int = 12000,
         context_age_hours: float = 2,
+        max_messages: int = 0,
     ):
         self.channel_id = channel_id
         self.client = client
@@ -126,6 +134,7 @@ class ChannelSession:
             developer_prompt="",
             context_window=context_window,
             context_age=timedelta(hours=context_age_hours),
+            max_messages=max_messages,
         )
         self._lock = asyncio.Lock()
         self.trigger_message: Optional[discord.Message] = None
@@ -255,17 +264,54 @@ class ChannelSession:
             record.metadata["discord_message"] = message
         return record
 
+    async def _maybe_summarize(self) -> None:
+        """Condense les SUMMARIZE_CHUNK plus anciens messages en un résumé nano si le contexte est chargé."""
+        if len(self.context._messages) < SUMMARIZE_THRESHOLD:
+            return
+        to_summarize = self.context._messages[:SUMMARIZE_CHUNK]
+        remaining = self.context._messages[SUMMARIZE_CHUNK:]
+
+        lines: list[str] = []
+        for m in to_summarize:
+            name = getattr(m, "name", None) or m.role
+            if name == "system":
+                continue
+            text = m.full_text[:200].strip()
+            if text:
+                lines.append(f"{name}: {text}")
+        if not lines:
+            return
+
+        summary = await self.client.summarize(
+            SUMMARIZE_PROMPT.format(messages="\n".join(lines))
+        )
+        if not summary:
+            return
+
+        summary_record = MessageRecord(
+            role="user",
+            components=[TextComponent(f"[Résumé des échanges précédents]\n{summary}")],
+            created_at=to_summarize[-1].created_at,
+            name="system",
+        )
+        self.context._messages = [summary_record] + remaining
+        logger.debug(f"Contexte résumé : {SUMMARIZE_CHUNK} messages → 1")
+
     async def run_completion(
-        self, trigger_message: Optional[discord.Message] = None
+        self, trigger_message: Optional[discord.Message] = None, *, model: Optional[str] = None
     ) -> AssistantRecord:
         async with self._lock:
-            return await self._run(trigger_message, 0)
+            return await self._run(trigger_message, 0, model=model)
 
-    async def _run(self, trigger: Optional[discord.Message], depth: int) -> AssistantRecord:
+    async def _run(self, trigger: Optional[discord.Message], depth: int, *, model: Optional[str] = None) -> AssistantRecord:
         if depth >= MAX_RECURSION:
             return self.context.add_assistant_message(
                 components=[TextComponent("Limite d'outils atteinte. Reformule ta demande.")],
             )
+
+        # Résumé des anciens messages si contexte trop chargé (depth=0 uniquement)
+        if depth == 0:
+            await self._maybe_summarize()
 
         self.trigger_message = trigger
 
@@ -289,12 +335,13 @@ class ChannelSession:
             completion = await self.client.chat(
                 messages=messages,
                 tools=tools if tools else None,
+                model=model,
             )
         except MariaOpenAIError as e:
             if "invalid_image_url" in str(e):
                 self.context.filter_images()
                 messages = self.context.prepare_payload()
-                completion = await self.client.chat(messages=messages, tools=tools if tools else None)
+                completion = await self.client.chat(messages=messages, tools=tools if tools else None, model=model)
             else:
                 raise
 
@@ -325,12 +372,12 @@ class ChannelSession:
 
         if tool_calls:
             await self._execute_tools(tool_calls)
-            return await self._run(None, depth + 1)
+            return await self._run(None, depth + 1, model=model)
 
         if not msg.content or not str(msg.content).strip():
             self.context._messages.pop()
             self.context.add_user_message(components=[TextComponent("[SYSTEM] Réponds maintenant.")], name="system")
-            return await self._run(None, depth + 1)
+            return await self._run(None, depth + 1, model=model)
 
         return assistant
 
@@ -370,6 +417,7 @@ class ChannelSessionManager:
         *,
         context_window: int = 12000,
         context_age_hours: float = 2,
+        max_messages: int = 0,
     ):
         self.client = client
         self.tool_registry = tool_registry
@@ -378,6 +426,7 @@ class ChannelSessionManager:
         self._sessions: dict[int, ChannelSession] = {}
         self._context_window = context_window
         self._context_age_hours = context_age_hours
+        self._max_messages = max_messages
 
     def get_or_create(self, channel: discord.abc.Messageable) -> ChannelSession:
         if channel.id not in self._sessions:
@@ -389,6 +438,7 @@ class ChannelSessionManager:
                 developer_prompt_template=self.developer_prompt_template,
                 context_window=self._context_window,
                 context_age_hours=self._context_age_hours,
+                max_messages=self._max_messages,
             )
         return self._sessions[channel.id]
 

@@ -69,6 +69,20 @@ class MariaLLMClient:
             self._stats["errors"] += 1
             raise MariaOpenAIError(str(e)) from e
 
+    async def summarize(self, prompt: str, max_tokens: int = 200) -> Optional[str]:
+        """Résumé rapide via nano — ne consomme pas de tokens du modèle principal."""
+        try:
+            r = await self._client.chat.completions.create(
+                model=MODEL_NANO,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=max_tokens,
+            )
+            content = r.choices[0].message.content
+            return content.strip() if content else None
+        except Exception as e:
+            logger.warning(f"Summarize failed: {e}")
+            return None
+
     async def transcribe(self, audio_file, *, model: Optional[str] = None) -> str:
         """Transcription audio."""
         try:

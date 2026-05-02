@@ -1,5 +1,6 @@
 """Cog Chat — Maria GPT avec contexte complet, profils, rappels."""
 
+import asyncio
 import logging
 import re
 import zoneinfo
@@ -19,6 +20,12 @@ from common.profiles import ProfileStore
 from common.rappels import Rappel, RappelStore, RappelWorker
 
 PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
+
+DEBOUNCE_SECONDS: float = 1.5
+
+# Patterns pour la sélection du modèle nano (tâches structurées simples)
+_NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
+_NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
 
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
@@ -49,7 +56,7 @@ COMPORTEMENT
 - Outils utilisés de façon autonome et proactive, sans annoncer ce que tu fais.
 - Tu déduis si possible les détails d'une requête à partir du contexte, mais n'hésite pas à demander des précisions si besoin.
 - Pas de follow-up ni alternatives non demandées.
-- Questions sérieuses → réponse directe, sans commentaire ni morale. Ne refuse jamais une question anodine ou de curiosité sous prétexte qu'elle semble bizarre ou délicate ; réponds juste.
+- Questions sérieuses → réponse directe, sans commentaire ni morale.
 - Tu vois tous les messages du salon, pas seulement ceux qui t'adressent. Prends systématiquement en compte la conversation en cours.
 
 CONTEXTE
@@ -353,11 +360,13 @@ class Chat(commands.Cog):
             api_key=bot.config["OPENAI_API_KEY"],
             developer_prompt_template=self._get_dev_prompt,
             completion_model="gpt-5.4-mini",
-            context_window=12000,
-            context_age_hours=2,
+            context_window=8000,
+            context_age_hours=1,
+            max_messages=40,
         )
 
         self._processed: deque = deque(maxlen=100)
+        self._pending_responses: dict[int, asyncio.Task] = {}
 
     async def cog_load(self) -> None:
         self._rappels_worker = RappelWorker(self.rappels, self._exec_rappel)
@@ -728,38 +737,34 @@ class Chat(commands.Cog):
         self._get_dev_prompt._channel_ctx = " · ".join(parts) if parts else ""
 
     # ------------------------------------------------------------------
-    # Événements
+    # Sélection du modèle et envoi de réponse
     # ------------------------------------------------------------------
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or not message.guild:
-            return
-        key = (message.channel.id, message.id)
-        if key in self._processed:
-            return
-        self._processed.append(key)
+    def _pick_model(self, message: discord.Message) -> str:
+        """Nano pour rappels et calculs simples, mini pour tout le reste."""
+        text = message.content
+        if _NANO_REMINDER_RE.search(text) or _NANO_MATH_RE.search(text):
+            return "gpt-5.4-nano"
+        return "gpt-5.4-mini"
 
-        should_respond = self._should_respond(message)
-        session = self.gpt_api.session_manager.get_or_create(message.channel)
-        await session.ingest_message(message, is_context_only=not should_respond)
-
-        if not should_respond:
-            return
-
+    async def _send_response(self, message: discord.Message) -> None:
+        """Génère et envoie la réponse au message déclencheur."""
         self._inject_profiles(message)
         self._inject_personality(message.channel)
         self._inject_channel_context(message.channel)
 
+        model = self._pick_model(message)
+
         async with message.channel.typing():
             try:
-                resp = await self.gpt_api.run_completion(message.channel, trigger_message=message)
+                resp = await self.gpt_api.run_completion(
+                    message.channel, trigger_message=message, model=model
+                )
             finally:
                 self._get_dev_prompt._profiles = ""
                 self._get_dev_prompt._personality = ""
                 self._get_dev_prompt._channel_ctx = ""
 
-        # Preuve d'utilisation des outils visibles
         text = resp.text
         visible_parts: list[str] = []
         for t in resp.used_tools:
@@ -804,6 +809,44 @@ class Chat(commands.Cog):
             text = f"{tool_lines}\n{text}"
 
         await send_long(message.channel, text, reply_to=message)
+
+    # ------------------------------------------------------------------
+    # Événements
+    # ------------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or not message.guild:
+            return
+        key = (message.channel.id, message.id)
+        if key in self._processed:
+            return
+        self._processed.append(key)
+
+        should_respond = self._should_respond(message)
+        session = self.gpt_api.session_manager.get_or_create(message.channel)
+        await session.ingest_message(message, is_context_only=not should_respond)
+
+        if not should_respond:
+            return
+
+        # Debounce : annule la tâche en attente et replanifie avec ce message
+        pending = self._pending_responses.pop(message.channel.id, None)
+        if pending:
+            pending.cancel()
+
+        async def _delayed(msg: discord.Message) -> None:
+            try:
+                await asyncio.sleep(DEBOUNCE_SECONDS)
+                await self._send_response(msg)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Réponse échouée ({msg.channel.id}): {e}", exc_info=True)
+            finally:
+                self._pending_responses.pop(message.channel.id, None)
+
+        self._pending_responses[message.channel.id] = asyncio.create_task(_delayed(message))
 
     # ------------------------------------------------------------------
     # Slash commands

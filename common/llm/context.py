@@ -173,7 +173,7 @@ class ToolResponseRecord(MessageRecord):
 
 
 class ConversationContext:
-    """Contexte restreint — trim par tokens et âge."""
+    """Contexte restreint — trim par tokens, âge et nombre de messages."""
 
     def __init__(
         self,
@@ -181,10 +181,12 @@ class ConversationContext:
         *,
         context_window: int = DEFAULT_WINDOW,
         context_age: timedelta = DEFAULT_AGE,
+        max_messages: int = 0,
     ):
         self.developer_prompt = developer_prompt
         self.context_window = context_window
         self.context_age = context_age
+        self.max_messages = max_messages  # 0 = pas de limite
         self._messages: list[MessageRecord] = []
         self._needs_trim = False
 
@@ -248,7 +250,7 @@ class ConversationContext:
         self._needs_trim = False
 
     def trim(self) -> None:
-        """Supprime messages trop vieux ou hors fenêtre."""
+        """Supprime messages trop vieux, hors fenêtre tokens, ou hors plafond de messages."""
         now = datetime.now(timezone.utc)
         self._messages = [m for m in self._messages if now - m.created_at < self.context_age]
         total = 0
@@ -258,6 +260,9 @@ class ConversationContext:
                 break
             kept.insert(0, m)
             total += m.token_count
+        # Plafond de messages (garde les plus récents)
+        if self.max_messages > 0 and len(kept) > self.max_messages:
+            kept = kept[-self.max_messages:]
         self._messages = kept
         self._needs_trim = False
 

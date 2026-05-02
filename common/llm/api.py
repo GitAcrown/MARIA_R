@@ -44,6 +44,7 @@ class MariaGptApi:
         max_tokens: int = 1536,
         context_window: int = 12000,
         context_age_hours: float = 2,
+        max_messages: int = 0,
     ):
         self.client = MariaLLMClient(
             api_key=api_key,
@@ -58,15 +59,18 @@ class MariaGptApi:
             developer_prompt_template=developer_prompt_template,
             context_window=context_window,
             context_age_hours=context_age_hours,
+            max_messages=max_messages,
         )
 
     async def run_completion(
         self,
         channel: discord.abc.Messageable,
         trigger_message: Optional[discord.Message] = None,
+        *,
+        model: Optional[str] = None,
     ) -> MariaResponse:
         session = self.session_manager.get_or_create(channel)
-        assistant = await session.run_completion(trigger_message)
+        assistant = await session.run_completion(trigger_message, model=model)
 
         tool_responses: list = []
         used_tools: list[dict] = []
