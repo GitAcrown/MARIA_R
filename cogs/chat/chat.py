@@ -352,7 +352,7 @@ class Chat(commands.Cog):
         self.gpt_api = MariaGptApi(
             api_key=bot.config["OPENAI_API_KEY"],
             developer_prompt_template=self._get_dev_prompt,
-            completion_model="gpt-5.4-nano",
+            completion_model="gpt-5.4-mini",
             context_window=12000,
             context_age_hours=2,
         )
