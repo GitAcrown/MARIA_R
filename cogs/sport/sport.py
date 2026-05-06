@@ -54,6 +54,52 @@ _STATUS_EMOJI = {
     "AWARDED":     "🏆",
 }
 
+# IDs stables football-data.org pour les clubs populaires
+# Évite les erreurs de recherche textuelle sur l'API free tier
+TEAM_IDS: dict[str, int] = {
+    # France
+    "paris saint-germain": 524, "psg": 524,
+    "olympique de marseille": 516, "om": 516,
+    "olympique lyonnais": 523, "ol": 523, "lyon": 523,
+    "as monaco": 548, "monaco": 548,
+    "lille": 521, "losc": 521,
+    "nice": 522, "ogc nice": 522,
+    "rennes": 529, "stade rennais": 529,
+    "lens": 826, "rc lens": 826,
+    "strasbourg": 576,
+    "saint-étienne": 527, "asse": 527,
+    # Angleterre
+    "manchester city": 65, "man city": 65,
+    "arsenal": 57, "arsenal fc": 57,
+    "liverpool": 64, "liverpool fc": 64,
+    "chelsea": 61, "chelsea fc": 61,
+    "manchester united": 66, "man utd": 66,
+    "tottenham": 73, "spurs": 73,
+    "newcastle": 67,
+    "aston villa": 58,
+    # Espagne
+    "real madrid": 86,
+    "fc barcelona": 81, "barcelona": 81, "barça": 81, "barca": 81,
+    "atletico de madrid": 78, "atletico": 78,
+    "sevilla": 559,
+    # Allemagne
+    "fc bayern münchen": 5, "bayern": 5, "bayern munich": 5,
+    "borussia dortmund": 4, "dortmund": 4, "bvb": 4,
+    "bayer leverkusen": 3, "leverkusen": 3,
+    "rb leipzig": 721, "leipzig": 721,
+    # Italie
+    "juventus fc": 109, "juventus": 109, "juve": 109,
+    "fc internazionale milano": 108, "inter": 108, "inter milan": 108,
+    "ac milan": 98, "milan": 98,
+    "as roma": 100, "roma": 100,
+    "ssc napoli": 113, "napoli": 113,
+    # Portugal / Pays-Bas
+    "fc porto": 503, "porto": 503,
+    "sl benfica": 498, "benfica": 498,
+    "sporting cp": 498,
+    "afc ajax": 678, "ajax": 678,
+}
+
 _COMP_NAMES = {
     "FL1": "Ligue 1", "PL": "Premier League", "PD": "La Liga",
     "BL1": "Bundesliga", "SA": "Serie A", "CL": "Champions League",
@@ -248,8 +294,7 @@ class Sport(commands.Cog):
         loop = asyncio.get_event_loop()
 
         # Résolution : compétition connue ou recherche d'équipe
-        search_query = query
-        comp_code = self._resolve_competition(search_query)
+        comp_code = self._resolve_competition(query)
 
         if comp_code:
             raw = await loop.run_in_executor(None, self._get_competition_matches, comp_code, query_type)
@@ -268,18 +313,31 @@ class Sport(commands.Cog):
                 "matches":      matches,
             }, datetime.now(timezone.utc))
         else:
-            # Recherche par équipe (avec alias résolu)
-            team = await loop.run_in_executor(None, self._search_team, search_query)
-            if not team:
-                return ToolResponseRecord(tc.id, {"error": f"Équipe introuvable : {query!r}"}, datetime.now(timezone.utc))
-
-            team_id   = team["id"]
-            team_name = team.get("shortName") or team.get("name", query)
+            # Chercher l'ID connu en priorité (évite les erreurs de recherche textuelle)
+            known_id = TEAM_IDS.get(query.lower())
+            if known_id:
+                team_id   = known_id
+                team_name = query.title()
+                team = None
+            else:
+                team = await loop.run_in_executor(None, self._search_team, query)
+                if not team:
+                    return ToolResponseRecord(tc.id, {"error": f"Équipe introuvable : {query!r}"}, datetime.now(timezone.utc))
+                team_id   = team["id"]
+                team_name = team.get("shortName") or team.get("name", query)
             raw = await loop.run_in_executor(None, self._get_team_matches, team_id, query_type)
             if "error" in raw:
                 return ToolResponseRecord(tc.id, raw, datetime.now(timezone.utc))
 
             matches = raw.get("matches", [])
+            # Récupérer le vrai shortName depuis les matchs si disponible
+            if matches:
+                first = matches[0]
+                for side in ("homeTeam", "awayTeam"):
+                    t = first.get(side, {})
+                    if t.get("id") == team_id:
+                        team_name = t.get("shortName") or t.get("name") or team_name
+                        break
             llm_summary = (
                 f"{len(matches)} match(s) {query_type} pour {team_name}. "
                 "LayoutView envoyé."
