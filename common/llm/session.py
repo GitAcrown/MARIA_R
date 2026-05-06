@@ -308,7 +308,7 @@ class ChannelSession:
 
         # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM
         if depth == 0 and trigger:
-            author = trigger.author.display_name
+            author = trigger.author.name
             content = trigger.clean_content.strip()
             if content:
                 hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"
@@ -372,6 +372,14 @@ class ChannelSession:
         for tc in tool_calls:
             tool = self.tool_registry.get(tc.function_name)
             if not tool:
+                logger.warning(f"Outil inconnu : {tc.function_name}")
+                self.context.add_message(
+                    ToolResponseRecord(
+                        tool_call_id=tc.id,
+                        response_data={"error": f"Outil '{tc.function_name}' introuvable."},
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
                 continue
             try:
                 resp = await tool.execute(tc, self)

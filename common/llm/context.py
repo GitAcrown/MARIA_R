@@ -268,17 +268,44 @@ class ConversationContext:
         # Plafond de messages (garde les plus récents)
         if self.max_messages > 0 and len(kept) > self.max_messages:
             kept = kept[-self.max_messages:]
-        # Retirer les messages 'tool' orphelins en tête (sans assistant tool_call précédent)
-        while kept and kept[0].role == "tool":
-            kept.pop(0)
-        # Retirer les messages 'assistant' avec tool_calls en tête (leurs réponses d'outils
-        # ont été supprimées, la séquence serait incomplète)
-        while kept and kept[0].role == "assistant" and getattr(kept[0], "tool_calls", []):
-            kept.pop(0)
-            while kept and kept[0].role == "tool":
-                kept.pop(0)
-        self._messages = kept
+        self._messages = self._sanitize_tool_pairs(kept)
         self._needs_trim = False
+
+    @staticmethod
+    def _sanitize_tool_pairs(messages: list) -> list:
+        """Retire toute paire tool_call/tool_response incomplète, où qu'elle se trouve."""
+        # Collecte les IDs attendus par les assistant tool_calls
+        required_ids: set[str] = set()
+        present_ids: set[str] = set()
+        for m in messages:
+            if m.role == "assistant":
+                for tc in getattr(m, "tool_calls", []) or []:
+                    required_ids.add(tc.id)
+            elif m.role == "tool":
+                tid = getattr(m, "tool_call_id", None)
+                if tid:
+                    present_ids.add(tid)
+
+        orphan_calls = required_ids - present_ids   # tool_call sans réponse
+        orphan_responses = present_ids - required_ids  # réponse sans tool_call
+
+        if not orphan_calls and not orphan_responses:
+            return messages
+
+        clean: list = []
+        skip_tool_ids: set[str] = orphan_responses.copy()
+        for m in messages:
+            if m.role == "assistant" and any(
+                tc.id in orphan_calls for tc in (getattr(m, "tool_calls", []) or [])
+            ):
+                # Retire aussi les tool responses déjà associées à cet assistant (si présentes)
+                for tc in getattr(m, "tool_calls", []) or []:
+                    skip_tool_ids.add(tc.id)
+                continue
+            if m.role == "tool" and getattr(m, "tool_call_id", None) in skip_tool_ids:
+                continue
+            clean.append(m)
+        return clean
 
     def prepare_payload(self) -> list[dict]:
         if self._needs_trim:

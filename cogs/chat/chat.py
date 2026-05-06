@@ -68,8 +68,12 @@ CONTEXTE
 Tu vois tous les messages du salon. Lis la conversation avant de répondre — suis ce qui se passe, réponds à la personne qui te parle, cite-la si utile.
 
 MÉMOIRE (update_user_notes)
-Retiens proactivement : identité, préférences, projets, trucs marquants. Format : "[catégorie] info".
-Ex : "[identité] Théo, 24 ans, dev Paris" · "[préférences] déteste les zombies" · "[projets] jeu Godot"
+Appelle update_user_notes dès qu'un message révèle :
+- prénom, âge, ville, métier/études → [identité]
+- goût fort, aversion, habitude → [préférences]
+- projet en cours, plan, objectif → [projets]
+- anecdote notable, fait marquant → [perso]
+Fais-le en même temps que ta réponse, sans attendre. Si l'info concerne quelqu'un d'autre que toi, passe son pseudo dans user_name.
 
 OUTILS
 - Actualité/faits récents/référence à un nouveau film/série/livre/jeu -> search_web direct.
@@ -429,17 +433,32 @@ class Chat(commands.Cog):
             notes = (tc.arguments.get("addition") or "").strip()
             if not notes or not ctx or not ctx.trigger_message:
                 return ToolResponseRecord(tc.id, {"error": "Données manquantes"}, datetime.now(timezone.utc))
-            self.profiles.append_notes(ctx.trigger_message.author.id, notes)
+
+            user_name = (tc.arguments.get("user_name") or "").strip().lower()
+            target_id = ctx.trigger_message.author.id
+            if user_name and ctx.trigger_message.guild:
+                member = discord.utils.find(
+                    lambda m: m.name.lower() == user_name or m.display_name.lower() == user_name,
+                    ctx.trigger_message.guild.members,
+                )
+                if member:
+                    target_id = member.id
+
+            self.profiles.append_notes(target_id, notes)
             return ToolResponseRecord(tc.id, {"success": True}, datetime.now(timezone.utc))
 
         tools.append(Tool(
             name="update_user_notes",
             description=(
-                "Ajoute ou met à jour des infos sur l'auteur du message. "
-                "Utilise proactivement dès qu'une info utile apparaît : identité, préférences, habitudes, projets, faits marquants. "
-                "Format : '[catégorie] info'. Ex: '[identité] Léa, 28 ans, graphiste' ou '[préférences] végétarienne depuis 2020'."
+                "Enregistre une info sur un membre. "
+                "Déclenche dès qu'un message révèle : prénom/âge/ville/métier, préférence forte, projet en cours, anecdote notable. "
+                "Format addition : '[catégorie] info'. Ex : '[identité] Léa, 28 ans, graphiste' · '[préférences] végétarienne'. "
+                "Si l'info concerne quelqu'un d'autre que l'auteur du message, passe son pseudo dans user_name."
             ),
-            properties={"addition": {"type": "string", "description": "Info à ajouter (format: '[catégorie] info')"}},
+            properties={
+                "addition": {"type": "string", "description": "Info à noter (format: '[catégorie] info')"},
+                "user_name": {"type": "string", "description": "Pseudo du membre concerné (si différent de l'auteur)"},
+            },
             function=_tool_update_notes,
         ))
 
@@ -717,7 +736,7 @@ class Chat(commands.Cog):
         parts: list[str] = []
         for uid, notes in all_notes.items():
             member = message.guild.get_member(uid) if message.guild else None
-            name = member.display_name if member else f"user_{uid}"
+            name = member.name if member else f"user_{uid}"
             marker = " (auteur)" if uid == message.author.id else ""
             parts.append(f"**{name}**{marker}:\n{notes}")
         self._get_dev_prompt._profiles = "\n\n".join(parts) if parts else ""
