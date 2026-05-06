@@ -98,6 +98,18 @@ TEAM_IDS: dict[str, int] = {
     "sl benfica": 498, "benfica": 498,
     "sporting cp": 498,
     "afc ajax": 678, "ajax": 678,
+    # Équipes nationales
+    "france": 773, "équipe de france": 773, "equipe de france": 773, "les bleus": 773,
+    "allemagne": 759, "germany": 759, "mannschaft": 759,
+    "angleterre": 770, "england": 770,
+    "espagne": 760, "spain": 760,
+    "portugal": 765,
+    "italie": 784, "italy": 784, "azzurri": 784,
+    "brésil": 764, "bresil": 764, "brazil": 764, "seleção": 764,
+    "argentine": 762, "argentina": 762, "albiceleste": 762,
+    "pays-bas": 779, "hollande": 779, "netherlands": 779, "oranje": 779,
+    "belgique": 805, "belgium": 805, "diables rouges": 805,
+    "maroc": 1030, "morocco": 1030, "atlas lions": 1030,
 }
 
 _COMP_NAMES = {
