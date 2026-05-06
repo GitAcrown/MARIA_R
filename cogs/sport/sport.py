@@ -62,6 +62,7 @@ _COMP_NAMES = {
 }
 
 
+
 def _status_label(match: dict) -> str:
     status = match.get("status", "")
     score  = match.get("score", {})
@@ -79,7 +80,7 @@ def _status_label(match: dict) -> str:
         away = ft.get("away", "?")
         ht_h = ht.get("home")
         ht_a = ht.get("away")
-        ht_str = f"  -# mi-temps {ht_h}-{ht_a}" if ht_h is not None else ""
+        ht_str = f"\n-# mi-temps {ht_h}-{ht_a}" if ht_h is not None else ""
         return f"✅  **{home} – {away}**{ht_str}"
     if status in ("SCHEDULED", "TIMED"):
         utc_str = match.get("utcDate", "")
@@ -247,7 +248,8 @@ class Sport(commands.Cog):
         loop = asyncio.get_event_loop()
 
         # Résolution : compétition connue ou recherche d'équipe
-        comp_code = self._resolve_competition(query)
+        search_query = query
+        comp_code = self._resolve_competition(search_query)
 
         if comp_code:
             raw = await loop.run_in_executor(None, self._get_competition_matches, comp_code, query_type)
@@ -266,8 +268,8 @@ class Sport(commands.Cog):
                 "matches":      matches,
             }, datetime.now(timezone.utc))
         else:
-            # Recherche par équipe
-            team = await loop.run_in_executor(None, self._search_team, query)
+            # Recherche par équipe (avec alias résolu)
+            team = await loop.run_in_executor(None, self._search_team, search_query)
             if not team:
                 return ToolResponseRecord(tc.id, {"error": f"Équipe introuvable : {query!r}"}, datetime.now(timezone.utc))
 
@@ -298,8 +300,10 @@ class Sport(commands.Cog):
                 name="get_sport_scores",
                 description=(
                     "Récupère les scores et matchs de foot. "
-                    "query = nom d'une compétition (ex: 'Ligue 1', 'Champions League', 'Premier League') "
-                    "ou d'une équipe (ex: 'PSG', 'Real Madrid', 'Arsenal'). "
+                    "query = nom officiel complet d'une compétition (ex: 'Ligue 1', 'Champions League', 'Premier League') "
+                    "ou d'une équipe — toujours le nom officiel complet, jamais un sigle ou surnom "
+                    "(ex: 'Paris Saint-Germain' et non 'PSG', 'Olympique de Marseille' et non 'OM', "
+                    "'FC Bayern München' et non 'Bayern', 'Borussia Dortmund' et non 'BVB'). "
                     "type : 'live' (matchs en cours), 'today' (matchs du jour), "
                     "'results' (derniers résultats), 'upcoming' (prochains matchs). "
                     "Réponse : un mot max après le LayoutView ('tiens', 'voilà')."
@@ -307,7 +311,7 @@ class Sport(commands.Cog):
                 properties={
                     "query": {
                         "type": "string",
-                        "description": "Nom de la compétition ou de l'équipe",
+                        "description": "Nom officiel complet de la compétition ou de l'équipe",
                     },
                     "type": {
                         "type": "string",
