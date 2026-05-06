@@ -135,12 +135,13 @@ class ChannelSession:
         self._ingested_ids: set[int] = set()
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
-        """Ingère un message dans le contexte GPT principal.
+        """Ingère un message dans le contexte GPT. Acquiert le lock pour éviter les
+        interleaving entre ingestion et tool_call/tool_response pendant run_completion."""
+        async with self._lock:
+            return self._ingest_locked(message, is_context_only)
 
-        - is_context_only=False → traitement complet (texte + images + embeds + attachments)
-        - is_context_only=True  → texte + référence uniquement (messages de contexte, sans média)
-          Si le message n'a pas de texte et is_context_only=True, il est ignoré.
-        """
+    def _ingest_locked(self, message: discord.Message, is_context_only: bool) -> MessageRecord:
+        """Corps réel de l'ingestion (appelé sous lock)."""
         text = message.content or ""
         user_name = USER_FORMAT.format(message=message)
 
