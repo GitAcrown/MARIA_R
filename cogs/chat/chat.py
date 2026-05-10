@@ -717,11 +717,6 @@ class Chat(commands.Cog):
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
         if mode == "off":
             return False
-        # Reply directe à un message du bot → toujours répondre (même sans @mention)
-        if (message.reference and message.reference.resolved
-                and getattr(getattr(message.reference.resolved, "author", None), "id", None)
-                == getattr(self.bot.user, "id", None)):
-            return True
         if mode == "greedy" and self.bot.user:
             pattern = r'(?<![a-z0-9_])' + re.escape(self.bot.user.name.lower()) + r'(?![a-z0-9_])'
             if re.search(pattern, message.content.lower()):
