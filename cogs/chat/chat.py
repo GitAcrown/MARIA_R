@@ -284,6 +284,47 @@ class _ResetNotesButton(discord.ui.Button):
         await interaction.response.edit_message(view=MeView(self.store, self.user_id))
 
 
+_CATEGORY_LABELS: dict[str, str] = {
+    "identité":    "Identité",
+    "préférences": "Préférences",
+    "projets":     "Projets",
+    "perso":       "Perso",
+}
+
+def _format_notes_display(notes: str) -> str:
+    """Formate les notes [catégorie] en blocs groupés lisibles pour l'affichage."""
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for line in notes.splitlines():
+        line = line.strip()
+        if not line or line == "[…]":
+            continue
+        m = re.match(r'^\[([^\]]+)\]\s*(.*)', line)
+        if m:
+            cat, content = m.group(1).lower(), m.group(2).strip()
+            if cat not in groups:
+                groups[cat] = []
+                order.append(cat)
+            if content:
+                groups[cat].append(content)
+        else:
+            cat = "autre"
+            if cat not in groups:
+                groups[cat] = []
+                order.append(cat)
+            groups[cat].append(line)
+
+    parts: list[str] = []
+    for cat in order:
+        items = groups[cat]
+        if not items:
+            continue
+        label = _CATEGORY_LABELS.get(cat, cat.capitalize())
+        parts.append(f"**{label}**\n" + "\n".join(f"- {item}" for item in items))
+
+    return "\n\n".join(parts)
+
+
 class MeView(discord.ui.LayoutView):
     """Affiche les notes de Maria sur l'utilisateur, avec boutons modifier et effacer."""
 
@@ -291,10 +332,13 @@ class MeView(discord.ui.LayoutView):
         super().__init__(timeout=120)
         notes = store.get_notes(user_id)
 
-        notes_text = discord.ui.TextDisplay(
-            notes[:800] + ("…" if len(notes) > 800 else "")
-            if notes else "-# MARIA n'a encore rien retenu sur toi."
-        )
+        if notes:
+            formatted = _format_notes_display(notes)
+            display_text = formatted[:1800] + ("…" if len(formatted) > 1800 else "")
+        else:
+            display_text = "-# MARIA n'a encore rien retenu sur toi."
+
+        notes_text = discord.ui.TextDisplay(display_text)
         edit_section = discord.ui.Section(
             notes_text,
             accessory=_EditNotesButton(store, user_id),
