@@ -43,6 +43,8 @@ class ProfileStore:
         if not addition:
             return
         current = self.get_notes(user_id)
+        if any(addition.lower() == line.strip().lower() for line in current.splitlines()):
+            return
         new = (current + "\n" + addition).strip() if current else addition
         if len(new) > NOTES_MAX:
             head = new[:NOTES_KEEP_HEAD]
@@ -73,6 +75,18 @@ class ProfileStore:
                 except ValueError:
                     pass
         return result
+
+    def search_notes(self, keyword: str) -> dict[int, list[str]]:
+        """Cherche un mot-clé dans toutes les notes. Retourne {user_id: [lignes correspondantes]}."""
+        keyword_lower = keyword.strip().lower()
+        if not keyword_lower:
+            return {}
+        results: dict[int, list[str]] = {}
+        for uid, notes in self.get_all_with_notes().items():
+            matching = [line for line in notes.splitlines() if keyword_lower in line.lower()]
+            if matching:
+                results[uid] = matching
+        return results
 
     def delete(self, user_id: int) -> None:
         s = self._db.settings("user_profiles")
