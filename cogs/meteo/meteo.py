@@ -274,6 +274,107 @@ def _day_container(city: str, d: dict, target: date) -> discord.ui.Container:
 
 
 # ---------------------------------------------------------------------------
+# Résumés LLM — données réelles injectées dans le contexte après l'outil
+# ---------------------------------------------------------------------------
+
+def _current_llm_summary(city_name: str, raw: dict) -> str:
+    main     = raw.get("main", {})
+    temp     = round(main.get("temp", 0))
+    feels    = round(main.get("feels_like", temp))
+    t_min    = round(main.get("temp_min", temp))
+    t_max    = round(main.get("temp_max", temp))
+    humidity = main.get("humidity", 0)
+    wind_kmh = round(raw.get("wind", {}).get("speed", 0) * 3.6)
+    desc     = (raw.get("weather") or [{}])[0].get("description", "")
+    return (
+        f"Météo actuelle à {city_name} : {temp}°C (ressenti {feels}°C), {desc}. "
+        f"Min {t_min}° / Max {t_max}°, humidité {humidity}%, vent {wind_kmh} km/h. "
+        f"Widget affiché. Pour prévisions/demain/semaine, rappelle get_weather."
+    )
+
+
+def _forecast_llm_summary(city_name: str, raw: dict, target_date: str) -> str:
+    if target_date:
+        target = _parse_target_date(target_date)
+        if target:
+            return _day_llm_summary(city_name, raw, target)
+
+    # Panorama 5 jours
+    days: dict[str, dict] = {}
+    for item in raw.get("list", []):
+        dt      = datetime.fromtimestamp(item["dt"], tz=PARIS_TZ)
+        day_key = dt.strftime("%Y-%m-%d")
+        if day_key not in days:
+            days[day_key] = {"dt": dt, "temps": [], "descs": []}
+        days[day_key]["temps"].append(item["main"]["temp"])
+        days[day_key]["descs"].append(item["weather"][0]["description"])
+
+    parts = []
+    for _, info in list(days.items())[:5]:
+        dt    = info["dt"]
+        t_max = round(max(info["temps"]))
+        t_min = round(min(info["temps"]))
+        desc  = Counter(info["descs"]).most_common(1)[0][0]
+        parts.append(f"{_WEEKDAYS_SHORT[dt.weekday()]} {dt.strftime('%d/%m')} : {t_max}°/{t_min}°, {desc}")
+
+    return (
+        f"Prévisions 5 jours pour {city_name} : {' | '.join(parts)}. "
+        f"Widget affiché."
+    )
+
+
+def _day_llm_summary(city_name: str, raw: dict, target: date) -> str:
+    today = datetime.now(PARIS_TZ).date()
+    if target == today + timedelta(days=1):
+        day_label = "demain"
+    elif target == today:
+        day_label = "aujourd'hui"
+    else:
+        day_label = f"{_WEEKDAYS_FULL[target.weekday()]} {target.strftime('%d/%m')}"
+
+    slots = [
+        item for item in raw.get("list", [])
+        if datetime.fromtimestamp(item["dt"], tz=PARIS_TZ).date() == target
+    ]
+
+    if not slots:
+        return (
+            f"Prévisions pour {day_label} à {city_name} : données insuffisantes (hors 5 jours). "
+            f"Widget affiché."
+        )
+
+    all_temps = [s["main"]["temp"] for s in slots]
+    t_max     = round(max(all_temps))
+    t_min     = round(min(all_temps))
+
+    period_parts = []
+    for label, h_start, h_end in _PERIODS:
+        if h_start < h_end:
+            period_slots = [
+                s for s in slots
+                if h_start <= datetime.fromtimestamp(s["dt"], tz=PARIS_TZ).hour < h_end
+            ]
+        else:
+            period_slots = [
+                s for s in slots
+                if datetime.fromtimestamp(s["dt"], tz=PARIS_TZ).hour < h_end
+                or datetime.fromtimestamp(s["dt"], tz=PARIS_TZ).hour >= 22
+            ]
+        if not period_slots:
+            continue
+        p_temp = round(sum(s["main"]["temp"] for s in period_slots) / len(period_slots))
+        p_desc = Counter(s["weather"][0]["description"] for s in period_slots).most_common(1)[0][0]
+        period_parts.append(f"{label} : {p_temp}°C, {p_desc}")
+
+    periods_str = " | ".join(period_parts) if period_parts else "données insuffisantes"
+    return (
+        f"Prévisions pour {day_label} à {city_name} : {periods_str}. "
+        f"Min {t_min}° / Max {t_max}°. Widget affiché. "
+        f"Pour d'autres questions météo, rappelle get_weather."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
 
@@ -342,19 +443,9 @@ class Meteo(commands.Cog):
         city_name = raw.get("name") or raw.get("city", {}).get("name") or city
 
         if weather_type == "forecast":
-            day_label = f" pour {target_date}" if target_date else " 5 jours"
-            llm_summary = (
-                f"Prévisions météo{day_label} affichées pour {city_name}. LayoutView envoyé. "
-                f"Pour d'autres questions sur la météo de {city_name}, rappelle get_weather."
-            )
+            llm_summary = _forecast_llm_summary(city_name, raw, target_date)
         else:
-            main = raw.get("main", {})
-            temp = round(main.get("temp", 0))
-            desc = (raw.get("weather") or [{}])[0].get("description", "")
-            llm_summary = (
-                f"Météo actuelle affichée pour {city_name} : {temp}°C, {desc}. LayoutView envoyé. "
-                f"Pour d'autres questions sur la météo de {city_name} (prévisions, demain, semaine…), rappelle get_weather."
-            )
+            llm_summary = _current_llm_summary(city_name, raw)
 
         return ToolResponseRecord(tc.id, {
             "_tool":        "get_weather",
