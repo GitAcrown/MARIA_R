@@ -247,7 +247,9 @@ class Steam(commands.Cog):
                 description=(
                     "Recherche un jeu sur le Steam Store et affiche sa fiche "
                     "(prix, soldes, avis, description, genres, développeur). "
-                    "Utilise pour : prix d'un jeu, s'il est en solde, ce que c'est, les avis Steam."
+                    "Utilise le nom exact ou le plus précis possible. "
+                    "Si le nom est flou ou incertain, utilise d'abord search_web pour identifier "
+                    "le bon titre Steam, puis appelle search_game."
                 ),
                 properties={
                     "query": {

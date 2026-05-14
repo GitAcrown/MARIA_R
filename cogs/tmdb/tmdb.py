@@ -221,8 +221,9 @@ class TMDB(commands.Cog):
                 description=(
                     "Recherche un film ou une série sur TMDB et affiche sa fiche "
                     "(titre, note, synopsis, genres, durée/saisons). "
-                    "Utilise pour toute question sur un film ou une série : "
-                    "«c'est bien ?», «c'est quoi ?», «résumé de…», «note de…», «ça vaut le coup ?»."
+                    "Utilise le titre exact ou le plus précis possible. "
+                    "Si tu n'es pas sûr du titre (description vague, «le film avec X», titre approximatif), "
+                    "utilise d'abord search_web pour identifier le bon titre, puis appelle search_media."
                 ),
                 properties={
                     "query": {
