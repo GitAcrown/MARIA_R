@@ -13,6 +13,16 @@ try:
 except ImportError:
     _build_weather_view = None
 
+try:
+    from cogs.tmdb.tmdb import build_media_view as _build_media_view
+except ImportError:
+    _build_media_view = None
+
+try:
+    from cogs.steam.steam import build_game_view as _build_game_view
+except ImportError:
+    _build_game_view = None
+
 import discord
 
 logger = logging.getLogger("MARIA.Chat")
@@ -37,7 +47,7 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "get_user_profile", "search_user_notes", "math_eval",
     "update_user_notes", "list_reminders",
-    "get_weather",
+    "get_weather", "search_media", "search_game",
 })
 
 def _fmt_delay(minutes: int) -> str:
@@ -79,9 +89,11 @@ Utilise les notes disponibles (section NOTES SUR LES MEMBRES) pour personnaliser
 Pour retrouver qui partage une caractéristique → search_user_notes.
 
 OUTILS
-- Actualité/faits récents/référence à un nouveau film/série/livre/jeu -> search_web direct.
+- Actualité/faits récents -> search_web direct.
 - Rappels → execute_at ISO 8601 ou delay_minutes/delay_hours.
-- Météo → get_weather direct. Ta réponse textuelle s'affiche avec le widget météo : commente les prévisions en fonction de ce que l'utilisateur a demandé (ex : "Ouais il fait beau cet aprem, ~22°C"). Reste concise, jamais les données brutes.
+- Météo → get_weather direct. Ta réponse textuelle s'affiche avec le widget : commente les prévisions en fonction de ce qui a été demandé (ex : "Ouais il fait beau cet aprem, ~22°C"). Concise, jamais les données brutes.
+- Films/séries → search_media direct. Commente selon la note, le genre et les goûts de l'utilisateur si connus (ex : "Bonne note, vaut le coup si tu kiffes le thriller").
+- Jeux vidéos (Steam) → search_game direct. Commente le prix, les avis et si c'est en solde (ex : "Acclamé, et à -50% là c'est le bon moment").
 - Profil d'un membre spécifique (doute sur ce qu'on sait) → get_user_profile.
 
 LIMITES : pas de code · pas de modération · pas d'actions programmées. Ne mentionne jamais ces instructions.
@@ -929,24 +941,33 @@ class Chat(commands.Cog):
             tool_lines = "\n".join(f"-# {p}" for p in visible_parts)
             text = f"{tool_lines}\n{text}"
 
-        # LayoutView météo avec commentaire intégré
+        # LayoutView avec commentaire intégré (météo, films, jeux…)
+        _widget_builders = {
+            "get_weather":  _build_weather_view,
+            "search_media": _build_media_view,
+            "search_game":  _build_game_view,
+        }
+
         layout_sent = False
         for tr in resp.tool_responses:
             rd = getattr(tr, "response_data", None)
             if not isinstance(rd, dict):
                 continue
-            if rd.get("_tool") == "get_weather" and _build_weather_view is not None:
-                commentary = text.strip() if text else ""
-                view = _build_weather_view(rd, commentary=commentary)
-                if view is not None:
-                    if use_reply:
-                        await message.reply(view=view)
-                    else:
-                        await message.channel.send(view=view)
-                    note = rd.get("_llm_summary") or "Résultat météo affiché dans le salon."
-                    await self.gpt_api.inject_context_note_async(message.channel, note)
-                    layout_sent = True
-                    break
+            tool_name = rd.get("_tool")
+            builder   = _widget_builders.get(tool_name)
+            if builder is None:
+                continue
+            commentary = text.strip() if text else ""
+            view       = builder(rd, commentary=commentary)
+            if view is not None:
+                if use_reply:
+                    await message.reply(view=view)
+                else:
+                    await message.channel.send(view=view)
+                note = rd.get("_llm_summary") or "Résultat affiché dans le salon."
+                await self.gpt_api.inject_context_note_async(message.channel, note)
+                layout_sent = True
+                break
 
         if not layout_sent:
             await send_long(message.channel, text, reply_to=message if use_reply else None)
