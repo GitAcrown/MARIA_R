@@ -95,7 +95,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     # Note + synopsis
     if rating and vote_count:
         stars     = "★" * round(rating / 2) + "☆" * (5 - round(rating / 2))
-        rating_ln = f"{stars}  **{rating:.1f}/10**  -# ({vote_count:,} votes)"
+        rating_ln = f"{stars}  **{rating:.1f}/10**  ·  {vote_count:,} votes"
     elif rating:
         rating_ln = f"**{rating:.1f}/10**"
     else:
