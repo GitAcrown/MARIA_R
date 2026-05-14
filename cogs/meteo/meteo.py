@@ -81,8 +81,12 @@ def _parse_target_date(target_date: str) -> Optional[date]:
 # Builders de vue
 # ---------------------------------------------------------------------------
 
-def build_weather_view(data: dict) -> Optional[discord.ui.LayoutView]:
-    """Construit le LayoutView à partir des données retournées par l'outil."""
+def build_weather_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Construit le LayoutView à partir des données retournées par l'outil.
+
+    Si commentary est fourni, il est affiché en tête du message (réponse de l'IA)
+    suivi du widget météo dans le même message Discord.
+    """
     if "error" in data or "data" not in data:
         return None
     weather_type = data.get("type", "current")
@@ -94,18 +98,24 @@ def build_weather_view(data: dict) -> Optional[discord.ui.LayoutView]:
         if weather_type == "forecast":
             if target_date_str:
                 target = _parse_target_date(target_date_str)
-                if target:
-                    return _day_view(city, raw, target)
-            return _forecast_view(city, raw)
-        return _current_view(city, raw)
+                container = _day_container(city, raw, target) if target else _forecast_container(city, raw)
+            else:
+                container = _forecast_container(city, raw)
+        else:
+            container = _current_container(city, raw)
     except Exception as e:
         logger.error(f"Erreur build_weather_view: {e}", exc_info=True)
         return None
 
-
-def _current_view(city: str, d: dict) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
+    if commentary:
+        view.add_item(discord.ui.TextDisplay(commentary))
+        view.add_item(discord.ui.Separator())
+    view.add_item(container)
+    return view
 
+
+def _current_container(city: str, d: dict) -> discord.ui.Container:
     weather   = d["weather"][0]
     icon_code = weather.get("icon", "01d")
     description = weather.get("description", "").capitalize()
@@ -146,13 +156,10 @@ def _current_view(city: str, d: dict) -> discord.ui.LayoutView:
     sep3   = discord.ui.Separator()
     footer = discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC")
 
-    view.add_item(discord.ui.Container(header, sep1, main_section, sep2, details, sep3, footer))
-    return view
+    return discord.ui.Container(header, sep1, main_section, sep2, details, sep3, footer)
 
 
-def _forecast_view(city: str, d: dict) -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=None)
-
+def _forecast_container(city: str, d: dict) -> discord.ui.Container:
     country   = d.get("city", {}).get("country", "")
     city_full = f"{city}, {country}" if country else city
     updated   = datetime.now(timezone.utc).strftime("%H:%M")
@@ -187,14 +194,11 @@ def _forecast_view(city: str, d: dict) -> discord.ui.LayoutView:
             children.append(discord.ui.Separator())
 
     children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC")]
-    view.add_item(discord.ui.Container(*children))
-    return view
+    return discord.ui.Container(*children)
 
 
-def _day_view(city: str, d: dict, target: date) -> discord.ui.LayoutView:
-    """Vue détaillée pour un jour spécifique : matin / après-midi / soir / nuit."""
-    view = discord.ui.LayoutView(timeout=None)
-
+def _day_container(city: str, d: dict, target: date) -> discord.ui.Container:
+    """Conteneur détaillé pour un jour spécifique : matin / après-midi / soir / nuit."""
     country   = d.get("city", {}).get("country", "")
     city_full = f"{city}, {country}" if country else city
     updated   = datetime.now(timezone.utc).strftime("%H:%M")
@@ -215,7 +219,7 @@ def _day_view(city: str, d: dict, target: date) -> discord.ui.LayoutView:
 
     if not slots:
         # Jour hors des 5 jours → fallback vue 5j
-        return _forecast_view(city, d)
+        return _forecast_container(city, d)
 
     all_temps = [s["main"]["temp"] for s in slots]
     t_max     = round(max(all_temps))
@@ -266,8 +270,7 @@ def _day_view(city: str, d: dict, target: date) -> discord.ui.LayoutView:
         f"  ·  💨 {wind_kmh} km/h {_wind_dir(wind_deg)}"
     ))
     children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC")]
-    view.add_item(discord.ui.Container(*children))
-    return view
+    return discord.ui.Container(*children)
 
 
 # ---------------------------------------------------------------------------
