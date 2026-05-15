@@ -10,3 +10,4 @@ readability-lxml
 trafilatura
 lxml
 numexpr
+tabulate

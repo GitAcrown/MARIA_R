@@ -7,12 +7,53 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+try:
+    from tabulate import tabulate as _tabulate
+    _HAS_TABULATE = True
+except ImportError:
+    _HAS_TABULATE = False
+
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.Layout")
 
 _MAX_BLOCKS  = 12
 _MAX_CONTENT = 600
+_MAX_COLS    = 8
+_MAX_ROWS    = 20
+
+
+# ---------------------------------------------------------------------------
+# Rendu tableau
+# ---------------------------------------------------------------------------
+
+def _render_table(headers: list, rows: list) -> str:
+    """Génère un tableau ASCII dans un codeblock Discord."""
+    if not rows and not headers:
+        return ""
+
+    # Sanitize
+    headers = [str(h)[:40] for h in (headers or [])[:_MAX_COLS]]
+    rows    = [[str(c)[:40] for c in row[:_MAX_COLS]] for row in rows[:_MAX_ROWS]]
+
+    if _HAS_TABULATE:
+        table = _tabulate(rows, headers=headers, tablefmt="simple")
+    else:
+        # Fallback manuel si tabulate absent
+        col_widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < len(col_widths):
+                    col_widths[i] = max(col_widths[i], len(cell))
+        sep  = "  ".join("-" * w for w in col_widths)
+        head = "  ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+        body = "\n".join(
+            "  ".join((cell if i < len(row) else "").ljust(col_widths[i]) for i, cell in enumerate(row))
+            for row in rows
+        )
+        table = f"{head}\n{sep}\n{body}" if headers else body
+
+    return f"```\n{table}\n```"
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +89,13 @@ def build_custom_view(data: dict, commentary: str = "") -> Optional[discord.ui.L
                     children.append(text_block)
             except Exception:
                 children.append(text_block)
+
+        elif btype == "table":
+            headers = block.get("headers") or []
+            rows    = block.get("rows") or []
+            table_text = _render_table(headers, rows)
+            if table_text:
+                children.append(discord.ui.TextDisplay(table_text))
 
         else:  # text
             if content:
@@ -97,15 +145,15 @@ class Layout(commands.Cog):
             Tool(
                 name="create_layout",
                 description=(
-                    "Affiche un widget visuel personnalisé (carte, fiche, comparaison, liste structurée). "
-                    "Utilise uniquement quand la mise en forme visuelle apporte vraiment par rapport à du texte brut "
-                    "(ex : fiche avec image, comparaison côte à côte, récapitulatif multi-champs). "
-                    "Pas pour les simples réponses conversationnelles. "
+                    "Affiche un widget visuel personnalisé (carte, fiche, comparaison, tableau, liste structurée). "
+                    "Utilise uniquement quand la mise en forme visuelle apporte vraiment par rapport à du texte brut. "
+                    "Pas pour les réponses conversationnelles simples. "
                     "commentary : ta réponse/intro affichée en tête du widget. "
-                    "blocks : liste de blocs dans l'ordre — "
-                    "text (markdown Discord : **gras**, ## titre, -# petit), "
-                    "separator (ligne de séparation), "
-                    "section (texte + image thumbnail optionnelle)."
+                    "Blocs disponibles : "
+                    "text (markdown Discord : **gras**, ## titre, -# petit texte) ; "
+                    "separator (ligne de séparation) ; "
+                    "section (texte + image thumbnail optionnelle) ; "
+                    "table (tableau formaté automatiquement — fournir headers + rows, PAS de markdown table manuel)."
                 ),
                 properties={
                     "commentary": {
@@ -120,19 +168,32 @@ class Layout(commands.Cog):
                             "properties": {
                                 "type": {
                                     "type":        "string",
-                                    "enum":        ["text", "separator", "section"],
-                                    "description": "text: bloc texte markdown. separator: ligne. section: texte + thumbnail.",
+                                    "enum":        ["text", "separator", "section", "table"],
+                                    "description": "text: markdown. separator: ligne. section: texte+thumbnail. table: tableau ASCII auto.",
                                 },
                                 "content": {
                                     "type":        ["string", "null"],
-                                    "description": "Texte markdown pour type text/section. null pour separator.",
+                                    "description": "Texte markdown pour text/section. null pour separator et table.",
                                 },
                                 "thumbnail_url": {
                                     "type":        ["string", "null"],
-                                    "description": "URL https d'une image pour type section. null sinon.",
+                                    "description": "URL https image pour section. null sinon.",
+                                },
+                                "headers": {
+                                    "type":        ["array", "null"],
+                                    "description": "Noms de colonnes pour type table. null sinon.",
+                                    "items":       {"type": "string"},
+                                },
+                                "rows": {
+                                    "type":        ["array", "null"],
+                                    "description": "Lignes du tableau pour type table (liste de listes de strings). null sinon.",
+                                    "items": {
+                                        "type":  "array",
+                                        "items": {"type": "string"},
+                                    },
                                 },
                             },
-                            "required":             ["type", "content", "thumbnail_url"],
+                            "required":             ["type", "content", "thumbnail_url", "headers", "rows"],
                             "additionalProperties": False,
                         },
                     },
