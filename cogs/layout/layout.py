@@ -150,10 +150,11 @@ class Layout(commands.Cog):
                     "Pas pour les réponses conversationnelles simples. "
                     "commentary : ta réponse/intro affichée en tête du widget. "
                     "Blocs disponibles : "
-                    "text (markdown Discord : **gras**, ## titre, -# petit texte) ; "
-                    "separator (ligne de séparation) ; "
-                    "section (texte + image thumbnail optionnelle) ; "
-                    "table (tableau formaté automatiquement — fournir headers + rows, PAS de markdown table manuel)."
+                    "text (markdown Discord : **gras**, ## titre, -# petit) ; "
+                    "separator ; "
+                    "section (texte + thumbnail optionnel) ; "
+                    "table (OBLIGATOIRE pour tout tableau — fournir headers + rows en JSON, "
+                    "JAMAIS de syntaxe |---|--- dans un bloc text)."
                 ),
                 properties={
                     "commentary": {
