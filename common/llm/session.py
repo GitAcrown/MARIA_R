@@ -4,8 +4,11 @@ import asyncio
 import json
 import logging
 import re
+import zoneinfo
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
+
+_PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 
 import discord
 
@@ -207,10 +210,11 @@ class ChannelSession:
                         parts.append(ImageComponent(att.url, detail="low"))
 
         # --- Texte principal ---
+        msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
         if text.strip():
-            parts.append(TextComponent(f"{user_name}: {message.clean_content}"))
+            parts.append(TextComponent(f"[{msg_time}] {user_name}: {message.clean_content}"))
         elif not is_context_only and (message.embeds or message.stickers or message.attachments):
-            parts.append(TextComponent(f"{user_name}:"))
+            parts.append(TextComponent(f"[{msg_time}] {user_name}:"))
 
         # --- Média (uniquement pour les messages adressés au bot) ---
         if not is_context_only:
@@ -270,7 +274,8 @@ class ChannelSession:
                     parts.append(ImageComponent(url, detail="auto"))
 
         if not parts:
-            parts.append(TextComponent(f"{user_name}: (message vide)"))
+            msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
+            parts.append(TextComponent(f"[{msg_time}] {user_name}: (message vide)"))
 
         record = self.context.add_user_message(components=parts, name=user_name)
         if hasattr(record, "metadata"):
