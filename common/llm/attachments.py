@@ -12,8 +12,6 @@ from .client import MariaLLMClient
 
 logger = logging.getLogger("llm.attachments")
 
-TEMP_DIR = Path("./temp")
-TEMP_DIR.mkdir(exist_ok=True)
 MAX_TEXT_SIZE = 1024 * 1024  # 1 Mo
 MAX_TEXT_CHARS = 80000
 AUDIO_EXT = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}

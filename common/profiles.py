@@ -1,10 +1,6 @@
 """Profils utilisateur — notes dynamiques maintenues par le modèle."""
 
-import logging
-
 from common.dataio import CogData, DictTableBuilder
-
-logger = logging.getLogger("profiles")
 
 # Format attendu des notes : lignes "[catégorie] info"
 # Ex: "[identité] Théo, 24 ans, dev à Lyon"
@@ -77,7 +73,6 @@ class ProfileStore:
         return result
 
     def search_notes(self, keyword: str) -> dict[int, list[str]]:
-        """Cherche un mot-clé dans toutes les notes. Retourne {user_id: [lignes correspondantes]}."""
         keyword_lower = keyword.strip().lower()
         if not keyword_lower:
             return {}
@@ -87,7 +82,3 @@ class ProfileStore:
             if matching:
                 results[uid] = matching
         return results
-
-    def delete(self, user_id: int) -> None:
-        s = self._db.settings("user_profiles")
-        s.delete(f"notes_{user_id}")

@@ -1,7 +1,6 @@
 """Outils — registre et exécution."""
 
 import inspect
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Union, Awaitable

@@ -1,14 +1,11 @@
 """Contexte de conversation — fenêtre restreinte, trim simple."""
 
 import json
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import tiktoken
-
-logger = logging.getLogger("llm.context")
 
 TOKENIZER = tiktoken.get_encoding("cl100k_base")
 

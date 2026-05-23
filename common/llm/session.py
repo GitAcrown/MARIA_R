@@ -12,7 +12,7 @@ _PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 
 import discord
 
-from .client import MariaLLMClient, MariaOpenAIError, MODEL_NANO
+from .client import MariaLLMClient, MariaOpenAIError
 from .context import (
     ConversationContext,
     MessageRecord,

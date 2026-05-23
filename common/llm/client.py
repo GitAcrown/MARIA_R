@@ -10,7 +10,6 @@ logger = logging.getLogger("llm.client")
 
 # Modèles
 MODEL_MAIN = "gpt-5.4-nano"
-MODEL_NANO = "gpt-5.4-nano"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
 
 
@@ -69,20 +68,6 @@ class MariaLLMClient:
             self._stats["errors"] += 1
             raise MariaOpenAIError(str(e)) from e
 
-    async def summarize(self, prompt: str, max_tokens: int = 200) -> Optional[str]:
-        """Résumé rapide via nano — ne consomme pas de tokens du modèle principal."""
-        try:
-            r = await self._client.chat.completions.create(
-                model=MODEL_NANO,
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=max_tokens,
-            )
-            content = r.choices[0].message.content
-            return content.strip() if content else None
-        except Exception as e:
-            logger.warning(f"Summarize failed: {e}")
-            return None
-
     async def transcribe(self, audio_file, *, model: Optional[str] = None) -> str:
         """Transcription audio."""
         try:
@@ -95,9 +80,6 @@ class MariaLLMClient:
         except (openai.BadRequestError, openai.OpenAIError) as e:
             self._stats["errors"] += 1
             raise MariaOpenAIError(str(e)) from e
-
-    def get_stats(self) -> dict:
-        return self._stats.copy()
 
     async def close(self) -> None:
         await self._client.close()

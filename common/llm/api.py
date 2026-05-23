@@ -26,10 +26,6 @@ class MariaResponse:
         # Chaque entrée : {"name": str, "args": dict}
         self.used_tools: list[dict] = used_tools or []
 
-    @property
-    def has_tools(self) -> bool:
-        return bool(self.used_tools)
-
 
 class MariaGptApi:
     """API GPT — point d'entrée unique."""
@@ -97,15 +93,6 @@ class MariaGptApi:
 
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
 
-    def inject_context_note(self, channel: discord.abc.Messageable, note: str) -> None:
-        """Injecte une note système synchrone (sans garantie de séquençage)."""
-        from .context import TextComponent
-        session = self.session_manager.get_or_create(channel)
-        session.context.add_user_message(
-            components=[TextComponent(f"[SYSTEM] {note}")],
-            name="system",
-        )
-
     async def inject_context_note_async(self, channel: discord.abc.Messageable, note: str) -> None:
         """Injecte une note système en acquérant le lock de session.
         Garantit que la note est visible pour le prochain run_completion."""
@@ -116,12 +103,6 @@ class MariaGptApi:
                 components=[TextComponent(f"[SYSTEM] {note}")],
                 name="system",
             )
-
-    def add_tools(self, *tools: Tool) -> None:
-        self.tool_registry.register_multiple(*tools)
-
-    def remove_tool(self, name: str) -> None:
-        self.tool_registry.unregister(name)
 
     def update_tools(self, tools: Iterable[Tool]) -> None:
         self.tool_registry.clear()
