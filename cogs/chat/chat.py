@@ -351,6 +351,87 @@ class MeView(discord.ui.LayoutView):
         ))
 
 
+# ---------------------------------------------------------------------------
+# Debug notes (admin)
+# ---------------------------------------------------------------------------
+
+class AdminEditNotesModal(discord.ui.Modal, title="Modifier les notes (admin)"):
+    def __init__(self, store: ProfileStore, target: discord.Member, current: str):
+        super().__init__()
+        self.store = store
+        self.target = target
+        self.notes_input = discord.ui.TextInput(
+            label="Notes (format : [catégorie] info)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Ex: [identité] Théo, 24 ans\n[préférences] déteste les zombies",
+            default=current[:2000],
+            max_length=2000,
+            required=False,
+        )
+        self.add_item(self.notes_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        self.store.set_notes(self.target.id, self.notes_input.value.strip())
+        await interaction.response.edit_message(view=DebugNotesView(self.store, self.target))
+
+
+class _AdminEditButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, target: discord.Member):
+        super().__init__(label="Modifier", style=discord.ButtonStyle.primary)
+        self.store = store
+        self.target = target
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            AdminEditNotesModal(self.store, self.target, self.store.get_notes(self.target.id))
+        )
+
+
+class _AdminResetButton(discord.ui.Button):
+    def __init__(self, store: ProfileStore, target: discord.Member, has_notes: bool):
+        super().__init__(label="Tout effacer", style=discord.ButtonStyle.danger, disabled=not has_notes)
+        self.store = store
+        self.target = target
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.store.set_notes(self.target.id, "")
+        await interaction.response.edit_message(view=DebugNotesView(self.store, self.target))
+
+
+class DebugNotesView(discord.ui.LayoutView):
+    """Vue admin : notes d'un membre quelconque, modifiables sans restriction."""
+
+    def __init__(self, store: ProfileStore, target: discord.Member):
+        super().__init__(timeout=180)
+        notes = store.get_notes(target.id)
+
+        if notes:
+            formatted = _format_notes_display(notes)
+            display_text = formatted[:1800] + ("…" if len(formatted) > 1800 else "")
+        else:
+            display_text = "-# Aucune note pour cet utilisateur."
+
+        notes_text = discord.ui.TextDisplay(display_text)
+        edit_section = discord.ui.Section(
+            notes_text,
+            accessory=_AdminEditButton(store, target),
+        )
+        reset_label = discord.ui.TextDisplay("-# Réinitialise toutes les notes.")
+        reset_section = discord.ui.Section(
+            reset_label,
+            accessory=_AdminResetButton(store, target, bool(notes)),
+        )
+        raw_label = discord.ui.TextDisplay(f"-# Brut : `{notes[:120]}{'…' if len(notes) > 120 else ''}`" if notes else "-# (vide)")
+
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"## Notes · {target.display_name}"),
+            discord.ui.Separator(),
+            edit_section,
+            discord.ui.Separator(),
+            reset_section,
+            discord.ui.Separator(),
+            raw_label,
+        ))
 
 # ---------------------------------------------------------------------------
 # Cog
@@ -1060,6 +1141,14 @@ class Chat(commands.Cog):
         state = "activée" if actif else "désactivée"
         await interaction.response.send_message(
             f"Transcription automatique des messages vocaux **{state}** sur ce salon.", ephemeral=True
+        )
+
+    @chatbot.command(name="notes", description="[Admin] Consulte et modifie les notes de MARIA sur un membre")
+    @app_commands.describe(membre="Membre dont tu veux voir les notes")
+    async def chatbot_notes(self, interaction: discord.Interaction, membre: discord.Member) -> None:
+        await interaction.response.send_message(
+            view=DebugNotesView(self.profiles, membre),
+            ephemeral=True,
         )
 
 
