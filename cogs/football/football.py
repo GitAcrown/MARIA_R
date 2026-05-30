@@ -11,6 +11,7 @@ Mode snapshot : score figé au moment de la requête (rappeler l'outil pour rafr
 
 import asyncio
 import logging
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -54,14 +55,14 @@ def _status_label(fixture: dict) -> str:
     elapsed = status.get("elapsed")
 
     if short in _LIVE_STATUSES:
-        return f"🔴 {elapsed}'" if elapsed else "🔴 En direct"
+        return f"En direct · {elapsed}'" if elapsed else "En direct"
     if short == _HALFTIME_STATUS:
-        return "⏸️ Mi-temps"
+        return "Mi-temps"
     if short in _FINISHED_STATUSES:
         suffix = {"AET": " (a.p.)", "PEN": " (t.a.b.)"}.get(short, "")
-        return f"⏹️ Terminé{suffix}"
+        return f"Terminé{suffix}"
     if short in ("NS", "TBD"):
-        return "🕒 À venir"
+        return "À venir"
     return {
         "PST": "Reporté", "CANC": "Annulé", "ABD": "Abandonné",
         "SUSP": "Suspendu", "AWD": "Forfait", "WO": "Forfait",
@@ -134,6 +135,21 @@ def _to_int(val) -> Optional[int]:
         return int(val)
     except (TypeError, ValueError):
         return None
+
+
+def _norm_name(name: str) -> str:
+    """Normalise un nom d'équipe pour comparaison : minuscules, sans accents ni séparateurs."""
+    if not name:
+        return ""
+    txt = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    return "".join(c for c in txt.lower() if c.isalnum())
+
+
+def _name_matches(target: str, candidate: str) -> bool:
+    t, c = _norm_name(target), _norm_name(candidate)
+    if not t or not c:
+        return False
+    return t == c or t in c or c in t
 
 
 _TSDB_FINISHED = {"Match Finished", "FT", "AET", "After Extra Time", "Pen", "PEN"}
@@ -426,9 +442,8 @@ class Football(commands.Cog):
         items = payload.get("results") if kind == "last" else payload.get("events")
         return items[0] if items else None
 
-    def _tsdb_card(self, team_name: str, when: str) -> Optional[dict]:
+    def _tsdb_card_from(self, team: Optional[dict], when: str) -> Optional[dict]:
         """Fiche légère (dernier résultat / prochain match) via l'API gratuite."""
-        team = self._tsdb_resolve(team_name)
         if not team:
             return None
         team_id = team.get("idTeam")
@@ -448,17 +463,42 @@ class Football(commands.Cog):
 
     # -- API-Football (payant, réservé au live) ------------------------------
 
-    def _af_live_match(self, team_name: str) -> Optional[dict]:
-        """Match en direct via API-Football, avec buteurs + stats. None si pas live."""
+    def _af_live_match(self, *names: str) -> Optional[dict]:
+        """Cherche un match en direct via API-Football pour une des graphies données.
+
+        On récupère TOUS les matchs en direct puis on filtre côté code (le combo
+        team+live de l'API est peu fiable). Match par id d'équipe sinon par nom.
+        """
         if not self._api_key:
             return None
-        team_id = self._resolve_team(team_name)
-        if team_id is None:
+        names = tuple(n for n in names if n)
+        if not names:
             return None
-        live = self._get("fixtures", {"team": team_id, "live": "all"})
-        if not live or live.get("_auth_error") or not live.get("response"):
+
+        payload = self._get("fixtures", {"live": "all"})
+        if not payload or payload.get("_auth_error") or not payload.get("response"):
             return None
-        return self._enrich_fixture(live["response"][0])
+        fixtures = payload["response"]
+
+        # 1) Tentative par id d'équipe (recherche API-Football, en cache)
+        for name in names:
+            team_id = self._resolve_team(name)
+            if team_id is None:
+                continue
+            for fx in fixtures:
+                teams = fx.get("teams", {})
+                if team_id in ((teams.get("home") or {}).get("id"), (teams.get("away") or {}).get("id")):
+                    return self._enrich_fixture(fx)
+
+        # 2) Repli par correspondance de nom
+        for fx in fixtures:
+            teams = fx.get("teams", {})
+            home  = (teams.get("home") or {}).get("name", "")
+            away  = (teams.get("away") or {}).get("name", "")
+            if any(_name_matches(n, home) or _name_matches(n, away) for n in names):
+                return self._enrich_fixture(fx)
+
+        return None
 
     def _enrich_fixture(self, fixture: dict) -> dict:
         """Ajoute events (buteurs) et statistiques pour un match en direct."""
@@ -491,20 +531,23 @@ class Football(commands.Cog):
 
     def _fetch_team_match(self, team_name: str, when: str) -> dict:
         """Live → API-Football ; reste → TheSportsDB (gratuit)."""
+        # Résolution sur l'API gratuite (gère bien les alias type "PSG")
+        tsdb_team = self._tsdb_resolve(team_name)
+        canonical = (tsdb_team or {}).get("strTeam") or ""
+
         # Cas explicitement non-live : API gratuite uniquement
         if when in ("next", "last"):
-            card = self._tsdb_card(team_name, when)
-            if card:
-                return card
-            return {"error": f"Aucun match trouvé pour {team_name}"}
+            card = self._tsdb_card_from(tsdb_team, when)
+            return card or {"error": f"Aucun match trouvé pour {team_name}"}
 
-        # when == "live" ou "auto" : on tente le live (API-Football) d'abord
-        live = self._af_live_match(team_name)
+        # when == "live" ou "auto" : on tente le live (API-Football) d'abord,
+        # en cherchant avec le nom saisi ET le nom canonique.
+        live = self._af_live_match(team_name, canonical)
         if live:
             return live
 
         # Pas de live → fiche gratuite (dernier résultat / prochain)
-        card = self._tsdb_card(team_name, "auto")
+        card = self._tsdb_card_from(tsdb_team, "auto")
         if card:
             return card
 
