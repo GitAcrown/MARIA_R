@@ -11,6 +11,7 @@ Mode snapshot : score figé au moment de la requête (rappeler l'outil pour rafr
 
 import asyncio
 import logging
+import random
 import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
@@ -55,7 +56,8 @@ def _status_label(fixture: dict) -> str:
     elapsed = status.get("elapsed")
 
     if short in _LIVE_STATUSES:
-        return f"En direct · {elapsed}'" if elapsed else "En direct"
+        live_word = "EN DIRET" if random.random() < 0.2 else "EN DIRECT"
+        return f"{live_word} · {elapsed}'" if elapsed else live_word
     if short == _HALFTIME_STATUS:
         return "Mi-temps"
     if short in _FINISHED_STATUSES:
