@@ -1,10 +1,12 @@
 """Cog Football — Scores et matchs de foot.
 
-Deux sources pour préserver le quota :
-- API-Football (api-sports.io) : uniquement le LIVE (score minute par minute,
-  buteurs, statistiques). Tier gratuit limité à 100 requêtes/jour.
-- TheSportsDB (clé publique gratuite, généreuse) : tout le NON-live, c.-à-d.
-  dernier résultat et prochain match. Pas de live ni de stats.
+Deux sources :
+- API-Football (api-sports.io) : source PRIORITAIRE (plus précise) pour un match
+  donné — live (score minute par minute, buteurs, stats), dernier résultat,
+  prochain match. Tier gratuit limité à 100 requêtes/jour.
+- TheSportsDB (clé publique gratuite, généreuse) : SECOURS quand le quota
+  API-Football est épuisé/indisponible, et source des listes "infos générales"
+  (ex: les 5 derniers matchs d'une équipe) pour économiser le quota.
 
 Mode snapshot : score figé au moment de la requête (rappeler l'outil pour rafraîchir).
 """
@@ -154,6 +156,11 @@ def _name_matches(target: str, candidate: str) -> bool:
     return t == c or t in c or c in t
 
 
+def _af_down(payload: Optional[dict]) -> bool:
+    """True si l'appel API-Football a échoué ou est indisponible (→ repli TheSportsDB)."""
+    return payload is None or bool(payload.get("_unavailable"))
+
+
 _TSDB_FINISHED = {"Match Finished", "FT", "AET", "After Extra Time", "Pen", "PEN"}
 
 
@@ -236,6 +243,22 @@ def _match_llm_summary(m: dict) -> str:
     return " | ".join(parts)
 
 
+def _match_list_llm_summary(matches: list, title: str) -> str:
+    if not matches:
+        return f"Aucun match récent pour {title}. Widget affiché."
+    parts = [f"Derniers matchs de {title} :"]
+    for m in matches[:5]:
+        teams = m["teams"]
+        goals = m["goals"]
+        home  = teams.get("home", {}).get("name", "?")
+        away  = teams.get("away", {}).get("name", "?")
+        gh, ga = goals.get("home"), goals.get("away")
+        score  = f"{gh}-{ga}" if gh is not None and ga is not None else "vs"
+        parts.append(f"{home} {score} {away}")
+    parts.append("Widget affiché.")
+    return " | ".join(parts)
+
+
 def _live_list_llm_summary(matches: list) -> str:
     if not matches:
         return "Aucun match en direct actuellement. Widget affiché."
@@ -266,6 +289,8 @@ def build_football_view(data: dict, commentary: str = "") -> Optional[discord.ui
         container = _match_container(data["result"])
     elif mode == "live_list":
         container = _live_list_container(data.get("results", []))
+    elif mode == "match_list":
+        container = _match_list_container(data.get("results", []), data.get("title", "Derniers matchs"))
     else:
         return None
 
@@ -346,6 +371,30 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
     return discord.ui.Container(*children)
 
 
+def _match_list_container(matches: list, title: str) -> Optional[discord.ui.Container]:
+    header = discord.ui.TextDisplay(f"## ⚽ Derniers matchs · {title}")
+    children: list = [header, discord.ui.Separator()]
+
+    if not matches:
+        children.append(discord.ui.TextDisplay("-# Aucun match récent."))
+        return discord.ui.Container(*children)
+
+    lines = []
+    for m in matches[:5]:
+        teams = m["teams"]
+        goals = m["goals"]
+        home  = teams.get("home", {}).get("name", "?")
+        away  = teams.get("away", {}).get("name", "?")
+        gh, ga = goals.get("home"), goals.get("away")
+        score  = f"{gh}-{ga}" if gh is not None and ga is not None else "vs"
+        date   = m.get("_kickoff_human", "")
+        date_str = f"  `{date[:5]}`" if date else ""
+        lines.append(f"{home} **{score}** {away}{date_str}")
+    children.append(discord.ui.TextDisplay("\n".join(lines)))
+    children += [discord.ui.Separator(), discord.ui.TextDisplay("-# Source : TheSportsDB")]
+    return discord.ui.Container(*children)
+
+
 def _live_list_container(matches: list) -> Optional[discord.ui.Container]:
     header = discord.ui.TextDisplay("## ⚽ Matchs en direct")
     children: list = [header, discord.ui.Separator()]
@@ -379,10 +428,12 @@ class Football(commands.Cog):
         cfg = getattr(bot, "config", {})
         self._api_key: str = cfg.get("API_FOOTBALL_KEY", "") or ""
         self._tsdb_key: str = cfg.get("THESPORTSDB_KEY", "") or "123"
+        self._id_cache: dict[str, Optional[int]] = {}
 
     # -- Requêtes API (synchrones, exécutées dans un thread) ----------------
 
     def _get(self, endpoint: str, params: dict) -> Optional[dict]:
+        """Appel API-Football. Renvoie {"_unavailable": True} si quota/clé/erreur API."""
         try:
             r = requests.get(
                 f"{API_BASE}/{endpoint}",
@@ -390,17 +441,23 @@ class Football(commands.Cog):
                 headers={"x-apisports-key": self._api_key},
                 timeout=8,
             )
-            if r.status_code == 401 or r.status_code == 403:
-                return {"_auth_error": True}
+            if r.status_code in (401, 403, 429):
+                logger.warning(f"API-Football {endpoint} indisponible (HTTP {r.status_code})")
+                return {"_unavailable": True}
             if not r.ok:
                 logger.warning(f"API-Football {endpoint} → {r.status_code}")
                 return None
-            return r.json()
-        except requests.RequestException as e:
+            data = r.json()
+            # Quota journalier / limite de plan : HTTP 200 mais champ errors non vide
+            if data.get("errors"):
+                logger.warning(f"API-Football {endpoint} errors : {data['errors']}")
+                return {"_unavailable": True}
+            return data
+        except (requests.RequestException, ValueError) as e:
             logger.warning(f"API-Football {endpoint} : {e}")
             return None
 
-    # -- TheSportsDB (gratuit) : tout ce qui n'est pas live -----------------
+    # -- TheSportsDB (gratuit) : secours quota + listes générales -----------
 
     def _tsdb_get(self, endpoint: str, params: dict) -> Optional[dict]:
         try:
@@ -449,32 +506,78 @@ class Football(commands.Cog):
             return None
         return {"mode": "match", "result": _normalize_tsdb(ev, team)}
 
-    # -- API-Football (payant, réservé au live) ------------------------------
+    # -- TheSportsDB : listes "infos générales" (derniers matchs) ------------
 
-    def _af_live_match(self, *names: str) -> Optional[dict]:
-        """Cherche un match en direct via API-Football pour une des graphies données.
+    def _tsdb_recent_list(self, team: Optional[dict], team_name: str) -> dict:
+        """Liste des derniers matchs d'une équipe (gratuit, économise le quota)."""
+        if not team or not team.get("idTeam"):
+            return {"error": f"Équipe introuvable : {team_name!r}"}
+        payload = self._tsdb_get("eventslast.php", {"id": team["idTeam"]})
+        results = (payload or {}).get("results") or []
+        if not results:
+            return {"error": f"Aucun match récent pour {team_name}"}
+        matches = [_normalize_tsdb(ev, team) for ev in results[:5]]
+        return {"mode": "match_list", "results": matches,
+                "title": team.get("strTeam") or team_name}
 
-        Un seul appel (live=all) : la réponse contient déjà noms et ids, on filtre
-        côté code par nom (le nom canonique TheSportsDB gère les alias type "PSG").
-        """
-        if not self._api_key:
-            return None
+    # -- API-Football (source prioritaire) -----------------------------------
+
+    def _af_resolve_id(self, *names: str) -> Optional[int]:
+        """Résout l'id d'équipe API-Football (avec cache). None si introuvable/indispo."""
+        for name in names:
+            if not name:
+                continue
+            key = _norm_name(name)
+            if key in self._id_cache:
+                if self._id_cache[key] is not None:
+                    return self._id_cache[key]
+                continue
+            payload = self._get("teams", {"search": name})
+            if _af_down(payload):
+                return None
+            resp = payload.get("response") or []
+            tid = resp[0].get("team", {}).get("id") if resp else None
+            self._id_cache[key] = tid
+            if tid is not None:
+                return tid
+        return None
+
+    def _af_find_live(self, *names: str) -> Optional[dict]:
+        """Match en direct via API-Football (live=all filtré par nom). None si pas live/indispo."""
         names = tuple(n for n in names if n)
         if not names:
             return None
-
         payload = self._get("fixtures", {"live": "all"})
-        if not payload or payload.get("_auth_error") or not payload.get("response"):
+        if _af_down(payload) or not payload.get("response"):
             return None
-
         for fx in payload["response"]:
             teams = fx.get("teams", {})
             home  = (teams.get("home") or {}).get("name", "")
             away  = (teams.get("away") or {}).get("name", "")
             if any(_name_matches(n, home) or _name_matches(n, away) for n in names):
                 return self._enrich_fixture(fx)
-
         return None
+
+    def _af_team_match(self, name: str, canonical: str, when: str) -> Optional[dict]:
+        """Match d'une équipe via API-Football. None = pas trouvé OU API indisponible."""
+        if not self._api_key:
+            return None
+
+        if when in ("auto", "live"):
+            live = self._af_find_live(name, canonical)
+            if live:
+                return live
+            if when == "live":
+                return None  # pas en direct → le caller bascule sur TheSportsDB
+
+        team_id = self._af_resolve_id(name, canonical)
+        if team_id is None:
+            return None
+        kind = "next" if when == "next" else "last"
+        payload = self._get("fixtures", {"team": team_id, kind: 1})
+        if _af_down(payload) or not payload.get("response"):
+            return None
+        return self._enrich_fixture(payload["response"][0])
 
     def _enrich_fixture(self, fixture: dict) -> dict:
         """Ajoute events (buteurs) et statistiques pour un match en direct."""
@@ -506,24 +609,24 @@ class Football(commands.Cog):
     # -- Orchestration -------------------------------------------------------
 
     def _fetch_team_match(self, team_name: str, when: str) -> dict:
-        """Live → API-Football ; reste → TheSportsDB (gratuit)."""
-        # Résolution sur l'API gratuite (gère bien les alias type "PSG")
+        """API-Football en priorité ; TheSportsDB en secours (quota) ou pour les listes.
+
+        Le nom canonique TheSportsDB sert à résoudre les alias type "PSG" côté API-Football.
+        """
         tsdb_team = self._tsdb_resolve(team_name)
         canonical = (tsdb_team or {}).get("strTeam") or ""
 
-        # Cas explicitement non-live : API gratuite uniquement
-        if when in ("next", "last"):
-            card = self._tsdb_card_from(tsdb_team, when)
-            return card or {"error": f"Aucun match trouvé pour {team_name}"}
+        # Infos générales : liste des derniers matchs → API gratuite directement
+        if when == "recent":
+            return self._tsdb_recent_list(tsdb_team, team_name)
 
-        # when == "live" ou "auto" : on tente le live (API-Football) d'abord,
-        # en cherchant avec le nom saisi ET le nom canonique.
-        live = self._af_live_match(team_name, canonical)
-        if live:
-            return live
+        # Source prioritaire : API-Football
+        af = self._af_team_match(team_name, canonical, when)
+        if af is not None:
+            return af
 
-        # Pas de live → fiche gratuite (dernier résultat / prochain)
-        card = self._tsdb_card_from(tsdb_team, "auto")
+        # Secours gratuit (quota épuisé, clé absente, ou rien trouvé côté API-Football)
+        card = self._tsdb_card_from(tsdb_team, when if when in ("next", "last") else "auto")
         if card:
             return card
 
@@ -535,25 +638,28 @@ class Football(commands.Cog):
         if not self._api_key:
             return {"error": "Clé API-Football manquante (API_FOOTBALL_KEY dans .env)"}
         payload = self._get("fixtures", {"live": "all"})
-        if payload and payload.get("_auth_error"):
-            return {"error": "Clé API-Football invalide ou quota dépassé"}
-        if not payload:
-            return {"error": "Erreur API-Football"}
-        matches = payload.get("response", [])
-        return {"mode": "live_list", "results": matches}
+        if _af_down(payload):
+            return {"error": "API-Football indisponible (clé invalide ou quota dépassé)"}
+        return {"mode": "live_list", "results": payload.get("response", [])}
 
     # -- Outil ---------------------------------------------------------------
 
     async def _tool_get_football(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         team = (tc.arguments.get("team") or "").strip()
         when = (tc.arguments.get("when") or "auto").strip().lower()
-        if when not in ("auto", "live", "next", "last"):
+        if when not in ("auto", "live", "next", "last", "recent"):
             when = "auto"
         loop = asyncio.get_event_loop()
 
         if team:
             data = await loop.run_in_executor(None, self._fetch_team_match, team, when)
-            summary = _match_llm_summary(data["result"]) if data.get("mode") == "match" else None
+            mode = data.get("mode")
+            if mode == "match":
+                summary = _match_llm_summary(data["result"])
+            elif mode == "match_list":
+                summary = _match_list_llm_summary(data.get("results", []), data.get("title", team))
+            else:
+                summary = None
         else:
             data = await loop.run_in_executor(None, self._fetch_live_list)
             summary = _live_list_llm_summary(data.get("results", [])) if data.get("mode") == "live_list" else None
@@ -585,12 +691,12 @@ class Football(commands.Cog):
                     },
                     "when": {
                         "type":        "string",
-                        "enum":        ["auto", "live", "next", "last"],
+                        "enum":        ["auto", "live", "next", "last", "recent"],
                         "description": (
                             "Quel match : 'auto' (en direct sinon dernier résultat), 'live' (uniquement "
-                            "si l'équipe joue maintenant), 'next' (prochain match à venir), "
-                            "'last' (dernier résultat). Utilise 'next'/'last' quand la question est "
-                            "explicitement sur le futur/passé."
+                            "si l'équipe joue maintenant), 'next' (prochain match), 'last' (dernier "
+                            "résultat), 'recent' (liste des 5 derniers matchs de l'équipe). Utilise "
+                            "'recent' pour une demande type «les derniers matchs de telle équipe»."
                         ),
                     },
                 },
