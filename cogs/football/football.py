@@ -377,7 +377,6 @@ class Football(commands.Cog):
         cfg = getattr(bot, "config", {})
         self._api_key: str = cfg.get("API_FOOTBALL_KEY", "") or ""
         self._tsdb_key: str = cfg.get("THESPORTSDB_KEY", "") or "123"
-        self._team_cache: dict[str, Optional[int]] = {}
 
     # -- Requêtes API (synchrones, exécutées dans un thread) ----------------
 
@@ -398,19 +397,6 @@ class Football(commands.Cog):
         except requests.RequestException as e:
             logger.warning(f"API-Football {endpoint} : {e}")
             return None
-
-    def _resolve_team(self, name: str) -> Optional[int]:
-        key = name.lower().strip()
-        if key in self._team_cache:
-            return self._team_cache[key]
-        payload = self._get("teams", {"search": key})
-        team_id = None
-        if payload and not payload.get("_auth_error"):
-            resp = payload.get("response", [])
-            if resp:
-                team_id = resp[0].get("team", {}).get("id")
-        self._team_cache[key] = team_id
-        return team_id
 
     # -- TheSportsDB (gratuit) : tout ce qui n'est pas live -----------------
 
@@ -466,8 +452,8 @@ class Football(commands.Cog):
     def _af_live_match(self, *names: str) -> Optional[dict]:
         """Cherche un match en direct via API-Football pour une des graphies données.
 
-        On récupère TOUS les matchs en direct puis on filtre côté code (le combo
-        team+live de l'API est peu fiable). Match par id d'équipe sinon par nom.
+        Un seul appel (live=all) : la réponse contient déjà noms et ids, on filtre
+        côté code par nom (le nom canonique TheSportsDB gère les alias type "PSG").
         """
         if not self._api_key:
             return None
@@ -478,20 +464,8 @@ class Football(commands.Cog):
         payload = self._get("fixtures", {"live": "all"})
         if not payload or payload.get("_auth_error") or not payload.get("response"):
             return None
-        fixtures = payload["response"]
 
-        # 1) Tentative par id d'équipe (recherche API-Football, en cache)
-        for name in names:
-            team_id = self._resolve_team(name)
-            if team_id is None:
-                continue
-            for fx in fixtures:
-                teams = fx.get("teams", {})
-                if team_id in ((teams.get("home") or {}).get("id"), (teams.get("away") or {}).get("id")):
-                    return self._enrich_fixture(fx)
-
-        # 2) Repli par correspondance de nom
-        for fx in fixtures:
+        for fx in payload["response"]:
             teams = fx.get("teams", {})
             home  = (teams.get("home") or {}).get("name", "")
             away  = (teams.get("away") or {}).get("name", "")
