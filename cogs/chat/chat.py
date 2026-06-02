@@ -47,7 +47,7 @@ from common.rappels import Rappel, RappelStore, RappelWorker
 
 PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
 
-DEBOUNCE_SECONDS: float = 1.0
+DEBOUNCE_SECONDS: float = 0.5
 
 # Patterns pour la sélection du modèle nano (tâches structurées simples)
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
