@@ -429,7 +429,7 @@ class Web(commands.Cog):
         q = tc.arguments.get("query", "").strip()
         lang = tc.arguments.get("lang", "fr")
         try:
-            count = int(tc.arguments.get("count") or 4)
+            count = int(tc.arguments.get("count") or 1)
         except (TypeError, ValueError):
             count = 4
         count = max(1, min(count, _MAX_GALLERY_IMAGES))
