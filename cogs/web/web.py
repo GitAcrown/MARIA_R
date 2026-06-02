@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import requests
+import discord
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from discord.ext import commands
@@ -34,6 +35,41 @@ DIFFICULT_DOMAINS = {"twitter.com", "x.com", "facebook.com", "instagram.com", "r
 SEARCH_CACHE_SEC = 300
 PAGE_CACHE_HOURS = 12
 CHUNK_SIZE = 2000
+_MAX_GALLERY_IMAGES = 4
+
+
+# ---------------------------------------------------------------------------
+# Builder LayoutView — galerie d'images
+# ---------------------------------------------------------------------------
+
+def build_image_view(data: dict, commentary: str = ""):
+    """Construit une galerie d'images (MediaGallery) depuis le résultat search_images."""
+    if not isinstance(data, dict) or "error" in data:
+        return None
+    images = data.get("images") or []
+    if not images:
+        return None
+
+    gallery = discord.ui.MediaGallery()
+    added = 0
+    for img in images[:_MAX_GALLERY_IMAGES]:
+        url = (img.get("image_url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        try:
+            gallery.add_item(media=url, description=(img.get("title") or "")[:256] or None)
+            added += 1
+        except Exception:
+            continue
+    if added == 0:
+        return None
+
+    view = discord.ui.LayoutView(timeout=None)
+    if commentary:
+        view.add_item(discord.ui.TextDisplay(commentary))
+        view.add_item(discord.ui.Separator())
+    view.add_item(gallery)
+    return view
 
 class Web(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -213,6 +249,53 @@ class Web(commands.Cog):
             logger.warning(f"Brave news search failed ({query!r}): {e}")
             return []
 
+    def _brave_image_search(self, query: str, lang: str = "fr", n: int = 4) -> list[dict]:
+        """Brave Images API — recherche d'images."""
+        if not self._brave_api_key:
+            return []
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": self._brave_api_key,
+        }
+        params = {
+            "q": query,
+            "count": min(n + 2, 10),
+            "search_lang": lang,
+            "country": "FR",
+            "safesearch": "moderate",
+        }
+        logger.info(f"Brave image search: {query!r}")
+        try:
+            r = requests.get(
+                "https://api.search.brave.com/res/v1/images/search",
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            raw = data.get("results", [])
+            results: list[dict] = []
+            seen: set[str] = set()
+            for item in raw:
+                img_url = (item.get("properties") or {}).get("url", "")
+                if not img_url or img_url in seen:
+                    continue
+                seen.add(img_url)
+                results.append({
+                    "title":     item.get("title", ""),
+                    "image_url": img_url,
+                    "source":    item.get("url", ""),
+                })
+                if len(results) >= n:
+                    break
+            logger.info(f"Brave image search: {len(results)} résultat(s) pour {query!r}")
+            return results
+        except Exception as e:
+            logger.warning(f"Brave image search failed ({query!r}): {e}")
+            return []
+
     def _ddg_search(self, query: str, lang: str = "fr", n: int = 4) -> list[dict]:
         """DuckDuckGo — fallback si pas de clé Brave."""
         logger.info(f"DDG search: {query!r}")
@@ -340,6 +423,28 @@ class Web(commands.Cog):
         logger.info(f"Urban Dictionary: {term!r}")
         return ToolResponseRecord(tc.id, result, datetime.now(timezone.utc))
 
+    async def _tool_images(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        q = tc.arguments.get("query", "").strip()
+        lang = tc.arguments.get("lang", "fr")
+        if not q:
+            return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
+        if not self._brave_api_key:
+            return ToolResponseRecord(tc.id, {"error": "Recherche d'images indisponible (clé Brave manquante)"}, datetime.now(timezone.utc))
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, self._brave_image_search, q, lang, _MAX_GALLERY_IMAGES)
+        if not res:
+            return ToolResponseRecord(tc.id, {"error": "Aucune image trouvée"}, datetime.now(timezone.utc))
+        return ToolResponseRecord(
+            tc.id,
+            {
+                "_tool":        "search_images",
+                "_llm_summary": f"Galerie de {len(res)} image(s) affichée pour « {q} ».",
+                "query":        q,
+                "images":       res,
+            },
+            datetime.now(timezone.utc),
+        )
+
     async def _tool_read(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
@@ -383,6 +488,19 @@ class Web(commands.Cog):
                 description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants.",
                 properties={"url": {"type": "string", "description": "URL complète"}},
                 function=self._tool_read,
+            ),
+            Tool(
+                name="search_images",
+                description=(
+                    "Recherche des images sur le web via Brave. "
+                    "Retourne des URL d'images directes à poster dans ta réponse pour que Discord les affiche. "
+                    "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc."
+                ),
+                properties={
+                    "query": {"type": "string", "description": "Requête de recherche d'images"},
+                    "lang":  {"type": "string", "description": "Code langue (défaut: fr)"},
+                },
+                function=self._tool_images,
             ),
         ]
 
