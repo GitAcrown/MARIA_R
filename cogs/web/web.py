@@ -501,7 +501,7 @@ class Web(commands.Cog):
                 description=(
                     "Recherche des images sur le web via Brave et les affiche dans une galerie. "
                     "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc. "
-                    "Choisis count selon le besoin : 1 si on demande une seule image, plus si on veut un aperçu (max 10)."
+                    "Choisis count selon le besoin/demande : 1 par défaut, plus si on veut un aperçu (max 10)."
                 ),
                 properties={
                     "query": {"type": "string", "description": "Requête de recherche d'images"},
