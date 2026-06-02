@@ -431,7 +431,7 @@ class Web(commands.Cog):
         try:
             count = int(tc.arguments.get("count") or 1)
         except (TypeError, ValueError):
-            count = 4
+            count = 1
         count = max(1, min(count, _MAX_GALLERY_IMAGES))
         if not q:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
@@ -508,7 +508,7 @@ class Web(commands.Cog):
                     "lang":  {"type": "string", "description": "Code langue (défaut: fr)"},
                     "count": {
                         "type":        "integer",
-                        "description": "Nombre d'images à afficher, entre 1 et 10 (défaut 4).",
+                        "description": "Nombre d'images à afficher, entre 1 et 10 (défaut 1).",
                         "minimum":     1,
                         "maximum":     10,
                     },
