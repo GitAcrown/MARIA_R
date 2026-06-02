@@ -59,7 +59,7 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_user_profile", "search_user_notes", "math_eval",
     "update_user_notes", "list_reminders",
     "get_weather", "search_media", "search_game",
-    "get_football", "search_images", "render_table",
+    "get_football", "render_table",
 })
 
 def _fmt_delay(minutes: int) -> str:
@@ -950,6 +950,9 @@ class Chat(commands.Cog):
             if name == "search_web":
                 q = args.get("query", "").strip()
                 label = f'**Recherche web** — "{q}"' if q else "**Recherche web**"
+            elif name == "search_images":
+                q = args.get("query", "").strip()
+                label = f'**Recherche d\'images** — "{q}"' if q else "**Recherche d'images**"
             elif name == "read_web_page":
                 url = args.get("url", "")
                 label = f"**Lecture** — <{url}>"

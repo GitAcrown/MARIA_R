@@ -428,12 +428,17 @@ class Web(commands.Cog):
     async def _tool_images(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         q = tc.arguments.get("query", "").strip()
         lang = tc.arguments.get("lang", "fr")
+        try:
+            count = int(tc.arguments.get("count") or 4)
+        except (TypeError, ValueError):
+            count = 4
+        count = max(1, min(count, _MAX_GALLERY_IMAGES))
         if not q:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
         if not self._brave_api_key:
             return ToolResponseRecord(tc.id, {"error": "Recherche d'images indisponible (clé Brave manquante)"}, datetime.now(timezone.utc))
         loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, self._brave_image_search, q, lang, _MAX_GALLERY_IMAGES)
+        res = await loop.run_in_executor(None, self._brave_image_search, q, lang, count)
         if not res:
             return ToolResponseRecord(tc.id, {"error": "Aucune image trouvée"}, datetime.now(timezone.utc))
         return ToolResponseRecord(
@@ -494,13 +499,19 @@ class Web(commands.Cog):
             Tool(
                 name="search_images",
                 description=(
-                    "Recherche des images sur le web via Brave. "
-                    "Retourne des URL d'images directes à poster dans ta réponse pour que Discord les affiche. "
-                    "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc."
+                    "Recherche des images sur le web via Brave et les affiche dans une galerie. "
+                    "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc. "
+                    "Choisis count selon le besoin : 1 si on demande une seule image, plus si on veut un aperçu (max 10)."
                 ),
                 properties={
                     "query": {"type": "string", "description": "Requête de recherche d'images"},
                     "lang":  {"type": "string", "description": "Code langue (défaut: fr)"},
+                    "count": {
+                        "type":        "integer",
+                        "description": "Nombre d'images à afficher, entre 1 et 10 (défaut 4).",
+                        "minimum":     1,
+                        "maximum":     10,
+                    },
                 },
                 function=self._tool_images,
             ),
