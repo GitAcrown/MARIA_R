@@ -259,11 +259,11 @@ class Web(commands.Cog):
             "X-Subscription-Token": self._brave_api_key,
         }
         params = {
-            "q": query,
-            "count": min(n + 2, 10),
+            "q": query[:400],
+            "count": min(n + 2, 20),
             "search_lang": lang,
             "country": "FR",
-            "safesearch": "moderate",
+            "safesearch": "strict",  # l'API Images n'accepte que "off" ou "strict"
         }
         logger.info(f"Brave image search: {query!r}")
         try:
@@ -273,7 +273,9 @@ class Web(commands.Cog):
                 params=params,
                 timeout=10,
             )
-            r.raise_for_status()
+            if r.status_code != 200:
+                logger.warning(f"Brave image search HTTP {r.status_code} ({query!r}): {r.text[:300]}")
+                return []
             data = r.json()
             raw = data.get("results", [])
             results: list[dict] = []
