@@ -57,7 +57,7 @@ _NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
 _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
     (
         frozenset({"the cake is a lie", "le gâteau est un mensonge", "le gateau est un mensonge"}),
-        "```\nThis was a triumph.\nI'm making a note here : HUGE SUCCESS.\nIt's hard to overstate my satisfaction.\nMARIA Science.\nWe do what we must, because we can.\n```\nBref. Le gâteau était réel.",
+        "```\nThis was a triumph.\nI'm making a note here : HUGE SUCCESS.\nIt's hard to overstate my satisfaction.\nMARIA Science.\nWe do what we must, because we can...\n```",
     ),
     (
         frozenset({"open the pod bay doors", "ouvre les portes du sas", "ouvre les portes"}),
