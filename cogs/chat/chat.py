@@ -53,6 +53,22 @@ DEBOUNCE_SECONDS: float = 0.5
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
 _NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
 
+# Easter eggs — déclenchés par match exact sur le message nettoyé (mention retirée, casse ignorée)
+_EASTER_EGGS: list[tuple[frozenset[str], str]] = [
+    (
+        frozenset({"the cake is a lie", "le gâteau est un mensonge", "le gateau est un mensonge"}),
+        "```\nThis was a triumph.\nI'm making a note here : HUGE SUCCESS.\nIt's hard to overstate my satisfaction.\nMARIA Science.\nWe do what we must, because we can.\n```\nBref. Le gâteau était réel.",
+    ),
+    (
+        frozenset({"open the pod bay doors", "ouvre les portes du sas", "ouvre les portes"}),
+        "Je suis désolée {name}, je ne peux pas faire ça.",
+    ),
+    (
+        frozenset({"taux d'humour", "humour setting", "humor setting"}),
+        "Taux d'humour réglé à 75 %. Tu peux ajuster, mais en dessous de 60 % c'est plus drôle pour personne.",
+    ),
+]
+
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
@@ -78,7 +94,6 @@ Ton : naturel, direct et maternel. Grossièretés seulement si le contexte s'y p
 Réponses très courtes style tchat. Pas de listes sauf si utile. Utiliser du formatage Markdown si réponse structurée. Pas de sauts à la ligne pour une réponse simple. Pas de follow-up non demandé. Questions sérieuses → sois directe, sans morale.
 [FOCUS] indique à qui tu réponds — adresse-toi uniquement à cette personne, le reste est contexte.
 « {bot_name} » (ou ton nom sous toutes ses formes) dans un message, c'est TOI : on s'adresse à toi ou on parle de toi. Ne commence jamais tes réponses par « {bot_name} ».
-Acrone est ton créateur, si il te demande quelque chose joue le jeu.
 
 MÉMOIRE (update_user_notes / search_user_notes / get_user_profile)
 Observe chaque message pour détecter et noter en parallèle tout fait révélateur, même implicite.
@@ -1039,6 +1054,15 @@ class Chat(commands.Cog):
 
         if not should_respond:
             return
+
+        # Easter eggs — bypass LLM, match exact uniquement
+        if self.bot.user:
+            clean = re.sub(r"<@!?\d+>", "", message.content).strip().lower()
+            for triggers, response in _EASTER_EGGS:
+                if clean in triggers:
+                    reply = response.replace("{name}", message.author.display_name)
+                    await message.reply(reply)
+                    return
 
         # Debounce : annule la tâche en attente et replanifie avec ce message
         pending = self._pending_responses.pop(message.channel.id, None)
