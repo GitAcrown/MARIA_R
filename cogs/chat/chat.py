@@ -42,7 +42,7 @@ from discord.ext import commands
 from common.dataio import CogData, DictTableBuilder
 from common.llm import MariaGptApi, Tool
 from common.profiles import ProfileStore
-from common.rappels import Rappel, RappelStore, RappelWorker
+from common.rappels import KIND_EVENT, Rappel, RappelStore, RappelWorker
 from common.timezones import PARIS_TZ
 
 from cogs.chat.config import (
@@ -113,7 +113,7 @@ OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, u
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. Ne suppose pas, cherche.
 - Mot d'argot, slang, anglicisme, expression obscure dont tu n'es pas certaine du sens → urban_dictionary. Ne devine jamais une définition.
 - Titre inconnu d'un jeu, film ou série ("le jeu avec des robots dans l'espace", "ce film des années 90 avec…") → search_web pour identifier avant d'utiliser search_game/search_media.
-- Rappels → execute_at ISO 8601 ou delay_minutes/delay_hours.
+- Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, recurrence daily/weekly possible). Modifier/reporter/annuler un rappel existant → edit_reminder / snooze_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu).
 - Météo → get_weather. Commente la question posée sans jamais répéter les infos du widget.
 - Film ou série cité par son titre → search_media immédiatement, même pour "c'est bien ?". Commente selon note et goûts connus, sans répéter les infos déjà dans le widget attaché au message.
 - Jeu vidéo cité par son titre → search_game immédiatement, même pour "c'est quoi ?". Commente (vaut le coup ? solde ?) sans répéter les infos déjà dans le widget attaché au message.
@@ -467,6 +467,62 @@ class DebugNotesView(discord.ui.LayoutView):
             raw_label,
         ))
 
+# Astuces « tout public ». Chaque ligne commençant par 🔧 est réservée aux modérateurs.
+_TIPS_SECTIONS: list[tuple[str, str]] = [
+    (
+        "Lui parler",
+        "- Mentionne MARIA ou écris son nom (selon le mode du salon) pour lui parler.\n"
+        "- En mode *greedy*, citer son nom suffit.\n"
+        "- 🔧 `/chatbot mode` : règle quand MARIA répond sur ce serveur.",
+    ),
+    (
+        "Mémoire & profil",
+        "- MARIA retient ce que tu dis (ville, goûts, projets…) au fil des discussions.\n"
+        "- `/me` : vois et édite ce qu'elle sait de toi.\n"
+        "- `/suggestions` : accepte/refuse les infos de profil et rappels qu'elle te propose (dispo en MP).",
+    ),
+    (
+        "Rappels",
+        "- Demande en langage naturel : « rappelle-moi demain 18h d'appeler Léa », « dans 2h… ».\n"
+        "- Récurrents possibles (quotidien / hebdo), et tu peux lui demander de modifier ou reporter un rappel.\n"
+        "- `/rappels` pour les lister et les annuler.",
+    ),
+    (
+        "Recherche & infos",
+        "- Elle cherche le web pour les faits récents, définit l'argot (Urban Dictionary).\n"
+        "- Météo, films/séries, jeux Steam, scores de foot, images : demande simplement.",
+    ),
+    (
+        "Vocal",
+        "- Réagis 🎙️ sur un message vocal pour le transcrire.\n"
+        "- 🔧 `/chatbot autotranscribe` : transcription automatique des vocaux sur un salon.",
+    ),
+    (
+        "Suggestions & événements",
+        "- En lisant les salons surveillés, MARIA propose discrètement des rappels, infos de profil et événements via `/suggestions`.\n"
+        "- Les modos y voient aussi les événements suggérés : les accepter crée un véritable événement Discord.\n"
+        "- 🔧 `/watch toggle` : active/désactive la lecture passive d'un salon · `/watch analyze` : forcer une analyse.",
+    ),
+]
+
+
+class TipsView(discord.ui.LayoutView):
+    """Astuces statiques pour exploiter MARIA."""
+
+    def __init__(self):
+        super().__init__(timeout=180)
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## Tirer le meilleur de MARIA"),
+            discord.ui.TextDisplay("-# 🔧 = commande réservée aux modérateurs."),
+            discord.ui.Separator(),
+        ]
+        for i, (title, body) in enumerate(_TIPS_SECTIONS):
+            children.append(discord.ui.TextDisplay(f"**{title}**\n{body}"))
+            if i < len(_TIPS_SECTIONS) - 1:
+                children.append(discord.ui.Separator())
+        self.add_item(discord.ui.Container(*children))
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -543,6 +599,13 @@ class Chat(commands.Cog):
             return
 
         ts = int(r.execute_at.timestamp())
+
+        # Rappel d'événement serveur : annonce sans ping personnel.
+        if r.kind == KIND_EVENT:
+            content = f"📅 **Rappel d'événement**\n{r.description}\n-# <t:{ts}:R>"
+            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            return
+
         content = f"{r.description}\n-# Rappel · <@{r.user_id}> · <t:{ts}:R>"
         mentions = discord.AllowedMentions(users=True)
 
@@ -708,6 +771,12 @@ class Chat(commands.Cog):
             elif name == "cancel_reminder":
                 tid = args.get("task_id", "")
                 label = f"**Rappel #{tid} annulé**" if tid else "**Rappel annulé**"
+            elif name == "edit_reminder":
+                tid = args.get("task_id", "")
+                label = f"**Rappel #{tid} modifié**" if tid else "**Rappel modifié**"
+            elif name == "snooze_reminder":
+                tid = args.get("task_id", "")
+                label = f"**Rappel #{tid} reporté**" if tid else "**Rappel reporté**"
             else:
                 label = f"**{name.replace('_', ' ').capitalize()}**"
             if label not in visible_parts:
@@ -831,6 +900,10 @@ class Chat(commands.Cog):
         await interaction.response.send_message(
             view=RappelsView(tasks, interaction.user.id, self.rappels), ephemeral=True
         )
+
+    @app_commands.command(name="tips", description="Astuces pour exploiter MARIA à fond")
+    async def cmd_tips(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(view=TipsView(), ephemeral=True)
 
     @app_commands.command(name="info", description="Statistiques de la session en cours")
     async def cmd_info(self, interaction: discord.Interaction) -> None:

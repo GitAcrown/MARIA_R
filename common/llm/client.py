@@ -57,8 +57,14 @@ class MariaLLMClient:
         model: Optional[str] = None,
         tools: Optional[list] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[dict] = None,
     ) -> Any:
-        """Complétion chat."""
+        """Complétion chat.
+
+        `response_format` (optionnel) est transmis tel quel à l'API pour forcer une
+        sortie structurée (ex. ``{"type": "json_object"}`` ou un json_schema strict).
+        Sans valeur, le comportement est inchangé.
+        """
         kwargs = {
             "model": model or self.completion_model,
             "messages": messages,
@@ -67,6 +73,8 @@ class MariaLLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["parallel_tool_calls"] = True
+        if response_format:
+            kwargs["response_format"] = response_format
 
         try:
             return await self._client.chat.completions.create(**kwargs)
