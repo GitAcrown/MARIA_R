@@ -12,6 +12,11 @@ logger = logging.getLogger("llm.client")
 MODEL_MAIN = "gpt-5.4-nano"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
 
+# Réseau — timeout par requête et nombre de tentatives.
+# Le SDK OpenAI relance automatiquement sur 429, 5xx et erreurs réseau/timeout.
+REQUEST_TIMEOUT = 60.0
+MAX_RETRIES = 2
+
 
 class MariaLLMError(Exception):
     """Erreur LLM."""
@@ -36,11 +41,14 @@ class MariaLLMClient:
         transcription_model: str = MODEL_TRANSCRIBE,
         max_tokens: int = 1024,
     ):
-        self._client = AsyncOpenAI(api_key=api_key)
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            timeout=REQUEST_TIMEOUT,
+            max_retries=MAX_RETRIES,
+        )
         self.completion_model = completion_model
         self.transcription_model = transcription_model
         self.max_tokens = max_tokens
-        self._stats = {"completions": 0, "transcriptions": 0, "errors": 0}
 
     async def chat(
         self,
@@ -61,11 +69,8 @@ class MariaLLMClient:
             kwargs["parallel_tool_calls"] = True
 
         try:
-            out = await self._client.chat.completions.create(**kwargs)
-            self._stats["completions"] += 1
-            return out
+            return await self._client.chat.completions.create(**kwargs)
         except (openai.BadRequestError, openai.OpenAIError) as e:
-            self._stats["errors"] += 1
             raise MariaOpenAIError(str(e)) from e
 
     async def transcribe(self, audio_file, *, model: Optional[str] = None) -> str:
@@ -75,10 +80,8 @@ class MariaLLMClient:
                 model=model or self.transcription_model,
                 file=audio_file,
             )
-            self._stats["transcriptions"] += 1
             return t.text
         except (openai.BadRequestError, openai.OpenAIError) as e:
-            self._stats["errors"] += 1
             raise MariaOpenAIError(str(e)) from e
 
     async def close(self) -> None:

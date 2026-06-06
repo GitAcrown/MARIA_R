@@ -9,6 +9,7 @@ import requests
 import discord
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.Steam")
@@ -93,12 +94,7 @@ def build_game_view(data: dict, commentary: str = "") -> Optional[discord.ui.Lay
     container = _game_container(data["result"])
     if container is None:
         return None
-    view = discord.ui.LayoutView(timeout=None)
-    if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
-        view.add_item(discord.ui.Separator())
-    view.add_item(container)
-    return view
+    return layout_with_commentary(container, commentary)
 
 
 def _game_container(r: dict) -> Optional[discord.ui.Container]:
@@ -143,14 +139,7 @@ def _game_container(r: dict) -> Optional[discord.ui.Container]:
     body_block = discord.ui.TextDisplay("\n".join(body_lines))
 
     # Thumbnail header Steam
-    try:
-        if appid:
-            thumb        = discord.ui.Thumbnail(discord.ui.UnfurledMediaItem(url=STEAM_HEADER.format(appid)))
-            main_section = discord.ui.Section(body_block, accessory=thumb)
-        else:
-            main_section = body_block
-    except Exception:
-        main_section = body_block
+    main_section = section_with_thumbnail(body_block, STEAM_HEADER.format(appid) if appid else None)
 
     # Header + séparateur
     header = discord.ui.TextDisplay(f"## 🎮 {name}")
@@ -198,6 +187,8 @@ class Steam(commands.Cog):
             return {"error": str(e)}
 
     def _get_details(self, appid: int) -> dict:
+        # Échec non bloquant : on retourne {} et le jeu reste affichable
+        # avec les seules données de recherche (fiche partielle).
         try:
             r = requests.get(
                 STEAM_DETAILS,
@@ -205,12 +196,15 @@ class Steam(commands.Cog):
                 timeout=8,
             )
             if not r.ok:
+                logger.warning("Détails Steam indisponibles (appid %s): HTTP %s", appid, r.status_code)
                 return {}
             payload = r.json().get(str(appid), {})
             if not payload.get("success"):
+                logger.warning("Détails Steam indisponibles (appid %s): réponse non valide", appid)
                 return {}
             return payload.get("data", {})
-        except requests.RequestException:
+        except requests.RequestException as e:
+            logger.warning("Détails Steam indisponibles (appid %s): %s", appid, e)
             return {}
 
     async def _tool_search_game(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -218,8 +212,7 @@ class Steam(commands.Cog):
         if not query:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
 
-        loop   = asyncio.get_event_loop()
-        search = await loop.run_in_executor(None, self._search, query)
+        search = await asyncio.to_thread(self._search, query)
         if "error" in search:
             return ToolResponseRecord(tc.id, search, datetime.now(timezone.utc))
 
@@ -228,7 +221,7 @@ class Steam(commands.Cog):
 
         details = {}
         if appid:
-            details = await loop.run_in_executor(None, self._get_details, appid)
+            details = await asyncio.to_thread(self._get_details, appid)
 
         result      = {**first, **details}
         llm_summary = _game_llm_summary(result)

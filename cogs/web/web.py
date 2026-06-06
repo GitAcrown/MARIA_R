@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 try:
@@ -28,7 +29,7 @@ try:
 except ImportError:
     TRAFILATURA_AVAILABLE = False
 
-logger = logging.getLogger("web")
+logger = logging.getLogger("MARIA.Web")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 DIFFICULT_DOMAINS = {"twitter.com", "x.com", "facebook.com", "instagram.com", "reddit.com", "medium.com", "linkedin.com"}
@@ -64,12 +65,7 @@ def build_image_view(data: dict, commentary: str = ""):
     if added == 0:
         return None
 
-    view = discord.ui.LayoutView(timeout=None)
-    if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
-        view.add_item(discord.ui.Separator())
-    view.add_item(gallery)
-    return view
+    return layout_with_commentary(gallery, commentary)
 
 class Web(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -381,8 +377,7 @@ class Web(commands.Cog):
         lang = tc.arguments.get("lang", "fr")
         if not q:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
-        loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, self._search, q, lang, 4)
+        res = await asyncio.to_thread(self._search, q, lang, 4)
         if not res:
             return ToolResponseRecord(tc.id, {"error": "Aucun résultat"}, datetime.now(timezone.utc))
         return ToolResponseRecord(
@@ -417,9 +412,8 @@ class Web(commands.Cog):
                 "author": top.get("author", ""),
             }
 
-        loop = asyncio.get_event_loop()
         try:
-            result = await loop.run_in_executor(None, _fetch, term)
+            result = await asyncio.to_thread(_fetch, term)
         except Exception as e:
             return ToolResponseRecord(tc.id, {"error": str(e)}, datetime.now(timezone.utc))
         logger.info(f"Urban Dictionary: {term!r}")
@@ -437,8 +431,7 @@ class Web(commands.Cog):
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
         if not self._brave_api_key:
             return ToolResponseRecord(tc.id, {"error": "Recherche d'images indisponible (clé Brave manquante)"}, datetime.now(timezone.utc))
-        loop = asyncio.get_event_loop()
-        res = await loop.run_in_executor(None, self._brave_image_search, q, lang, count)
+        res = await asyncio.to_thread(self._brave_image_search, q, lang, count)
         if not res:
             return ToolResponseRecord(tc.id, {"error": "Aucune image trouvée"}, datetime.now(timezone.utc))
         return ToolResponseRecord(
@@ -456,8 +449,7 @@ class Web(commands.Cog):
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
             return ToolResponseRecord(tc.id, {"error": "URL invalide"}, datetime.now(timezone.utc))
-        loop = asyncio.get_event_loop()
-        content = await loop.run_in_executor(None, self._crawl_page, url)
+        content = await asyncio.to_thread(self._crawl_page, url)
         if not content:
             domain = urlparse(url).netloc
             return ToolResponseRecord(
@@ -501,16 +493,16 @@ class Web(commands.Cog):
                 description=(
                     "Recherche des images sur le web via Brave et les affiche dans une galerie. "
                     "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc. "
-                    "Choisis count selon le besoin/demande : 1 par défaut, plus si on veut un aperçu (max 10)."
+                    "Choisis count selon le besoin/demande : 1 par défaut, plus si on veut un aperçu (max 4)."
                 ),
                 properties={
                     "query": {"type": "string", "description": "Requête de recherche d'images"},
                     "lang":  {"type": "string", "description": "Code langue (défaut: fr)"},
                     "count": {
                         "type":        "integer",
-                        "description": "Nombre d'images à afficher, entre 1 et 10 (défaut 1).",
+                        "description": "Nombre d'images à afficher, entre 1 et 4 (défaut 1).",
                         "minimum":     1,
-                        "maximum":     10,
+                        "maximum":     _MAX_GALLERY_IMAGES,
                     },
                 },
                 function=self._tool_images,

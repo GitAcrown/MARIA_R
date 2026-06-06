@@ -74,6 +74,10 @@ class ToolRegistry:
         self._cache: list[dict] | None = None
 
     def register(self, tool: Tool) -> None:
+        if tool.name in self._tools:
+            logger.warning(
+                "Outil '%s' déjà enregistré : remplacement (collision de nom).", tool.name
+            )
         self._tools[tool.name] = tool
         self._cache = None
 
@@ -88,11 +92,6 @@ class ToolRegistry:
         if self._cache is None:
             self._cache = [t.to_openai_dict() for t in self._tools.values()]
         return self._cache
-
-    def unregister(self, name: str) -> None:
-        if name in self._tools:
-            del self._tools[name]
-            self._cache = None
 
     def clear(self) -> None:
         self._tools.clear()

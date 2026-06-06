@@ -232,15 +232,6 @@ class ConversationContext:
         self.add_message(r)
         return r
 
-    def add_tool_response(self, tool_call_id: str, response_data: dict) -> ToolResponseRecord:
-        r = ToolResponseRecord(
-            tool_call_id=tool_call_id,
-            response_data=response_data,
-            created_at=datetime.now(timezone.utc),
-        )
-        self.add_message(r)
-        return r
-
     def get_recent_messages(self, count: int) -> list[MessageRecord]:
         return self._messages[-count:] if count > 0 else []
 
@@ -255,10 +246,15 @@ class ConversationContext:
         """Supprime messages trop vieux, hors fenêtre tokens, ou hors plafond de messages."""
         now = datetime.now(timezone.utc)
         self._messages = [m for m in self._messages if now - m.created_at < self.context_age]
+        # Le prompt développeur (instructions + profils injectés) consomme aussi la fenêtre :
+        # on le déduit du budget pour éviter de dépasser context_window une fois assemblé.
+        dev_tokens = len(TOKENIZER.encode(self.developer_prompt)) if self.developer_prompt else 0
+        effective_window = max(self.context_window - dev_tokens, 0)
         total = 0
         kept: list[MessageRecord] = []
         for m in reversed(self._messages):
-            if self.context_window > 0 and total + m.token_count > self.context_window:
+            # On conserve toujours au moins le message le plus récent, même s'il dépasse seul.
+            if self.context_window > 0 and kept and total + m.token_count > effective_window:
                 break
             kept.insert(0, m)
             total += m.token_count

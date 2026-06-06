@@ -3,9 +3,8 @@
 import asyncio
 import logging
 import re
-import zoneinfo
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -41,13 +40,23 @@ from discord import app_commands
 from discord.ext import commands
 
 from common.dataio import CogData, DictTableBuilder
-from common.llm import MariaGptApi, Tool, ToolCallRecord, ToolResponseRecord
+from common.llm import MariaGptApi, Tool
 from common.profiles import ProfileStore
 from common.rappels import Rappel, RappelStore, RappelWorker
+from common.timezones import PARIS_TZ
 
-PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
-
-DEBOUNCE_SECONDS: float = 0.5
+from cogs.chat.config import (
+    CONTEXT_AGE_HOURS,
+    CONTEXT_WINDOW,
+    DEBOUNCE_SECONDS,
+    MAX_MESSAGES,
+    MAX_TOKENS,
+    MODEL_MAIN,
+    MODEL_NANO,
+)
+from cogs.chat.tools_profiles import build_profile_tools
+from cogs.chat.tools_reminders import build_reminder_tools
+from cogs.chat.tools_discord import build_discord_tools
 
 # Patterns pour la sélection du modèle nano (tâches structurées simples)
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
@@ -481,10 +490,13 @@ class Chat(commands.Cog):
         self.rappels = RappelStore()
         self._rappels_worker: Optional[RappelWorker] = None
 
-        def developer_prompt() -> str:
+        def developer_prompt(context: Optional[dict] = None) -> str:
+            # Le contexte (profils + salon) est passé par appel pour éviter toute
+            # course entre salons répondant en parallèle (état non partagé).
+            context = context or {}
             now = datetime.now(PARIS_TZ)
-            profiles = getattr(developer_prompt, "_profiles", "")
-            channel_ctx = getattr(developer_prompt, "_channel_ctx", "")
+            profiles = context.get("profiles", "")
+            channel_ctx = context.get("channel_ctx", "")
             bot_name = getattr(self.bot.user, "name", "Maria") if self.bot.user else "Maria"
             return DEV_PROMPT_BASE.format(
                 bot_name=bot_name,
@@ -499,11 +511,11 @@ class Chat(commands.Cog):
         self.gpt_api = MariaGptApi(
             api_key=bot.config["OPENAI_API_KEY"],
             developer_prompt_template=self._get_dev_prompt,
-            completion_model="gpt-5.4-mini",
-            context_window=8000,
-            context_age_hours=1,
-            max_messages=40,
-            max_tokens=2800,
+            completion_model=MODEL_MAIN,
+            context_window=CONTEXT_WINDOW,
+            context_age_hours=CONTEXT_AGE_HOURS,
+            max_messages=MAX_MESSAGES,
+            max_tokens=MAX_TOKENS,
         )
 
         self._processed: deque = deque(maxlen=100)
@@ -551,320 +563,22 @@ class Chat(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _register_tools_from_cogs(self) -> None:
+        """Assemble tous les outils LLM et les (ré)enregistre.
+
+        Idempotent : `update_tools` repart d'un registre vide à chaque appel, donc
+        un double appel (cog_load + on_ready, ou un reload de cog) ne crée pas de doublon.
+        """
         tools: list[Tool] = []
 
+        # Outils exposés par les autres cogs via la convention `GLOBAL_TOOLS`.
         for cog in self.bot.cogs.values():
             if cog.qualified_name != self.qualified_name and hasattr(cog, "GLOBAL_TOOLS"):
                 tools.extend(cog.GLOBAL_TOOLS)
 
-        # --- Mise à jour des notes utilisateur ---
-        async def _tool_update_notes(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            notes = (tc.arguments.get("addition") or "").strip()
-            if not notes or not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Données manquantes"}, datetime.now(timezone.utc))
-
-            user_name = (tc.arguments.get("user_name") or "").strip().lower()
-            target_id = ctx.trigger_message.author.id
-            if user_name and ctx.trigger_message.guild:
-                member = discord.utils.find(
-                    lambda m: m.name.lower() == user_name or m.display_name.lower() == user_name,
-                    ctx.trigger_message.guild.members,
-                )
-                if member:
-                    target_id = member.id
-
-            for line in notes.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if not line.startswith("["):
-                    line = f"[perso] {line}"
-                self.profiles.append_notes(target_id, line)
-            return ToolResponseRecord(tc.id, {"success": True}, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="update_user_notes",
-            description=(
-                "Enregistre une info sur un membre. "
-                "Déclenche dès qu'un message révèle : prénom/âge/ville/métier, préférence forte, projet en cours, anecdote notable. "
-                "Format addition : '[catégorie] info'. Ex : '[identité] Léa, 28 ans, graphiste' · '[préférences] végétarienne'. "
-                "Si l'info concerne quelqu'un d'autre que l'auteur du message, passe son pseudo dans user_name."
-            ),
-            properties={
-                "addition": {"type": "string", "description": "Info à noter (format: '[catégorie] info')"},
-                "user_name": {"type": "string", "description": "Pseudo du membre concerné (si différent de l'auteur)"},
-            },
-            function=_tool_update_notes,
-        ))
-
-        # --- Rappels ---
-        async def _tool_schedule(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            args = tc.arguments
-            desc = (args.get("task_description") or "").strip()
-            if not desc:
-                return ToolResponseRecord(tc.id, {"error": "Description manquante"}, datetime.now(timezone.utc))
-
-            execute_at_str = (args.get("execute_at") or "").strip()
-            if execute_at_str:
-                try:
-                    execute_at = datetime.fromisoformat(execute_at_str)
-                    if execute_at.tzinfo is None:
-                        execute_at = execute_at.replace(tzinfo=PARIS_TZ)
-                    execute_at = execute_at.astimezone(timezone.utc)
-                except ValueError:
-                    return ToolResponseRecord(tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"}, datetime.now(timezone.utc))
-            else:
-                total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
-                execute_at = datetime.now(timezone.utc) + timedelta(minutes=total)
-
-            total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
-            if total < 2:
-                return ToolResponseRecord(tc.id, {"error": "Date trop proche (minimum 2 min)"}, datetime.now(timezone.utc))
-            if total > 43200:
-                return ToolResponseRecord(tc.id, {"error": "Date trop lointaine (max 30 jours)"}, datetime.now(timezone.utc))
-            if self.rappels.count_pending(ctx.trigger_message.author.id) >= 10:
-                return ToolResponseRecord(tc.id, {"error": "Max 10 rappels en attente"}, datetime.now(timezone.utc))
-
-            rid = self.rappels.add(
-                ctx.trigger_message.channel.id,
-                ctx.trigger_message.author.id,
-                desc,
-                execute_at,
-                ctx.trigger_message.id,
-            )
-            return ToolResponseRecord(tc.id, {
-                "success": True, "task_id": rid,
-                "execute_at": execute_at.isoformat(), "delay_minutes": total,
-            }, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="schedule_reminder",
-            description=(
-                "Programme un rappel. Utilise execute_at (ISO 8601) pour une date absolue "
-                "(ex. '2026-03-24T17:00:00' pour demain 17h — le fuseau par défaut est Europe/Paris), "
-                "ou delay_minutes/delay_hours pour un délai relatif. execute_at est prioritaire."
-            ),
-            properties={
-                "task_description": {"type": "string", "description": "Description de la tâche"},
-                "execute_at": {"type": "string", "description": "Date/heure absolue ISO 8601 (prioritaire sur les délais)"},
-                "delay_minutes": {"type": "integer", "description": "Délai en minutes (si pas de execute_at)"},
-                "delay_hours": {"type": "integer", "description": "Délai en heures (si pas de execute_at)"},
-            },
-            function=_tool_schedule,
-        ))
-
-        async def _tool_list_reminders(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            rappels = self.rappels.get_user_rappels(ctx.trigger_message.author.id)
-            if not rappels:
-                return ToolResponseRecord(tc.id, {"reminders": []}, datetime.now(timezone.utc))
-            return ToolResponseRecord(tc.id, {
-                "reminders": [
-                    {"id": r.id, "description": r.description, "execute_at": r.execute_at.isoformat()}
-                    for r in rappels
-                ]
-            }, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="list_reminders",
-            description="Liste les rappels en attente de l'utilisateur. À appeler avant cancel_reminder pour obtenir les IDs.",
-            properties={},
-            function=_tool_list_reminders,
-        ))
-
-        async def _tool_cancel(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            tid = tc.arguments.get("task_id")
-            if not tid or not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "task_id manquant"}, datetime.now(timezone.utc))
-            ok = self.rappels.cancel(int(tid), ctx.trigger_message.author.id)
-            return ToolResponseRecord(tc.id, {"success": ok}, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="cancel_reminder",
-            description="Annule un rappel par son ID. Appelle list_reminders d'abord si tu n'as pas l'ID.",
-            properties={"task_id": {"type": "integer", "description": "ID du rappel"}},
-            function=_tool_cancel,
-        ))
-
-        # --- Discord : membres et salons ---
-        async def _tool_server_users(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            guild = ctx.trigger_message.guild
-            if not guild:
-                return ToolResponseRecord(tc.id, {"error": "Pas dans un serveur"}, datetime.now(timezone.utc))
-            search = (tc.arguments.get("search") or "").strip().lower()
-            pool = guild.members
-            if search:
-                pool = [m for m in pool if search in m.name.lower() or search in m.display_name.lower()]
-            pool = pool[:60]
-            return ToolResponseRecord(tc.id, {
-                "total_members": guild.member_count,
-                "shown": len(pool),
-                "members": [
-                    {
-                        "name": m.name,
-                        "display_name": m.display_name,
-                        "id": str(m.id),
-                        "top_roles": [r.name for r in m.roles if r.name != "@everyone"][-4:],
-                    }
-                    for m in pool
-                ],
-            }, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="get_server_users",
-            description="Liste les membres du serveur avec leurs rôles principaux. Paramètre optionnel 'search' pour filtrer par nom.",
-            properties={"search": {"type": "string", "description": "Filtre par nom ou pseudo (optionnel)"}},
-            function=_tool_server_users,
-        ))
-
-        async def _tool_member_info(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            guild = ctx.trigger_message.guild
-            if not guild:
-                return ToolResponseRecord(tc.id, {"error": "Pas dans un serveur"}, datetime.now(timezone.utc))
-            uid_str = (tc.arguments.get("user_id") or "").strip()
-            name_q = (tc.arguments.get("username") or "").strip().lower()
-            member = None
-            if uid_str:
-                try:
-                    member = guild.get_member(int(uid_str))
-                    if not member:
-                        member = await guild.fetch_member(int(uid_str))
-                except (ValueError, discord.NotFound):
-                    pass
-            if not member and name_q:
-                member = discord.utils.find(
-                    lambda m: m.name.lower() == name_q or m.display_name.lower() == name_q,
-                    guild.members,
-                )
-            if not member:
-                return ToolResponseRecord(tc.id, {"error": "Membre introuvable"}, datetime.now(timezone.utc))
-            return ToolResponseRecord(tc.id, {
-                "id": str(member.id),
-                "username": member.name,
-                "display_name": member.display_name,
-                "roles": [r.name for r in member.roles if r.name != "@everyone"],
-                "account_created": member.created_at.strftime("%Y-%m-%d"),
-                "joined_server": member.joined_at.strftime("%Y-%m-%d") if member.joined_at else None,
-                "is_bot": member.bot,
-                "avatar_url": str(member.display_avatar.url) if member.display_avatar else None,
-            }, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="get_member_info",
-            description="Carte d'identité complète d'un membre : rôles, dates de création et d'arrivée, avatar. Recherche par ID ou pseudo exact.",
-            properties={
-                "user_id": {"type": "string", "description": "ID Discord (prioritaire)"},
-                "username": {"type": "string", "description": "Nom d'utilisateur ou pseudo (recherche exacte)"},
-            },
-            function=_tool_member_info,
-        ))
-
-        async def _tool_channel_info(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            cid_str = (tc.arguments.get("channel_id") or "").strip()
-            if cid_str:
-                channel = (
-                    ctx.trigger_message.guild.get_channel(int(cid_str))
-                    if ctx.trigger_message.guild
-                    else None
-                )
-            else:
-                channel = ctx.trigger_message.channel
-            if not channel:
-                return ToolResponseRecord(tc.id, {"error": "Salon introuvable"}, datetime.now(timezone.utc))
-            info: dict = {"id": str(channel.id), "name": channel.name, "type": str(channel.type)}
-            if isinstance(channel, discord.TextChannel):
-                info.update({
-                    "topic": channel.topic or "",
-                    "category": channel.category.name if channel.category else None,
-                    "nsfw": channel.nsfw,
-                    "slowmode_delay": channel.slowmode_delay,
-                    "member_count": len(channel.members),
-                })
-            elif isinstance(channel, discord.Thread):
-                info.update({
-                    "parent": channel.parent.name if channel.parent else None,
-                    "archived": channel.archived,
-                    "member_count": channel.member_count,
-                })
-            elif isinstance(channel, discord.VoiceChannel):
-                info.update({
-                    "category": channel.category.name if channel.category else None,
-                    "user_limit": channel.user_limit,
-                    "members_connected": [m.name for m in channel.members],
-                })
-            return ToolResponseRecord(tc.id, info, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="get_channel_info",
-            description="Informations sur un salon Discord : sujet, catégorie, NSFW, slowmode, membres présents. Par défaut le salon actuel.",
-            properties={"channel_id": {"type": "string", "description": "ID du salon (optionnel, défaut = salon actuel)"}},
-            function=_tool_channel_info,
-        ))
-
-        async def _tool_search_notes(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            if not ctx or not ctx.trigger_message or not ctx.trigger_message.guild:
-                return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-            keyword = (tc.arguments.get("keyword") or "").strip()
-            if not keyword:
-                return ToolResponseRecord(tc.id, {"error": "Mot-clé manquant"}, datetime.now(timezone.utc))
-            matches = self.profiles.search_notes(keyword)
-            if not matches:
-                return ToolResponseRecord(tc.id, {"results": [], "count": 0}, datetime.now(timezone.utc))
-            guild = ctx.trigger_message.guild
-            results = []
-            for uid, lines in matches.items():
-                member = guild.get_member(uid)
-                name = member.display_name if member else f"user_{uid}"
-                results.append({"user": name, "user_id": str(uid), "matching_lines": lines})
-            return ToolResponseRecord(tc.id, {"keyword": keyword, "results": results, "count": len(results)}, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="search_user_notes",
-            description=(
-                "Cherche un mot-clé dans les notes mémorisées de tous les membres du serveur. "
-                "Utile pour retrouver qui a une caractéristique précise (ex: 'végétarien', 'Lyon', 'Godot'). "
-                "Retourne la liste des membres dont les notes contiennent le mot-clé, avec les lignes correspondantes."
-            ),
-            properties={
-                "keyword": {"type": "string", "description": "Mot ou expression à chercher dans les notes"},
-            },
-            function=_tool_search_notes,
-        ))
-
-        async def _tool_profile(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-            identifier = (tc.arguments.get("user_id_or_name") or "").strip()
-            if not identifier:
-                return ToolResponseRecord(tc.id, {"error": "user_id_or_name manquant"}, datetime.now(timezone.utc))
-            target_id: Optional[int] = None
-            if identifier.isdigit():
-                target_id = int(identifier)
-            elif ctx and ctx.trigger_message and ctx.trigger_message.guild:
-                member = discord.utils.find(
-                    lambda m: m.name.lower() == identifier.lower() or m.display_name.lower() == identifier.lower(),
-                    ctx.trigger_message.guild.members,
-                )
-                if member:
-                    target_id = member.id
-            if target_id is None:
-                return ToolResponseRecord(tc.id, {"error": f"Membre '{identifier}' introuvable"}, datetime.now(timezone.utc))
-            full = self.profiles.get_full(target_id)
-            return ToolResponseRecord(tc.id, {"profile": full or "Aucune note."}, datetime.now(timezone.utc))
-
-        tools.append(Tool(
-            name="get_user_profile",
-            description="Consulte les notes mémorisées sur un membre. Utile pour vérifier ce qu'on sait déjà avant de noter ou de répondre.",
-            properties={"user_id_or_name": {"type": "string", "description": "ID Discord ou pseudo du membre"}},
-            function=_tool_profile,
-        ))
+        # Outils propres au cog Chat, regroupés par domaine.
+        tools.extend(build_profile_tools(self.profiles))
+        tools.extend(build_reminder_tools(self.rappels))
+        tools.extend(build_discord_tools())
 
         self.gpt_api.update_tools(tools)
 
@@ -896,21 +610,20 @@ class Chat(commands.Cog):
                 return True
         return False
 
-    def _inject_profiles(self, message: discord.Message) -> None:
-        """Injecte les notes de tous les membres qui en ont, avec marquage de l'auteur."""
+    def _build_profiles_context(self, message: discord.Message) -> str:
+        """Construit le bloc notes de tous les membres qui en ont, avec marquage de l'auteur."""
         all_notes = self.profiles.get_all_with_notes()
         if not all_notes:
-            self._get_dev_prompt._profiles = ""
-            return
+            return ""
         parts: list[str] = []
         for uid, notes in all_notes.items():
             member = message.guild.get_member(uid) if message.guild else None
             name = member.name if member else f"user_{uid}"
             marker = " (auteur)" if uid == message.author.id else ""
             parts.append(f"**{name}**{marker}:\n{notes}")
-        self._get_dev_prompt._profiles = "\n\n".join(parts) if parts else ""
+        return "\n\n".join(parts)
 
-    def _inject_channel_context(self, channel) -> None:
+    def _build_channel_context(self, channel) -> str:
         target = channel.parent if isinstance(channel, discord.Thread) else channel
         parts: list[str] = []
         if isinstance(channel, discord.Thread):
@@ -927,7 +640,7 @@ class Chat(commands.Cog):
         guild = getattr(channel, "guild", None)
         if guild:
             parts.append(f"serveur : {guild.name} ({guild.member_count} membres)")
-        self._get_dev_prompt._channel_ctx = " · ".join(parts) if parts else ""
+        return " · ".join(parts)
 
     # ------------------------------------------------------------------
     # Sélection du modèle et envoi de réponse
@@ -937,24 +650,25 @@ class Chat(commands.Cog):
         """Nano pour rappels et calculs simples, mini pour tout le reste."""
         text = message.content
         if _NANO_REMINDER_RE.search(text) or _NANO_MATH_RE.search(text):
-            return "gpt-5.4-nano"
-        return "gpt-5.4-mini"
+            return MODEL_NANO
+        return MODEL_MAIN
 
     async def _send_response(self, message: discord.Message, *, use_reply: bool = True) -> None:
         """Génère et envoie la réponse au message déclencheur."""
-        self._inject_profiles(message)
-        self._inject_channel_context(message.channel)
+        prompt_context = {
+            "profiles": self._build_profiles_context(message),
+            "channel_ctx": self._build_channel_context(message.channel),
+        }
 
         model = self._pick_model(message)
 
         async with message.channel.typing():
-            try:
-                resp = await self.gpt_api.run_completion(
-                    message.channel, trigger_message=message, model=model
-                )
-            finally:
-                self._get_dev_prompt._profiles = ""
-                self._get_dev_prompt._channel_ctx = ""
+            resp = await self.gpt_api.run_completion(
+                message.channel,
+                trigger_message=message,
+                model=model,
+                prompt_context=prompt_context,
+            )
 
         text = resp.text
         visible_parts: list[str] = []
@@ -1041,6 +755,10 @@ class Chat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        # NB : le chat conversationnel est volontairement limité aux serveurs.
+        # Point d'extension MP : la future IA passive (lecture en MP) branchera ici
+        # son propre chemin avant ce garde. Les profils sont déjà globaux (par user_id)
+        # et `_channel_config` / `_build_channel_context` tolèrent l'absence de guild.
         if message.author.bot or not message.guild:
             return
         key = (message.channel.id, message.id)
@@ -1065,26 +783,33 @@ class Chat(commands.Cog):
                     return
 
         # Debounce : annule la tâche en attente et replanifie avec ce message
-        pending = self._pending_responses.pop(message.channel.id, None)
+        channel_id = message.channel.id
+        pending = self._pending_responses.pop(channel_id, None)
         if pending:
             pending.cancel()
         else:
             # Premier trigger de cette fenêtre
-            self._first_triggers[message.channel.id] = message
+            self._first_triggers[channel_id] = message
 
-        async def _delayed(msg: discord.Message) -> None:
+        async def _delayed(msg: discord.Message, task_ref: "list[asyncio.Task]") -> None:
             try:
                 await asyncio.sleep(DEBOUNCE_SECONDS)
-                first = self._first_triggers.pop(msg.channel.id, msg)
+                first = self._first_triggers.pop(channel_id, msg)
                 await self._send_response(msg, use_reply=(first.id == msg.id))
             except asyncio.CancelledError:
-                pass
+                # Une tâche plus récente prend le relais : ne pas toucher au state partagé
+                raise
             except Exception as e:
-                logger.error(f"Réponse échouée ({msg.channel.id}): {e}", exc_info=True)
+                logger.error(f"Réponse échouée ({channel_id}): {e}", exc_info=True)
             finally:
-                self._pending_responses.pop(message.channel.id, None)
+                # Ne retirer l'entrée que si elle pointe toujours sur CETTE tâche
+                if self._pending_responses.get(channel_id) is task_ref[0]:
+                    self._pending_responses.pop(channel_id, None)
 
-        self._pending_responses[message.channel.id] = asyncio.create_task(_delayed(message))
+        task_holder: list[asyncio.Task] = []
+        task = asyncio.create_task(_delayed(message, task_holder))
+        task_holder.append(task)
+        self._pending_responses[channel_id] = task
 
     # ------------------------------------------------------------------
     # Slash commands

@@ -101,6 +101,16 @@ async def main() -> None:
         await load_cogs(bot)
         logger.info("Cogs chargés.")
 
+        async def refresh_chat_tools() -> None:
+            """(Ré)enregistre les outils inter-cogs auprès du cog Chat.
+
+            À appeler après tout chargement/déchargement de cog susceptible
+            d'exposer des `GLOBAL_TOOLS`, pour que la liste reste à jour.
+            """
+            chat_cog = bot.get_cog("Chat")
+            if chat_cog and hasattr(chat_cog, "_register_tools_from_cogs"):
+                await chat_cog._register_tools_from_cogs()
+
         # -------------------------------------------------------------------
         # Événements
         # -------------------------------------------------------------------
@@ -121,10 +131,8 @@ async def main() -> None:
             logger.info(f"Invitation (ADMIN) : {invite}")
 
             # Enregistrement des outils inter-cogs
-            chat_cog = bot.get_cog("Chat")
-            if chat_cog and hasattr(chat_cog, "_register_tools_from_cogs"):
-                await chat_cog._register_tools_from_cogs()
-                logger.info("Outils inter-cogs enregistrés.")
+            await refresh_chat_tools()
+            logger.info("Outils inter-cogs enregistrés.")
 
         @bot.event
         async def on_command_error(ctx: commands.Context, error: Exception) -> None:
@@ -250,6 +258,7 @@ async def main() -> None:
             """Charge un cog par son nom de dossier."""
             try:
                 await bot.load_extension(_cog_path(cog))
+                await refresh_chat_tools()
                 await ctx.send(f"**Cog `{cog}` chargé.**")
                 logger.info(f"Cog '{cog}' chargé manuellement par {ctx.author}")
             except commands.ExtensionAlreadyLoaded:
@@ -265,6 +274,7 @@ async def main() -> None:
             """Décharge un cog par son nom de dossier."""
             try:
                 await bot.unload_extension(_cog_path(cog))
+                await refresh_chat_tools()
                 await ctx.send(f"**Cog `{cog}` déchargé.**")
                 logger.info(f"Cog '{cog}' déchargé manuellement par {ctx.author}")
             except commands.ExtensionNotLoaded:
@@ -278,13 +288,11 @@ async def main() -> None:
             """Recharge à chaud un cog sans redémarrer le bot."""
             try:
                 await bot.reload_extension(_cog_path(cog))
+                # Re-brancher les outils : le cog rechargé peut exposer des GLOBAL_TOOLS,
+                # et recharger Chat reconstruit aussi son registre.
+                await refresh_chat_tools()
                 await ctx.send(f"**Cog `{cog}` rechargé.**")
                 logger.info(f"Cog '{cog}' rechargé par {ctx.author}")
-
-                # Re-brancher les outils si le cog Chat est concerné
-                chat_cog = bot.get_cog("Chat")
-                if chat_cog and hasattr(chat_cog, "_register_tools_from_cogs"):
-                    await chat_cog._register_tools_from_cogs()
             except commands.ExtensionNotLoaded:
                 await ctx.send(f"**Erreur ·** Le cog `{cog}` n'est pas chargé.")
             except commands.ExtensionNotFound:

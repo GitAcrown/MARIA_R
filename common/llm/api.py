@@ -33,7 +33,7 @@ class MariaGptApi:
     def __init__(
         self,
         api_key: str,
-        developer_prompt_template: Callable[[], str],
+        developer_prompt_template: Callable[..., str],
         *,
         completion_model: str = "gpt-5.4-nano",
         transcription_model: str = "gpt-4o-transcribe",
@@ -64,9 +64,12 @@ class MariaGptApi:
         trigger_message: Optional[discord.Message] = None,
         *,
         model: Optional[str] = None,
+        prompt_context: Optional[dict] = None,
     ) -> MariaResponse:
         session = self.session_manager.get_or_create(channel)
-        assistant = await session.run_completion(trigger_message, model=model)
+        assistant = await session.run_completion(
+            trigger_message, model=model, prompt_context=prompt_context
+        )
 
         tool_responses: list = []
         used_tools: list[dict] = []

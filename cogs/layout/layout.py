@@ -1,6 +1,5 @@
 """Cog Layout — rendu de tableaux ASCII (tabulate) en codeblock pour l'IA."""
 
-import logging
 from datetime import datetime, timezone
 
 from discord.ext import commands
@@ -12,8 +11,6 @@ except ImportError:
     _HAS_TABULATE = False
 
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-
-logger = logging.getLogger("MARIA.Layout")
 
 _MAX_COLS = 8
 _MAX_ROWS = 20

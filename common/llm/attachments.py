@@ -37,9 +37,6 @@ class AttachmentCache:
             k = self._order.pop(0)
             self._cache.pop(k, None)
 
-    def get_stats(self) -> dict:
-        return {"size": len(self._cache)}
-
 
 def _is_audio(attachment: discord.Attachment) -> bool:
     ct = attachment.content_type or ""

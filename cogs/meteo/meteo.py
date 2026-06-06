@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import zoneinfo
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -11,13 +10,14 @@ import requests
 import discord
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.timezones import PARIS_TZ
 
 logger = logging.getLogger("MARIA.Meteo")
 
 OWM_BASE = "https://api.openweathermap.org/data/2.5"
 OWM_ICON  = "https://openweathermap.org/img/wn/{}@2x.png"
-PARIS_TZ  = zoneinfo.ZoneInfo("Europe/Paris")
 
 _ICON_EMOJI: dict[str, str] = {
     "01": "☀️", "02": "🌤️", "03": "⛅", "04": "☁️",
@@ -107,12 +107,7 @@ def build_weather_view(data: dict, commentary: str = "") -> Optional[discord.ui.
         logger.error(f"Erreur build_weather_view: {e}", exc_info=True)
         return None
 
-    view = discord.ui.LayoutView(timeout=None)
-    if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
-        view.add_item(discord.ui.Separator())
-    view.add_item(container)
-    return view
+    return layout_with_commentary(container, commentary)
 
 
 def _current_container(city: str, d: dict) -> discord.ui.Container:
@@ -140,11 +135,7 @@ def _current_container(city: str, d: dict) -> discord.ui.Container:
         f"# {temp}°C\n"
         f"-# {description}  ·  ressenti **{feels}°C**  ·  {temp_min}° / {temp_max}°"
     )
-    try:
-        thumbnail    = discord.ui.Thumbnail(discord.ui.UnfurledMediaItem(url=OWM_ICON.format(icon_code)))
-        main_section = discord.ui.Section(temp_block, accessory=thumbnail)
-    except Exception:
-        main_section = temp_block
+    main_section = section_with_thumbnail(temp_block, OWM_ICON.format(icon_code))
 
     sep2    = discord.ui.Separator()
     details = discord.ui.TextDisplay(
@@ -431,11 +422,10 @@ class Meteo(commands.Cog):
         if not city:
             return ToolResponseRecord(tc.id, {"error": "Ville manquante"}, datetime.now(timezone.utc))
 
-        loop = asyncio.get_event_loop()
         if weather_type == "forecast":
-            raw = await loop.run_in_executor(None, self._fetch_forecast, city)
+            raw = await asyncio.to_thread(self._fetch_forecast, city)
         else:
-            raw = await loop.run_in_executor(None, self._fetch_current, city)
+            raw = await asyncio.to_thread(self._fetch_current, city)
 
         if "error" in raw:
             return ToolResponseRecord(tc.id, {"error": raw["error"]}, datetime.now(timezone.utc))

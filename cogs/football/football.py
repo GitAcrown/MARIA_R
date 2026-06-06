@@ -22,6 +22,7 @@ import requests
 import discord
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.Football")
@@ -297,12 +298,7 @@ def build_football_view(data: dict, commentary: str = "") -> Optional[discord.ui
     if container is None:
         return None
 
-    view = discord.ui.LayoutView(timeout=None)
-    if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
-        view.add_item(discord.ui.Separator())
-    view.add_item(container)
-    return view
+    return layout_with_commentary(container, commentary)
 
 
 def _match_container(m: dict) -> Optional[discord.ui.Container]:
@@ -332,14 +328,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
     # Thumbnail logo de ligue
     logo = league.get("logo")
     score_block = discord.ui.TextDisplay(score_line)
-    try:
-        if logo:
-            thumb        = discord.ui.Thumbnail(discord.ui.UnfurledMediaItem(url=logo))
-            score_section = discord.ui.Section(score_block, accessory=thumb)
-        else:
-            score_section = score_block
-    except Exception:
-        score_section = score_block
+    score_section = section_with_thumbnail(score_block, logo)
 
     children: list = [header, discord.ui.Separator(), score_section]
 
@@ -427,6 +416,8 @@ class Football(commands.Cog):
         self.bot = bot
         cfg = getattr(bot, "config", {})
         self._api_key: str = cfg.get("API_FOOTBALL_KEY", "") or ""
+        # "123" est la clé de test publique officielle de TheSportsDB (fallback assumé
+        # quand THESPORTSDB_KEY n'est pas défini dans .env) — voir thesportsdb.com/api.php.
         self._tsdb_key: str = cfg.get("THESPORTSDB_KEY", "") or "123"
         self._id_cache: dict[str, Optional[int]] = {}
 
@@ -649,10 +640,9 @@ class Football(commands.Cog):
         when = (tc.arguments.get("when") or "auto").strip().lower()
         if when not in ("auto", "live", "next", "last", "recent"):
             when = "auto"
-        loop = asyncio.get_event_loop()
 
         if team:
-            data = await loop.run_in_executor(None, self._fetch_team_match, team, when)
+            data = await asyncio.to_thread(self._fetch_team_match, team, when)
             mode = data.get("mode")
             if mode == "match":
                 summary = _match_llm_summary(data["result"])
@@ -661,7 +651,7 @@ class Football(commands.Cog):
             else:
                 summary = None
         else:
-            data = await loop.run_in_executor(None, self._fetch_live_list)
+            data = await asyncio.to_thread(self._fetch_live_list)
             summary = _live_list_llm_summary(data.get("results", [])) if data.get("mode") == "live_list" else None
 
         if "error" in data:

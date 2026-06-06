@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-logger = logging.getLogger("rappels")
+logger = logging.getLogger("MARIA.Rappels")
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "rappels.db"

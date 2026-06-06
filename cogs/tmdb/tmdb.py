@@ -9,6 +9,7 @@ import requests
 import discord
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.TMDB")
@@ -64,12 +65,7 @@ def build_media_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     container = _media_container(data["result"])
     if container is None:
         return None
-    view = discord.ui.LayoutView(timeout=None)
-    if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
-        view.add_item(discord.ui.Separator())
-    view.add_item(container)
-    return view
+    return layout_with_commentary(container, commentary)
 
 
 def _media_container(r: dict) -> Optional[discord.ui.Container]:
@@ -105,14 +101,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     body_text      = f"{rating_ln}\n{overview_short}" if rating_ln else overview_short
     body_block     = discord.ui.TextDisplay(body_text or "-# Aucune description disponible.")
 
-    try:
-        if poster:
-            thumb        = discord.ui.Thumbnail(discord.ui.UnfurledMediaItem(url=TMDB_IMG.format(poster)))
-            main_section = discord.ui.Section(body_block, accessory=thumb)
-        else:
-            main_section = body_block
-    except Exception:
-        main_section = body_block
+    main_section = section_with_thumbnail(body_block, TMDB_IMG.format(poster) if poster else None)
 
     # Infos supplémentaires
     extra = []
@@ -176,14 +165,20 @@ class TMDB(commands.Cog):
             return {"error": str(e)}
 
     def _get_details(self, media_id: int, media_type: str) -> dict:
+        # Échec non bloquant : on retourne {} et le résultat reste affichable
+        # avec les seules données de recherche (fiche partielle).
         try:
             r = requests.get(
                 f"{TMDB_BASE}/{media_type}/{media_id}",
                 params={"api_key": self._api_key, "language": "fr-FR"},
                 timeout=8,
             )
-            return r.json() if r.ok else {}
-        except requests.RequestException:
+            if not r.ok:
+                logger.warning("Détails TMDB indisponibles (%s/%s): HTTP %s", media_type, media_id, r.status_code)
+                return {}
+            return r.json()
+        except requests.RequestException as e:
+            logger.warning("Détails TMDB indisponibles (%s/%s): %s", media_type, media_id, e)
             return {}
 
     async def _tool_search_media(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -191,8 +186,7 @@ class TMDB(commands.Cog):
         if not query:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
 
-        loop   = asyncio.get_event_loop()
-        search = await loop.run_in_executor(None, self._search_multi, query)
+        search = await asyncio.to_thread(self._search_multi, query)
         if "error" in search:
             return ToolResponseRecord(tc.id, search, datetime.now(timezone.utc))
 
@@ -202,7 +196,7 @@ class TMDB(commands.Cog):
 
         details = {}
         if media_id:
-            details = await loop.run_in_executor(None, self._get_details, media_id, media_type)
+            details = await asyncio.to_thread(self._get_details, media_id, media_type)
 
         result      = {**first, **details, "media_type": media_type}
         llm_summary = _media_llm_summary(result)

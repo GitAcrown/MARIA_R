@@ -4,13 +4,13 @@ import asyncio
 import json
 import logging
 import re
-import zoneinfo
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-_PARIS_TZ = zoneinfo.ZoneInfo("Europe/Paris")
-
 import discord
+
+from common.timezones import PARIS_TZ as _PARIS_TZ
 
 from .client import MariaLLMClient, MariaOpenAIError
 from .context import (
@@ -30,6 +30,8 @@ logger = logging.getLogger("llm.session")
 
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
+# Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
+INGESTED_IDS_MAX = 500
 
 
 def _components_v2_to_parts(
@@ -116,7 +118,7 @@ class ChannelSession:
         client: MariaLLMClient,
         tool_registry: ToolRegistry,
         attachment_cache: AttachmentCache,
-        developer_prompt_template: Callable[[], str],
+        developer_prompt_template: Callable[..., str],
         context_window: int = 12000,
         context_age_hours: float = 2,
         max_messages: int = 0,
@@ -134,8 +136,21 @@ class ChannelSession:
         )
         self._lock = asyncio.Lock()
         self.trigger_message: Optional[discord.Message] = None
-        # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence)
+        self._prompt_context: Optional[dict] = None
+        # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence).
+        # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
         self._ingested_ids: set[int] = set()
+        self._ingested_order: deque[int] = deque(maxlen=INGESTED_IDS_MAX)
+
+    def _remember_ingested(self, message_id: int) -> None:
+        """Mémorise un ID ingéré en évinçant le plus ancien au-delà de la borne."""
+        if message_id in self._ingested_ids:
+            return
+        if len(self._ingested_order) >= INGESTED_IDS_MAX:
+            oldest = self._ingested_order.popleft()
+            self._ingested_ids.discard(oldest)
+        self._ingested_order.append(message_id)
+        self._ingested_ids.add(message_id)
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
         """Ingère un message dans le contexte GPT. Acquiert le lock pour éviter les
@@ -280,13 +295,18 @@ class ChannelSession:
         record = self.context.add_user_message(components=parts, name=user_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
-        self._ingested_ids.add(message.id)
+        self._remember_ingested(message.id)
         return record
 
     async def run_completion(
-        self, trigger_message: Optional[discord.Message] = None, *, model: Optional[str] = None
+        self,
+        trigger_message: Optional[discord.Message] = None,
+        *,
+        model: Optional[str] = None,
+        prompt_context: Optional[dict] = None,
     ) -> AssistantRecord:
         async with self._lock:
+            self._prompt_context = prompt_context
             return await self._run(trigger_message, 0, model=model)
 
     async def _run(self, trigger: Optional[discord.Message], depth: int, *, model: Optional[str] = None) -> AssistantRecord:
@@ -308,7 +328,7 @@ class ChannelSession:
                 if recent and recent[0].role == "user":
                     recent[0].components.extend(out)
 
-        self.context.developer_prompt = self.developer_prompt_template()
+        self.context.developer_prompt = self.developer_prompt_template(self._prompt_context)
 
         messages = self.context.prepare_payload()
 
@@ -338,16 +358,27 @@ class ChannelSession:
             else:
                 raise
 
+        if not completion.choices:
+            logger.warning("Complétion sans choix retournée par l'API.")
+            return self.context.add_assistant_message(
+                components=[TextComponent("Désolée, je n'ai rien pu générer là. Réessaie.")],
+            )
+
         choice = completion.choices[0]
         msg = choice.message
         tool_calls = []
         if msg.tool_calls:
             for tc in msg.tool_calls:
+                try:
+                    arguments = json.loads(tc.function.arguments or "{}")
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Arguments d'outil illisibles pour {tc.function.name}: {e}")
+                    arguments = {}
                 tool_calls.append(
                     ToolCallRecord(
                         id=tc.id,
                         function_name=tc.function.name,
-                        arguments=json.loads(tc.function.arguments or "{}"),
+                        arguments=arguments,
                     )
                 )
 
@@ -402,6 +433,9 @@ class ChannelSession:
 
     def forget(self) -> None:
         self.context.clear()
+        self._ingested_ids.clear()
+        self._ingested_order.clear()
+        self.trigger_message = None
 
     def get_stats(self) -> dict:
         return {"context_stats": self.context.get_stats()}
@@ -414,7 +448,7 @@ class ChannelSessionManager:
         self,
         client: MariaLLMClient,
         tool_registry: ToolRegistry,
-        developer_prompt_template: Callable[[], str],
+        developer_prompt_template: Callable[..., str],
         *,
         context_window: int = 12000,
         context_age_hours: float = 2,
