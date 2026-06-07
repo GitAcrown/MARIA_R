@@ -135,7 +135,12 @@ Règles :
 - Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
 - confidence entre 0 et 1. Sois sévère : en dessous de 0.75, abstiens-toi.
 - S'il n'y a rien de pertinent, renvoie une liste vide.
-- 'content' doit être très concis et clair, en français."""
+- 'content' doit être très concis et clair, en français.
+
+Ignore :
+- Les messages de bots et les messages de test.
+- Les messages demandant un service à MARIA (météo, film, jeu, etc.).
+- Tout message s'adressant déjà à MARIA."""
 
 
 class Watcher(commands.Cog):
