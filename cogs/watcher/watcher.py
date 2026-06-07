@@ -130,6 +130,7 @@ Types de suggestions :
 
 Règles :
 - N'utilise STRICTEMENT QUE les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
+- Ne suggère pas d'évènements ou d'activité de groupe qui ne serait pas explicitement mentionné comme tel.
 - 'target_user_id' doit être un id présent dans la liste PARTICIPANTS, sinon "".
 - Ne propose pas de profile_update déjà présent dans les NOTES EXISTANTES.
 - Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
