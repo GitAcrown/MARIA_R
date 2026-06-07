@@ -165,6 +165,10 @@ class Watcher(commands.Cog):
         self._last_activity: dict[int, float] = {}
         self._guild_of: dict[int, int] = {}
 
+        # Cache des salons surveillés par guild — évite une lecture SQLite par message.
+        # Invalidé explicitement à chaque toggle.
+        self._watched_cache: dict[int, set[int]] = {}
+
     async def cog_load(self) -> None:
         self.analysis_loop.start()
 
@@ -188,17 +192,22 @@ class Watcher(commands.Cog):
     # ------------------------------------------------------------------
 
     def _watched_channels(self, guild: discord.Guild) -> set[int]:
+        cached = self._watched_cache.get(guild.id)
+        if cached is not None:
+            return cached
         raw = self.data.get(guild).settings("guild_config").get("watched_channels", default="") or ""
-        out: set[int] = set()
+        result: set[int] = set()
         for part in raw.split(","):
             part = part.strip()
             if part.isdigit():
-                out.add(int(part))
-        return out
+                result.add(int(part))
+        self._watched_cache[guild.id] = result
+        return result
 
     def _set_watched_channels(self, guild: discord.Guild, channels: set[int]) -> None:
         value = ",".join(str(c) for c in sorted(channels))
         self.data.get(guild).settings("guild_config")["watched_channels"] = value
+        self._watched_cache[guild.id] = channels  # invalide + remplace le cache
 
     @staticmethod
     def _target_channel(channel) -> Optional[discord.TextChannel]:

@@ -774,9 +774,6 @@ class Chat(commands.Cog):
             elif name == "edit_reminder":
                 tid = args.get("task_id", "")
                 label = f"**Rappel #{tid} modifié**" if tid else "**Rappel modifié**"
-            elif name == "snooze_reminder":
-                tid = args.get("task_id", "")
-                label = f"**Rappel #{tid} reporté**" if tid else "**Rappel reporté**"
             else:
                 label = f"**{name.replace('_', ' ').capitalize()}**"
             if label not in visible_parts:

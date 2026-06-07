@@ -86,11 +86,17 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
 
         execute_at = None
         execute_at_str = (args.get("execute_at") or "").strip()
+        snooze_min = (args.get("snooze_minutes") or 0) + (args.get("snooze_hours") or 0) * 60
+
         if execute_at_str:
             try:
                 execute_at = _parse_execute_at(execute_at_str)
             except ValueError:
                 return ToolResponseRecord(tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"}, datetime.now(timezone.utc))
+        elif snooze_min > 0:
+            execute_at = datetime.now(timezone.utc) + timedelta(minutes=snooze_min)
+
+        if execute_at is not None:
             total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
             if total < REMINDER_MIN_MINUTES:
                 return ToolResponseRecord(tc.id, {"error": "Date trop proche (minimum 2 min)"}, datetime.now(timezone.utc))
@@ -106,37 +112,27 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
             recurrence = None
 
         if new_desc is None and execute_at is None and recurrence is None:
-            return ToolResponseRecord(tc.id, {"error": "Rien à modifier (fournis description, execute_at ou recurrence)"}, datetime.now(timezone.utc))
+            return ToolResponseRecord(tc.id, {"error": "Rien à modifier (fournis description, execute_at, snooze_minutes/hours ou recurrence)"}, datetime.now(timezone.utc))
 
-        ok = rappels.edit(
-            int(tid),
-            ctx.trigger_message.author.id,
-            description=new_desc,
-            execute_at=execute_at,
-            recurrence=recurrence,
-        )
-        if not ok:
-            return ToolResponseRecord(tc.id, {"error": "Rappel introuvable, déjà passé, ou pas le tien"}, datetime.now(timezone.utc))
+        if execute_at is not None and snooze_min > 0:
+            # Snooze : utilise la méthode dédiée pour remettre les retries à 0
+            new_at = rappels.snooze(int(tid), ctx.trigger_message.author.id, int(snooze_min))
+            if new_at is None:
+                return ToolResponseRecord(tc.id, {"error": "Rappel introuvable ou pas le tien"}, datetime.now(timezone.utc))
+            if new_desc or recurrence:
+                rappels.edit(int(tid), ctx.trigger_message.author.id, description=new_desc, recurrence=recurrence)
+        else:
+            ok = rappels.edit(
+                int(tid),
+                ctx.trigger_message.author.id,
+                description=new_desc,
+                execute_at=execute_at,
+                recurrence=recurrence,
+            )
+            if not ok:
+                return ToolResponseRecord(tc.id, {"error": "Rappel introuvable, déjà passé, ou pas le tien"}, datetime.now(timezone.utc))
+
         return ToolResponseRecord(tc.id, {"success": True, "task_id": int(tid)}, datetime.now(timezone.utc))
-
-    async def _tool_snooze(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-        if not ctx or not ctx.trigger_message:
-            return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
-        args = tc.arguments
-        tid = args.get("task_id")
-        if not tid:
-            return ToolResponseRecord(tc.id, {"error": "task_id manquant"}, datetime.now(timezone.utc))
-        minutes = (args.get("minutes") or 0) + (args.get("hours") or 0) * 60
-        if minutes < 1:
-            return ToolResponseRecord(tc.id, {"error": "Durée de report invalide"}, datetime.now(timezone.utc))
-        if minutes > REMINDER_MAX_MINUTES:
-            return ToolResponseRecord(tc.id, {"error": "Report trop lointain (max 30 jours)"}, datetime.now(timezone.utc))
-        new_at = rappels.snooze(int(tid), ctx.trigger_message.author.id, int(minutes))
-        if new_at is None:
-            return ToolResponseRecord(tc.id, {"error": "Rappel introuvable ou pas le tien"}, datetime.now(timezone.utc))
-        return ToolResponseRecord(tc.id, {
-            "success": True, "task_id": int(tid), "execute_at": new_at.isoformat(),
-        }, datetime.now(timezone.utc))
 
     async def _tool_list_reminders(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         if not ctx or not ctx.trigger_message:
@@ -189,14 +185,16 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="edit_reminder",
             description=(
-                "Modifie un rappel existant de l'utilisateur (sa description, sa date execute_at ISO 8601, "
-                "et/ou sa récurrence). Appelle list_reminders d'abord si tu n'as pas l'ID. "
-                "Ne renseigne que les champs à changer."
+                "Modifie un rappel existant de l'utilisateur : description, date (execute_at ISO 8601), "
+                "récurrence, ou report à partir de maintenant (snooze_minutes/snooze_hours). "
+                "Ne renseigne que les champs à changer. Appelle list_reminders d'abord si tu n'as pas l'ID."
             ),
             properties={
                 "task_id": {"type": "integer", "description": "ID du rappel à modifier"},
                 "task_description": {"type": "string", "description": "Nouvelle description (optionnel)"},
                 "execute_at": {"type": "string", "description": "Nouvelle date/heure ISO 8601, fuseau Paris par défaut (optionnel)"},
+                "snooze_minutes": {"type": "integer", "description": "Reporter de N minutes à partir de maintenant (optionnel)"},
+                "snooze_hours": {"type": "integer", "description": "Reporter de N heures à partir de maintenant (optionnel)"},
                 "recurrence": {
                     "type": "string",
                     "enum": list(VALID_RECURRENCES),
@@ -204,19 +202,6 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
                 },
             },
             function=_tool_edit,
-        ),
-        Tool(
-            name="snooze_reminder",
-            description=(
-                "Reporte un rappel de l'utilisateur d'une durée à partir de maintenant "
-                "(ex. « repousse de 10 min », « plus tard »). Appelle list_reminders d'abord si besoin de l'ID."
-            ),
-            properties={
-                "task_id": {"type": "integer", "description": "ID du rappel à reporter"},
-                "minutes": {"type": "integer", "description": "Minutes de report"},
-                "hours": {"type": "integer", "description": "Heures de report (cumulées avec minutes)"},
-            },
-            function=_tool_snooze,
         ),
         Tool(
             name="cancel_reminder",
