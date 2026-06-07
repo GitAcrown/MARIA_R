@@ -54,13 +54,13 @@ logger = logging.getLogger("MARIA.Watcher")
 MODEL_NANO = "gpt-5.4-nano"
 
 # Déclencheurs d'analyse
-MIN_NEW_MESSAGES = 15          # nb de nouveaux messages avant analyse
+MIN_NEW_MESSAGES = 25          # nb de nouveaux messages avant analyse
 IDLE_FLUSH_SECONDS = 30 * 60   # analyse un buffer non vide resté inactif
-ANALYZE_INTERVAL_MIN = 5       # période de la boucle de fond
+ANALYZE_INTERVAL_MIN = 10       # période de la boucle de fond
 BUFFER_MAX = 60                # messages conservés par salon
 MIN_MESSAGES_TO_ANALYZE = 5    # ne rien faire en dessous (bruit)
 
-CONFIDENCE_THRESHOLD = 0.75
+CONFIDENCE_THRESHOLD = 0.80
 ANALYSIS_MAX_TOKENS = 1200
 
 _VALID_KINDS = (KIND_PERSONAL_REMINDER, KIND_SERVER_EVENT, KIND_PROFILE_UPDATE, KIND_GROUP_ACTIVITY)
@@ -126,17 +126,24 @@ Types de suggestions :
 - personal_reminder : un utilisateur veut clairement se souvenir/être rappelé de quelque chose à un moment donné. target_user_id = l'auteur concerné. when = date/heure ISO 8601 (heure de Paris) si déductible, sinon "". recurrence = daily/weekly si récurrent, sinon none.
 - server_event : un évènement qui concerne tout le serveur (soirée, session de jeu commune, sortie). target_user_id = "". when = ISO 8601 si connu.
 - group_activity : une activité de groupe envisagée mais sans date ferme. target_user_id = "".
-- profile_update : un fait stable et personnel révélé sur un utilisateur (ville, âge, métier, préférence forte). target_user_id = l'utilisateur concerné. category = identité/préférences/projets/perso. content = le fait, court, à la 3e personne.
+- profile_update : un FAIT STABLE ET DURABLE révélé sur un utilisateur (ville, âge, métier). target_user_id = l'utilisateur concerné. category = identité/préférences/projets/perso. content = le fait, court, à la 3e personne.
 
-Règles :
+Règles générales :
 - N'utilise STRICTEMENT QUE les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
 - Ne suggère pas d'évènements ou d'activité de groupe qui ne serait pas explicitement mentionné comme tel.
-- 'target_user_id' doit être un id présent dans la liste PARTICIPANTS, sinon "".
+- 'target_user_id' doit être un id NUMÉRIQUE présent dans PARTICIPANTS, sinon "". Le pseudo d'affichage n'est qu'un nom — ne l'interprète jamais comme une description du comportement ou des goûts de l'utilisateur.
 - Ne propose pas de profile_update déjà présent dans les NOTES EXISTANTES.
 - Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
-- confidence entre 0 et 1. Sois sévère : en dessous de 0.75, abstiens-toi.
+- confidence entre 0 et 1. En dessous de 0.75, abstiens-toi.
 - S'il n'y a rien de pertinent, renvoie une liste vide.
 - 'content' doit être très concis et clair, en français.
+
+Règles spécifiques à profile_update (importantes) :
+- Maximum 1 profile_update par utilisateur par analyse, même s'il y a plusieurs sujets potentiels : choisis le plus certain.
+- Un sujet abordé une seule fois dans la conversation N'EST PAS une préférence. Pour la catégorie "préférences", l'utilisateur doit exprimer clairement un goût durable ou une habitude (ex : "j'adore depuis toujours", "j'en fais régulièrement") — un simple partage ponctuel ou une discussion du moment ne compte pas.
+- Catégorie "identité" (ville, âge, prénom, métier) : uniquement si clairement énoncé. confidence minimum 0.85.
+- Catégorie "préférences" : une mention unique ne suffit pas. confidence minimum 0.80.
+- Catégorie "projets" : uniquement si l'utilisateur porte activement le projet. confidence minimum 0.80.
 
 Ignore :
 - Les messages de bots et les messages de test.
