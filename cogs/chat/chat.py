@@ -901,7 +901,7 @@ class Chat(commands.Cog):
             view=RappelsView(tasks, interaction.user.id, self.rappels), ephemeral=True
         )
 
-    @app_commands.command(name="tips", description="Astuces pour exploiter MARIA à fond")
+    @app_commands.command(name="tips", description="Quelques astuces pour utiliser MARIA")
     async def cmd_tips(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(view=TipsView(), ephemeral=True)
 
