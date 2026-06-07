@@ -165,7 +165,7 @@ def _forecast_container(city: str, d: dict) -> discord.ui.Container:
         days[day_key]["icons"].append(item["weather"][0]["icon"])
         days[day_key]["descs"].append(item["weather"][0]["description"])
 
-    header   = discord.ui.TextDisplay(f"## 📅 {city_full} — Prévisions 5 jours")
+    header   = discord.ui.TextDisplay(f"## {city_full} — Prévisions 5 jours")
     children: list = [header, discord.ui.Separator()]
 
     for i, (_, info) in enumerate(list(days.items())[:5]):

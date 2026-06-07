@@ -466,14 +466,13 @@ class Watcher(commands.Cog):
             self._buffers.pop(target.id, None)
             self._new_counts.pop(target.id, None)
             await interaction.response.send_message(
-                f"Lecture passive **désactivée** sur {target.mention}.", ephemeral=True
+                f"Lecture passive désactivée sur {target.mention}.", ephemeral=True
             )
         else:
             watched.add(target.id)
             self._set_watched_channels(interaction.guild, watched)
             await interaction.response.send_message(
-                f"Lecture passive **activée** sur {target.mention}. "
-                f"MARIA proposera des suggestions via `/suggestions`.",
+                f"Lecture passive activée sur {target.mention} — MARIA proposera des suggestions via `/suggestions`.",
                 ephemeral=True,
             )
 
@@ -484,7 +483,7 @@ class Watcher(commands.Cog):
         watched = self._watched_channels(interaction.guild)
         watched_str = ", ".join(f"<#{c}>" for c in watched) if watched else "_aucun_"
         await interaction.response.send_message(
-            f"**Salons surveillés :** {watched_str}", ephemeral=True
+            f"Salons surveillés · {watched_str}", ephemeral=True
         )
 
     @watch.command(name="analyze", description="[Debug] Force l'analyse immédiate de ce salon")
@@ -527,8 +526,8 @@ class Watcher(commands.Cog):
         # Le buffer ayant servi de déclencheur naturel est remis à zéro.
         self._new_counts[target.id] = 0
         await interaction.followup.send(
-            f"Analyse de {len(snapshot)} message(s) terminée : **{stored}** suggestion(s) ajoutée(s). "
-            f"Consulte `/suggestions`.",
+            f"Analyse terminée sur {len(snapshot)} message(s) — **{stored}** suggestion(s) ajoutée(s)."
+            + (" Consulte `/suggestions`." if stored else ""),
             ephemeral=True,
         )
 
@@ -607,7 +606,7 @@ class Watcher(commands.Cog):
         execute_at = await self._nl_to_datetime(when_text)
         if execute_at is None or execute_at <= datetime.now(timezone.utc):
             return await interaction.followup.send(
-                "Je n'ai pas réussi à comprendre la date. Réessaie (ex : « demain 18h »).",
+                "Date non reconnue — réessaie en précisant davantage (ex : « demain 18h », « vendredi 20h »).",
                 ephemeral=True,
             )
 
@@ -621,7 +620,7 @@ class Watcher(commands.Cog):
         self.store.set_status(suggestion_id, "accepted", user_id=interaction.user.id)
         ts = int(execute_at.timestamp())
         await interaction.followup.send(
-            view=build_suggestions_view(self, ctx, header=f"✅ Rappel programmé pour <t:{ts}:f> (<t:{ts}:R>)."),
+            view=build_suggestions_view(self, ctx, header=f"✦ Rappel programmé · <t:{ts}:f> (<t:{ts}:R>)"),
             ephemeral=True,
         )
 
@@ -665,7 +664,7 @@ class Watcher(commands.Cog):
         start = await self._nl_to_datetime(when_text)
         if start is None or start <= datetime.now(timezone.utc):
             return await interaction.followup.send(
-                "Je n'ai pas réussi à comprendre la date. Réessaie (ex : « samedi 20h »).",
+                "Date non reconnue — réessaie en précisant davantage (ex : « samedi 20h », « le 14/07 à 19h »).",
                 ephemeral=True,
             )
         end = start + timedelta(hours=EVENT_DEFAULT_DURATION_HOURS)
@@ -689,7 +688,7 @@ class Watcher(commands.Cog):
 
         self.store.set_status(suggestion_id, "accepted")
         await interaction.followup.send(
-            view=build_suggestions_view(self, ctx, header=f"✅ Événement créé : **{event.name}** — {event.url}"),
+            view=build_suggestions_view(self, ctx, header=f"✦ Événement créé · **{event.name}** → {event.url}"),
             ephemeral=True,
         )
 

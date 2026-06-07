@@ -30,10 +30,10 @@ _PERSONAL_CAP_SOLO = 6
 _SECTION_CAP_MOD = 3
 
 _KIND_HEADERS = {
-    KIND_PERSONAL_REMINDER: "⏰ Rappel suggéré",
-    KIND_PROFILE_UPDATE: "📝 Mise à jour de profil",
-    KIND_SERVER_EVENT: "📅 Événement serveur",
-    KIND_GROUP_ACTIVITY: "🎲 Activité de groupe",
+    KIND_PERSONAL_REMINDER: "◆ Rappel suggéré",
+    KIND_PROFILE_UPDATE: "◆ Mise à jour de profil",
+    KIND_SERVER_EVENT: "◆ Événement serveur",
+    KIND_GROUP_ACTIVITY: "◆ Activité de groupe",
 }
 
 
@@ -60,19 +60,19 @@ def has_valid_date(s: Suggestion) -> bool:
 def _when_label(when: str) -> str:
     dt = parse_when(when)
     if dt is None:
-        return "_date à préciser_"
+        return "_à préciser_"
     return f"<t:{int(dt.timestamp())}:f> (<t:{int(dt.timestamp())}:R>)"
 
 
 def _suggestion_text(s: Suggestion) -> str:
-    header = _KIND_HEADERS.get(s.kind, "💡 Suggestion")
+    header = _KIND_HEADERS.get(s.kind, "◆ Suggestion")
     p = s.payload
     if s.kind == KIND_PROFILE_UPDATE:
         cat = p.get("category", "perso")
         return f"**{header}** · _{cat}_\n{p.get('info', '')}"
     if s.kind == KIND_PERSONAL_REMINDER:
         rec = p.get("recurrence", "none")
-        rec_str = {"daily": " · 🔁 quotidien", "weekly": " · 🔁 hebdo"}.get(rec, "")
+        rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(rec, "")
         return f"**{header}**{rec_str}\n{p.get('description', '')}\n-# {_when_label(p.get('when', ''))}"
     # server_event / group_activity
     return f"**{header}**\n{p.get('title', s.description)}\n-# {_when_label(p.get('when', ''))}"
@@ -239,15 +239,15 @@ class SuggestionsView(discord.ui.LayoutView):
         children.append(discord.ui.TextDisplay("## Suggestions de MARIA"))
         children.append(discord.ui.Separator())
 
-        children.append(discord.ui.TextDisplay("### Pour toi"))
+        children.append(discord.ui.TextDisplay("**Pour toi**"))
         if personal:
             self._add_items(children, cog, ctx, personal, personal_cap, event=False)
         else:
-            children.append(discord.ui.TextDisplay("-# Aucune suggestion personnelle en attente."))
+            children.append(discord.ui.TextDisplay("-# Aucune suggestion en attente."))
 
         if ctx.is_mod and ctx.guild_id:
             children.append(discord.ui.Separator())
-            children.append(discord.ui.TextDisplay("### Événements serveur"))
+            children.append(discord.ui.TextDisplay("**Événements serveur** · ⚙ modérateurs"))
             if events:
                 self._add_items(children, cog, ctx, events, _SECTION_CAP_MOD, event=True)
             else:
@@ -284,7 +284,7 @@ def build_suggestions_view(
     has_events = bool(ctx.is_mod and ctx.guild_id and cog.store.list_events(ctx.guild_id))
     if not has_personal and not has_events:
         return _empty_view(
-            "Aucune suggestion en attente. MARIA t'en proposera en lisant les salons surveillés.",
+            "Aucune suggestion en attente — MARIA t'en proposera au fil des conversations dans les salons surveillés.",
             header,
         )
     return SuggestionsView(cog, ctx, header)
