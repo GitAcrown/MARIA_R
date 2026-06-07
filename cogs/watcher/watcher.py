@@ -60,7 +60,7 @@ ANALYZE_INTERVAL_MIN = 5       # période de la boucle de fond
 BUFFER_MAX = 60                # messages conservés par salon
 MIN_MESSAGES_TO_ANALYZE = 5    # ne rien faire en dessous (bruit)
 
-CONFIDENCE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.75
 ANALYSIS_MAX_TOKENS = 1200
 
 _VALID_KINDS = (KIND_PERSONAL_REMINDER, KIND_SERVER_EVENT, KIND_PROFILE_UPDATE, KIND_GROUP_ACTIVITY)
@@ -129,13 +129,13 @@ Types de suggestions :
 - profile_update : un fait stable et personnel révélé sur un utilisateur (ville, âge, métier, préférence forte). target_user_id = l'utilisateur concerné. category = identité/préférences/projets/perso. content = le fait, court, à la 3e personne.
 
 Règles :
-- N'utilise QUE les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
-- target_user_id doit être un id présent dans la liste PARTICIPANTS, sinon "".
+- N'utilise STRICTEMENT QUE les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
+- 'target_user_id' doit être un id présent dans la liste PARTICIPANTS, sinon "".
 - Ne propose pas de profile_update déjà présent dans les NOTES EXISTANTES.
 - Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
-- confidence entre 0 et 1. Sois sévère : en dessous de 0.6, abstiens-toi.
+- confidence entre 0 et 1. Sois sévère : en dessous de 0.75, abstiens-toi.
 - S'il n'y a rien de pertinent, renvoie une liste vide.
-- content concis et clair, en français."""
+- 'content' doit être très concis et clair, en français."""
 
 
 class Watcher(commands.Cog):
