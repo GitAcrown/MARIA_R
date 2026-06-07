@@ -239,7 +239,7 @@ class SuggestionsView(discord.ui.LayoutView):
         children.append(discord.ui.TextDisplay("## Suggestions de MARIA"))
         children.append(discord.ui.Separator())
 
-        children.append(discord.ui.TextDisplay("**Pour toi**"))
+        children.append(discord.ui.TextDisplay("### Pour toi"))
         if personal:
             self._add_items(children, cog, ctx, personal, personal_cap, event=False)
         else:
@@ -247,7 +247,7 @@ class SuggestionsView(discord.ui.LayoutView):
 
         if ctx.is_mod and ctx.guild_id:
             children.append(discord.ui.Separator())
-            children.append(discord.ui.TextDisplay("**Événements serveur** · ⚙ modérateurs"))
+            children.append(discord.ui.TextDisplay("### Événements serveur · ⚙ modérateurs"))
             if events:
                 self._add_items(children, cog, ctx, events, _SECTION_CAP_MOD, event=True)
             else:

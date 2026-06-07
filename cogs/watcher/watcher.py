@@ -134,9 +134,9 @@ Règles générales :
 - 'target_user_id' doit être un id NUMÉRIQUE présent dans PARTICIPANTS, sinon "". Le pseudo d'affichage n'est qu'un nom — ne l'interprète jamais comme une description du comportement ou des goûts de l'utilisateur.
 - Ne propose pas de profile_update déjà présent dans les NOTES EXISTANTES.
 - Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
-- confidence entre 0 et 1. En dessous de 0.75, abstiens-toi.
+- 'Confidence' entre 0 et 1. En dessous de 0.80, abstiens-toi.
 - S'il n'y a rien de pertinent, renvoie une liste vide.
-- 'content' doit être très concis et clair, en français.
+- 'Content' doit être très concis et clair, en français.
 
 Règles spécifiques à profile_update (importantes) :
 - Maximum 1 profile_update par utilisateur par analyse, même s'il y a plusieurs sujets potentiels : choisis le plus certain.
@@ -148,7 +148,8 @@ Règles spécifiques à profile_update (importantes) :
 Ignore :
 - Les messages de bots et les messages de test.
 - Les messages demandant un service à MARIA (météo, film, jeu, etc.).
-- Tout message s'adressant déjà à MARIA."""
+- Tout message s'adressant déjà à MARIA.
+- Le contenu provenant d'un embed ou d'une source tierce (article, lien, etc.)."""
 
 
 class Watcher(commands.Cog):
