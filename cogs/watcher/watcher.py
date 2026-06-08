@@ -29,7 +29,6 @@ from common.rappels import (
 )
 from common.suggestions import (
     EVENT_KINDS,
-    KIND_GROUP_ACTIVITY,
     KIND_PERSONAL_REMINDER,
     KIND_PROFILE_UPDATE,
     KIND_SERVER_EVENT,
@@ -63,7 +62,7 @@ MIN_MESSAGES_TO_ANALYZE = 5    # ne rien faire en dessous (bruit)
 CONFIDENCE_THRESHOLD = 0.80
 ANALYSIS_MAX_TOKENS = 1200
 
-_VALID_KINDS = (KIND_PERSONAL_REMINDER, KIND_SERVER_EVENT, KIND_PROFILE_UPDATE, KIND_GROUP_ACTIVITY)
+_VALID_KINDS = (KIND_PERSONAL_REMINDER, KIND_SERVER_EVENT, KIND_PROFILE_UPDATE)
 _VALID_RECURRENCES = (RECURRENCE_NONE, RECURRENCE_DAILY, RECURRENCE_WEEKLY)
 
 # Schéma JSON strict de la sortie nano
@@ -120,36 +119,41 @@ _DATETIME_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu es un analyste discret. Tu lis un extrait de conversation Discord et tu proposes des SUGGESTIONS utiles, sans jamais inventer.
+_SYSTEM_PROMPT = """Tu es un analyste discret. Tu lis un extrait de conversation Discord et tu proposes des suggestions utiles, sans jamais inventer.
+
+FORMAT DE LA CONVERSATION :
+Chaque ligne suit le patron : [JJ/MM HH:MM][<id_numérique>] <pseudo>: <message>
+Le champ [<id_numérique>] entre crochets est l'identifiant unique de l'auteur — c'est la seule valeur valide pour target_user_id.
 
 Types de suggestions :
-- personal_reminder : un utilisateur veut clairement se souvenir/être rappelé de quelque chose à un moment donné. target_user_id = l'auteur concerné. when = date/heure ISO 8601 (heure de Paris) si déductible, sinon "". recurrence = daily/weekly si récurrent, sinon none.
-- server_event : un évènement qui concerne tout le serveur (soirée, session de jeu commune, sortie). target_user_id = "". when = ISO 8601 si connu.
-- group_activity : une activité de groupe envisagée mais sans date ferme. target_user_id = "".
-- profile_update : un FAIT STABLE ET DURABLE révélé sur un utilisateur (ville, âge, métier). target_user_id = l'utilisateur concerné. category = identité/préférences/projets/perso. content = le fait, court, à la 3e personne.
+- personal_reminder : l'utilisateur exprime LUI-MÊME vouloir se souvenir de quelque chose ou être rappelé à un moment précis. target_user_id = son id numérique. when = ISO 8601 (heure Paris) si déductible, sinon "". recurrence = daily/weekly si récurrent, sinon none.
+- server_event : un événement collectif CLAIREMENT ANNONCÉ avec une date ou une intention ferme (soirée, session commune, sortie planifiée). Il doit y avoir une annonce explicite, pas une simple envie vague. target_user_id = "". when = ISO 8601 si connu.
+- profile_update : un FAIT STABLE ET DURABLE qu'un utilisateur révèle sur LUI-MÊME (ville, âge, métier, goût établi). target_user_id = son id numérique. category = identité/préférences/projets/perso. content = le fait, concis, à la 3e personne.
+
+Règles d'attribution (critiques) :
+- target_user_id doit être EXACTEMENT l'id numérique entre crochets de la ligne source — copie-le tel quel depuis la conversation.
+- Pour personal_reminder : l'utilisateur doit avoir lui-même exprimé l'intention ("je dois", "rappelle-moi", "j'oublie toujours"…). Un autre utilisateur qui parle d'une tierce personne ne suffit PAS.
+- Pour profile_update : l'utilisateur doit avoir révélé l'info sur lui-même. Si quelqu'un d'autre le décrit, abstiens-toi.
+- Le pseudo d'affichage n'est qu'un nom — ne l'interprète JAMAIS comme une description du comportement ou des goûts.
 
 Règles générales :
-- N'utilise STRICTEMENT QUE les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
-- Ne suggère pas d'évènements ou d'activité de groupe qui ne serait pas explicitement mentionné comme tel.
-- 'target_user_id' doit être un id NUMÉRIQUE présent dans PARTICIPANTS, sinon "". Le pseudo d'affichage n'est qu'un nom — ne l'interprète jamais comme une description du comportement ou des goûts de l'utilisateur.
-- Ne propose pas de profile_update déjà présent dans les NOTES EXISTANTES.
-- Ne répète pas une suggestion déjà présente dans SUGGESTIONS EN ATTENTE.
-- 'Confidence' entre 0 et 1. En dessous de 0.80, abstiens-toi.
+- N'utilise que les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
+- Ne propose pas de profile_update déjà présent dans NOTES EXISTANTES.
+- Ne répète pas une suggestion déjà listée dans SUGGESTIONS EN ATTENTE/REFUSÉES — même reformulée différemment.
+- confidence entre 0 et 1. En dessous de 0.80, abstiens-toi.
 - S'il n'y a rien de pertinent, renvoie une liste vide.
-- 'Content' doit être très concis et clair, en français.
+- content très concis, en français.
 
-Règles spécifiques à profile_update (importantes) :
-- Maximum 1 profile_update par utilisateur par analyse, même s'il y a plusieurs sujets potentiels : choisis le plus certain.
-- Un sujet abordé une seule fois dans la conversation N'EST PAS une préférence. Pour la catégorie "préférences", l'utilisateur doit exprimer clairement un goût durable ou une habitude (ex : "j'adore depuis toujours", "j'en fais régulièrement") — un simple partage ponctuel ou une discussion du moment ne compte pas.
-- Catégorie "identité" (ville, âge, prénom, métier) : uniquement si clairement énoncé. confidence minimum 0.85.
-- Catégorie "préférences" : une mention unique ne suffit pas. confidence minimum 0.80.
-- Catégorie "projets" : uniquement si l'utilisateur porte activement le projet. confidence minimum 0.80.
+Règles spécifiques à profile_update :
+- Maximum 1 profile_update par utilisateur par analyse : choisis le fait le plus certain.
+- "préférences" : un sujet mentionné une seule fois n'est pas une préférence. Il faut un goût durable clairement exprimé ("j'adore depuis toujours", "je joue régulièrement à…"). confidence minimum 0.80.
+- "identité" (ville, âge, prénom, métier) : uniquement si clairement énoncé. confidence minimum 0.85.
+- "projets" : uniquement si l'utilisateur porte activement le projet. confidence minimum 0.80.
 
 Ignore :
-- Les messages de bots et les messages de test.
-- Les messages demandant un service à MARIA (météo, film, jeu, etc.).
-- Tout message s'adressant déjà à MARIA.
-- Le contenu provenant d'un embed ou d'une source tierce (article, lien, etc.)."""
+- Les messages de bots.
+- Les messages adressés à MARIA (demandes de service, météo, film, jeu…).
+- Le contenu d'embeds ou de sources tierces (articles, liens)."""
 
 
 class Watcher(commands.Cog):
@@ -286,7 +290,11 @@ class Watcher(commands.Cog):
         if not buf:
             return 0
         guild_id = self._guild_of.get(channel_id, 0)
-        return await self._run_analysis(guild_id=guild_id, channel_id=channel_id, snapshot=list(buf))
+        snapshot = list(buf)
+        result = await self._run_analysis(guild_id=guild_id, channel_id=channel_id, snapshot=snapshot)
+        # Vider le buffer pour ne pas ré-analyser les mêmes messages lors du prochain cycle.
+        buf.clear()
+        return result
 
     async def _run_analysis(
         self, *, guild_id: int, channel_id: int, snapshot: list[tuple]
@@ -299,7 +307,7 @@ class Watcher(commands.Cog):
         lines: list[str] = []
         for uid, name, ts, text in snapshot:
             participants.setdefault(uid, name)
-            lines.append(f"[{ts.astimezone(PARIS_TZ):%d/%m %H:%M}] {name} ({uid}): {text}")
+            lines.append(f"[{ts.astimezone(PARIS_TZ):%d/%m %H:%M}][{uid}] {name}: {text}")
         transcript = "\n".join(lines)[-6000:]
 
         notes_blocks: list[str] = []

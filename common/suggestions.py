@@ -1,7 +1,7 @@
 """Suggestions intelligentes générées par l'IA passive.
 
 Une suggestion est une proposition (rappel personnel, événement serveur, mise à
-jour de profil, activité de groupe) détectée passivement dans la conversation.
+jour de profil) détectée passivement dans la conversation.
 Elle reste en `pending` jusqu'à validation/refus via les commandes dédiées.
 """
 
@@ -25,17 +25,16 @@ DB_PATH = DATA_DIR / "suggestions.db"
 KIND_PERSONAL_REMINDER = "personal_reminder"
 KIND_SERVER_EVENT = "server_event"
 KIND_PROFILE_UPDATE = "profile_update"
-KIND_GROUP_ACTIVITY = "group_activity"
 
 PERSONAL_KINDS = (KIND_PERSONAL_REMINDER, KIND_PROFILE_UPDATE)
-EVENT_KINDS = (KIND_SERVER_EVENT, KIND_GROUP_ACTIVITY)
+EVENT_KINDS = (KIND_SERVER_EVENT,)
 
 # Durée de vie d'une suggestion non traitée
 DEFAULT_TTL_DAYS = 3  # 72 h
 # Plafond de suggestions en attente par portée.
 # Quand le plafond est atteint, la plus ancienne est évincée pour faire place à la nouvelle.
 MAX_PENDING_PERSONAL = 10   # par utilisateur (toutes suggestions personnelles confondues)
-MAX_PENDING_EVENTS = 8      # par guild (événements + activités de groupe)
+MAX_PENDING_EVENTS = 6      # par guild (événements serveur uniquement)
 
 
 @dataclass

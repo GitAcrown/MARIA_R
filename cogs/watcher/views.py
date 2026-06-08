@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Optional
 import discord
 
 from common.suggestions import (
-    KIND_GROUP_ACTIVITY,
     KIND_PERSONAL_REMINDER,
     KIND_PROFILE_UPDATE,
     KIND_SERVER_EVENT,
@@ -33,7 +32,6 @@ _KIND_HEADERS = {
     KIND_PERSONAL_REMINDER: "◆ Rappel suggéré",
     KIND_PROFILE_UPDATE: "◆ Mise à jour de profil",
     KIND_SERVER_EVENT: "◆ Événement serveur",
-    KIND_GROUP_ACTIVITY: "◆ Activité de groupe",
 }
 
 
@@ -74,7 +72,7 @@ def _suggestion_text(s: Suggestion) -> str:
         rec = p.get("recurrence", "none")
         rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(rec, "")
         return f"**{header}**{rec_str}\n{p.get('description', '')}\n-# {_when_label(p.get('when', ''))}"
-    # server_event / group_activity
+    # server_event
     return f"**{header}**\n{p.get('title', s.description)}\n-# {_when_label(p.get('when', ''))}"
 
 
