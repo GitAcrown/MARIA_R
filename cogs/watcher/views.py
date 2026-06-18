@@ -1,11 +1,11 @@
 """Vues LayoutView pour consulter et valider les suggestions de l'IA passive.
 
-Une seule commande `/suggestions` :
-- tout le monde voit ses suggestions personnelles (rappels, profil) ;
-- les modérateurs voient en plus les événements suggérés pour le serveur.
+`/suggestions` affiche deux sections distinctes :
+- Rappels : suggestions de type personal_reminder
+- Profil  : suggestions de type profile_update
 
-Quand une suggestion est incomplète (date manquante…), le bouton « Accepter »
-ouvre un modal pour préciser ; nano normalise ensuite les champs saisis.
+Quand un rappel est incomplet (date manquante), « Accepter » ouvre un modal ;
+nano normalise ensuite la date saisie en ISO 8601.
 """
 
 from datetime import datetime, timezone
@@ -16,7 +16,6 @@ import discord
 from common.suggestions import (
     KIND_PERSONAL_REMINDER,
     KIND_PROFILE_UPDATE,
-    KIND_SERVER_EVENT,
     Suggestion,
 )
 from common.timezones import PARIS_TZ
@@ -24,16 +23,14 @@ from common.timezones import PARIS_TZ
 if TYPE_CHECKING:
     from cogs.watcher.watcher import Watcher
 
-# Plafonds d'affichage (limite de composants d'un LayoutView).
-_PERSONAL_CAP_SOLO = 6
-_SECTION_CAP_MOD = 3
+# Nombre max de suggestions affichées par section (limites de composants Discord).
+_CAP_REMINDERS = 4
+_CAP_PROFILES  = 4
 
-_KIND_HEADERS = {
-    KIND_PERSONAL_REMINDER: "◆ Rappel suggéré",
-    KIND_PROFILE_UPDATE: "◆ Mise à jour de profil",
-    KIND_SERVER_EVENT: "◆ Événement serveur",
-}
 
+# ---------------------------------------------------------------------------
+# Helpers de formatage
+# ---------------------------------------------------------------------------
 
 def parse_when(when: str) -> Optional[datetime]:
     """Parse une date ISO 8601 (fuseau Paris si naïf) en datetime UTC."""
@@ -62,25 +59,28 @@ def _when_label(when: str) -> str:
     return f"<t:{int(dt.timestamp())}:f> (<t:{int(dt.timestamp())}:R>)"
 
 
-def _suggestion_text(s: Suggestion) -> str:
-    header = _KIND_HEADERS.get(s.kind, "◆ Suggestion")
+def _reminder_text(s: Suggestion) -> str:
     p = s.payload
-    if s.kind == KIND_PROFILE_UPDATE:
-        cat = p.get("category", "perso")
-        return f"**{header}** · _{cat}_\n{p.get('info', '')}"
-    if s.kind == KIND_PERSONAL_REMINDER:
-        rec = p.get("recurrence", "none")
-        rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(rec, "")
-        return f"**{header}**{rec_str}\n{p.get('description', '')}\n-# {_when_label(p.get('when', ''))}"
-    # server_event
-    return f"**{header}**\n{p.get('title', s.description)}\n-# {_when_label(p.get('when', ''))}"
+    rec = p.get("recurrence", "none")
+    rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(rec, "")
+    return (
+        f"**◆ Rappel**{rec_str}\n"
+        f"{p.get('description', '')}\n"
+        f"-# {_when_label(p.get('when', ''))}"
+    )
+
+
+def _profile_text(s: Suggestion) -> str:
+    p = s.payload
+    cat = p.get("category", "perso")
+    return f"**◆ Profil** · _{cat}_\n{p.get('info', '')}"
 
 
 # ---------------------------------------------------------------------------
-# Boutons
+# Bouton d'action
 # ---------------------------------------------------------------------------
 
-class _PersonalActionButton(discord.ui.Button):
+class _ActionButton(discord.ui.Button):
     def __init__(self, cog: "Watcher", ctx: "ViewContext", suggestion_id: int, *, accept: bool):
         super().__init__(
             style=discord.ButtonStyle.success if accept else discord.ButtonStyle.secondary,
@@ -102,26 +102,8 @@ class _PersonalActionButton(discord.ui.Button):
         )
 
 
-class _EventActionButton(discord.ui.Button):
-    def __init__(self, cog: "Watcher", ctx: "ViewContext", suggestion_id: int, *, accept: bool):
-        super().__init__(
-            style=discord.ButtonStyle.success if accept else discord.ButtonStyle.secondary,
-            label="Accepter" if accept else "Refuser",
-            custom_id=f"event_{'ok' if accept else 'no'}_{suggestion_id}",
-        )
-        self.cog = cog
-        self.ctx = ctx
-        self.suggestion_id = suggestion_id
-        self.accept = accept
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await self.cog.handle_event_action(
-            interaction, self.suggestion_id, accept=self.accept, ctx=self.ctx
-        )
-
-
 # ---------------------------------------------------------------------------
-# Modals de complétion (nano remplit les champs depuis le texte libre)
+# Modal de complétion (rappel sans date)
 # ---------------------------------------------------------------------------
 
 class ReminderCompleteModal(discord.ui.Modal, title="Préciser le rappel"):
@@ -155,60 +137,23 @@ class ReminderCompleteModal(discord.ui.Modal, title="Préciser le rappel"):
         )
 
 
-class EventCompleteModal(discord.ui.Modal, title="Créer l'événement"):
-    def __init__(self, cog: "Watcher", ctx: "ViewContext", suggestion_id: int, *, name: str, when_raw: str):
-        super().__init__()
-        self.cog = cog
-        self.ctx = ctx
-        self.suggestion_id = suggestion_id
-        self.name_input = discord.ui.TextInput(
-            label="Nom de l'événement",
-            default=name[:100],
-            max_length=100,
-            required=True,
-        )
-        self.when_input = discord.ui.TextInput(
-            label="Quand (langage naturel)",
-            default=when_raw[:100],
-            placeholder="ex : samedi 20h, le 14/07 à 19h",
-            max_length=100,
-            required=True,
-        )
-        self.location_input = discord.ui.TextInput(
-            label="Lieu",
-            placeholder="ex : en vocal, chez Théo, en ligne",
-            max_length=100,
-            required=False,
-        )
-        self.add_item(self.name_input)
-        self.add_item(self.when_input)
-        self.add_item(self.location_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.finish_event_from_modal(
-            interaction,
-            self.suggestion_id,
-            name=self.name_input.value.strip(),
-            when_text=self.when_input.value.strip(),
-            location=self.location_input.value.strip(),
-            ctx=self.ctx,
-        )
-
-
 # ---------------------------------------------------------------------------
-# Vue unifiée
+# Contexte de rendu
 # ---------------------------------------------------------------------------
 
 class ViewContext:
-    """Contexte de rendu : qui consulte, dans quel serveur, et s'il est modo."""
+    """Qui consulte la vue et depuis quel serveur."""
 
-    __slots__ = ("user_id", "guild_id", "is_mod")
+    __slots__ = ("user_id", "guild_id")
 
-    def __init__(self, user_id: int, guild_id: int, is_mod: bool):
+    def __init__(self, user_id: int, guild_id: int):
         self.user_id = user_id
         self.guild_id = guild_id
-        self.is_mod = is_mod
 
+
+# ---------------------------------------------------------------------------
+# Vue principale
+# ---------------------------------------------------------------------------
 
 def _empty_view(message: str, header: Optional[str] = None) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=180)
@@ -222,65 +167,64 @@ def _empty_view(message: str, header: Optional[str] = None) -> discord.ui.Layout
 
 
 class SuggestionsView(discord.ui.LayoutView):
-    """Vue unique : suggestions perso + (pour les modos) événements serveur."""
+    """Deux sections : Rappels puis Profil."""
 
     def __init__(self, cog: "Watcher", ctx: ViewContext, header: Optional[str] = None):
         super().__init__(timeout=180)
-        personal = cog.store.list_personal(ctx.user_id)
-        events = cog.store.list_events(ctx.guild_id) if (ctx.is_mod and ctx.guild_id) else []
+        reminders = cog.store.list_reminders(ctx.user_id)
+        profiles  = cog.store.list_profiles(ctx.user_id)
 
-        personal_cap = _SECTION_CAP_MOD if (ctx.is_mod and events) else _PERSONAL_CAP_SOLO
         children: list[discord.ui.Item] = []
         if header:
             children.append(discord.ui.TextDisplay(header))
             children.append(discord.ui.Separator())
+
         children.append(discord.ui.TextDisplay("## Suggestions de MARIA"))
         children.append(discord.ui.Separator())
 
-        children.append(discord.ui.TextDisplay("### Pour toi"))
-        if personal:
-            self._add_items(children, cog, ctx, personal, personal_cap, event=False)
+        # --- Section Rappels ---
+        children.append(discord.ui.TextDisplay("**Rappels**"))
+        if reminders:
+            _append_suggestions(children, cog, ctx, reminders, _CAP_REMINDERS, _reminder_text)
         else:
-            children.append(discord.ui.TextDisplay("-# Aucune suggestion en attente."))
+            children.append(discord.ui.TextDisplay("-# Aucun rappel suggéré."))
 
-        if ctx.is_mod and ctx.guild_id:
-            children.append(discord.ui.Separator())
-            children.append(discord.ui.TextDisplay("### Événements serveur · ⚙ modérateurs"))
-            if events:
-                self._add_items(children, cog, ctx, events, _SECTION_CAP_MOD, event=True)
-            else:
-                children.append(discord.ui.TextDisplay("-# Aucun événement suggéré en attente."))
+        children.append(discord.ui.Separator())
+
+        # --- Section Profil ---
+        children.append(discord.ui.TextDisplay("**Profil**"))
+        if profiles:
+            _append_suggestions(children, cog, ctx, profiles, _CAP_PROFILES, _profile_text)
+        else:
+            children.append(discord.ui.TextDisplay("-# Aucune mise à jour de profil suggérée."))
 
         self.add_item(discord.ui.Container(*children))
 
-    @staticmethod
-    def _add_items(
-        children: list, cog: "Watcher", ctx: ViewContext,
-        suggestions: list[Suggestion], cap: int, *, event: bool,
-    ) -> None:
-        for s in suggestions[:cap]:
-            children.append(discord.ui.TextDisplay(_suggestion_text(s)))
-            if event:
-                row = discord.ui.ActionRow(
-                    _EventActionButton(cog, ctx, s.id, accept=True),
-                    _EventActionButton(cog, ctx, s.id, accept=False),
-                )
-            else:
-                row = discord.ui.ActionRow(
-                    _PersonalActionButton(cog, ctx, s.id, accept=True),
-                    _PersonalActionButton(cog, ctx, s.id, accept=False),
-                )
-            children.append(row)
-        if len(suggestions) > cap:
-            children.append(discord.ui.TextDisplay(f"-# +{len(suggestions) - cap} autre(s) en attente."))
+
+def _append_suggestions(
+    children: list,
+    cog: "Watcher",
+    ctx: ViewContext,
+    suggestions: list[Suggestion],
+    cap: int,
+    text_fn,
+) -> None:
+    for s in suggestions[:cap]:
+        children.append(discord.ui.TextDisplay(text_fn(s)))
+        children.append(discord.ui.ActionRow(
+            _ActionButton(cog, ctx, s.id, accept=True),
+            _ActionButton(cog, ctx, s.id, accept=False),
+        ))
+    if len(suggestions) > cap:
+        children.append(discord.ui.TextDisplay(f"-# +{len(suggestions) - cap} autre(s) en attente."))
 
 
 def build_suggestions_view(
     cog: "Watcher", ctx: ViewContext, header: Optional[str] = None
 ) -> discord.ui.LayoutView:
-    has_personal = bool(cog.store.list_personal(ctx.user_id))
-    has_events = bool(ctx.is_mod and ctx.guild_id and cog.store.list_events(ctx.guild_id))
-    if not has_personal and not has_events:
+    has_reminders = bool(cog.store.list_reminders(ctx.user_id))
+    has_profiles  = bool(cog.store.list_profiles(ctx.user_id))
+    if not has_reminders and not has_profiles:
         return _empty_view(
             "Aucune suggestion en attente — MARIA t'en proposera au fil des conversations dans les salons surveillés.",
             header,

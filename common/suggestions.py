@@ -1,8 +1,8 @@
 """Suggestions intelligentes générées par l'IA passive.
 
-Une suggestion est une proposition (rappel personnel, événement serveur, mise à
-jour de profil) détectée passivement dans la conversation.
-Elle reste en `pending` jusqu'à validation/refus via les commandes dédiées.
+Une suggestion est une proposition personnelle (rappel ou mise à jour de profil)
+détectée passivement dans la conversation.
+Elle reste en `pending` jusqu'à validation/refus via `/suggestions`.
 """
 
 import hashlib
@@ -21,20 +21,18 @@ logger = logging.getLogger("MARIA.Suggestions")
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "suggestions.db"
 
-# Types de suggestions reconnus
+# Types de suggestions reconnus (strictement personnel)
 KIND_PERSONAL_REMINDER = "personal_reminder"
-KIND_SERVER_EVENT = "server_event"
 KIND_PROFILE_UPDATE = "profile_update"
 
-PERSONAL_KINDS = (KIND_PERSONAL_REMINDER, KIND_PROFILE_UPDATE)
-EVENT_KINDS = (KIND_SERVER_EVENT,)
+ALL_KINDS = (KIND_PERSONAL_REMINDER, KIND_PROFILE_UPDATE)
 
 # Durée de vie d'une suggestion non traitée
 DEFAULT_TTL_DAYS = 3  # 72 h
-# Plafond de suggestions en attente par portée.
+# Plafond de suggestions en attente par utilisateur.
 # Quand le plafond est atteint, la plus ancienne est évincée pour faire place à la nouvelle.
-MAX_PENDING_PERSONAL = 10   # par utilisateur (toutes suggestions personnelles confondues)
-MAX_PENDING_EVENTS = 6      # par guild (événements serveur uniquement)
+MAX_PENDING_REMINDERS = 5   # rappels
+MAX_PENDING_PROFILES = 5    # notes de profil
 
 
 @dataclass
@@ -146,13 +144,16 @@ class SuggestionStore:
         kind: str,
         guild_id: int,
         channel_id: int,
-        target_user_id: Optional[int],
+        target_user_id: int,
         payload: dict[str, Any],
         source_excerpt: str = "",
         ttl_days: int = DEFAULT_TTL_DAYS,
     ) -> Optional[int]:
-        """Insère une suggestion. Retourne l'id, ou None si un doublon `pending` existe."""
-        sig = make_signature(kind, target_user_id, payload.get("description") or payload.get("title") or payload.get("info") or "")
+        """Insère une suggestion personnelle. Retourne l'id, ou None si doublon."""
+        if kind not in ALL_KINDS:
+            return None
+        sig = make_signature(kind, target_user_id, payload.get("description") or payload.get("info") or "")
+        cap = MAX_PENDING_REMINDERS if kind == KIND_PERSONAL_REMINDER else MAX_PENDING_PROFILES
         now = datetime.now(timezone.utc)
         expires = now + timedelta(days=ttl_days)
         with _db() as conn:
@@ -163,37 +164,19 @@ class SuggestionStore:
             if dup:
                 return None
 
-            # Éviction de la plus ancienne si le plafond est atteint.
-            if kind in PERSONAL_KINDS and target_user_id is not None:
-                count_row = conn.execute(
-                    f"SELECT COUNT(*) FROM suggestions WHERE status='pending'"
-                    f" AND target_user_id=? AND kind IN ({','.join('?'*len(PERSONAL_KINDS))})",
-                    (target_user_id, *PERSONAL_KINDS),
-                ).fetchone()
-                if (count_row[0] or 0) >= MAX_PENDING_PERSONAL:
-                    conn.execute(
-                        f"DELETE FROM suggestions WHERE id = ("
-                        f"  SELECT id FROM suggestions WHERE status='pending'"
-                        f"  AND target_user_id=? AND kind IN ({','.join('?'*len(PERSONAL_KINDS))})"
-                        f"  ORDER BY created_at ASC LIMIT 1"
-                        f")",
-                        (target_user_id, *PERSONAL_KINDS),
-                    )
-            elif kind in EVENT_KINDS:
-                count_row = conn.execute(
-                    f"SELECT COUNT(*) FROM suggestions WHERE status='pending'"
-                    f" AND guild_id=? AND kind IN ({','.join('?'*len(EVENT_KINDS))})",
-                    (guild_id, *EVENT_KINDS),
-                ).fetchone()
-                if (count_row[0] or 0) >= MAX_PENDING_EVENTS:
-                    conn.execute(
-                        f"DELETE FROM suggestions WHERE id = ("
-                        f"  SELECT id FROM suggestions WHERE status='pending'"
-                        f"  AND guild_id=? AND kind IN ({','.join('?'*len(EVENT_KINDS))})"
-                        f"  ORDER BY created_at ASC LIMIT 1"
-                        f")",
-                        (guild_id, *EVENT_KINDS),
-                    )
+            # Éviction FIFO si le plafond par type est atteint.
+            count_row = conn.execute(
+                "SELECT COUNT(*) FROM suggestions WHERE status='pending' AND target_user_id=? AND kind=?",
+                (target_user_id, kind),
+            ).fetchone()
+            if (count_row[0] or 0) >= cap:
+                conn.execute(
+                    "DELETE FROM suggestions WHERE id = ("
+                    "  SELECT id FROM suggestions WHERE status='pending'"
+                    "  AND target_user_id=? AND kind=? ORDER BY created_at ASC LIMIT 1"
+                    ")",
+                    (target_user_id, kind),
+                )
 
             cur = conn.execute(
                 "INSERT INTO suggestions"
@@ -214,63 +197,41 @@ class SuggestionStore:
             ).fetchone()
         return _row_to_suggestion(row) if row else None
 
-    def list_personal(self, user_id: int) -> list[Suggestion]:
-        """Suggestions personnelles en attente pour un utilisateur (rappels, profil)."""
-        placeholders = ",".join("?" * len(PERSONAL_KINDS))
+    def list_reminders(self, user_id: int) -> list[Suggestion]:
+        """Suggestions de rappel en attente pour un utilisateur."""
         with _db() as conn:
             rows = conn.execute(
-                f"SELECT * FROM suggestions WHERE status='pending'"
-                f" AND target_user_id=? AND kind IN ({placeholders})"
-                f" ORDER BY created_at",
-                (user_id, *PERSONAL_KINDS),
+                "SELECT * FROM suggestions WHERE status='pending'"
+                " AND target_user_id=? AND kind=?"
+                " ORDER BY created_at",
+                (user_id, KIND_PERSONAL_REMINDER),
             ).fetchall()
         return [_row_to_suggestion(r) for r in rows]
 
-    def list_events(self, guild_id: int) -> list[Suggestion]:
-        """Suggestions d'événements/activités en attente pour une guild."""
-        placeholders = ",".join("?" * len(EVENT_KINDS))
+    def list_profiles(self, user_id: int) -> list[Suggestion]:
+        """Suggestions de mise à jour de profil en attente pour un utilisateur."""
         with _db() as conn:
             rows = conn.execute(
-                f"SELECT * FROM suggestions WHERE status='pending'"
-                f" AND guild_id=? AND kind IN ({placeholders})"
-                f" ORDER BY created_at",
-                (guild_id, *EVENT_KINDS),
+                "SELECT * FROM suggestions WHERE status='pending'"
+                " AND target_user_id=? AND kind=?"
+                " ORDER BY created_at",
+                (user_id, KIND_PROFILE_UPDATE),
             ).fetchall()
         return [_row_to_suggestion(r) for r in rows]
 
-    def set_status(self, suggestion_id: int, status: str, *, user_id: Optional[int] = None) -> bool:
-        """Change le statut. Si user_id est fourni, vérifie l'appartenance (suggestions perso)."""
+    def set_status(self, suggestion_id: int, status: str, *, user_id: int) -> bool:
+        """Change le statut. Vérifie l'appartenance à user_id."""
         with _db() as conn:
-            if user_id is not None:
-                cur = conn.execute(
-                    "UPDATE suggestions SET status=? WHERE id=? AND target_user_id=? AND status='pending'",
-                    (status, suggestion_id, user_id),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE suggestions SET status=? WHERE id=? AND status='pending'",
-                    (status, suggestion_id),
-                )
+            cur = conn.execute(
+                "UPDATE suggestions SET status=? WHERE id=? AND target_user_id=? AND status='pending'",
+                (status, suggestion_id, user_id),
+            )
             return cur.rowcount > 0
 
-    def pending_signatures(self, *, target_user_id: Optional[int] = None, guild_id: Optional[int] = None) -> set[str]:
-        """Empreintes des suggestions déjà en attente (pour informer le modèle)."""
-        query = "SELECT signature FROM suggestions WHERE status='pending'"
-        params: list[Any] = []
-        if target_user_id is not None:
-            query += " AND target_user_id=?"
-            params.append(target_user_id)
-        if guild_id is not None:
-            query += " AND guild_id=?"
-            params.append(guild_id)
-        with _db() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return {r[0] for r in rows}
+    def pending_descriptions(self, guild_id: int, limit: int = 30) -> list[str]:
+        """Descriptions des suggestions en attente ou refusées d'une guild (pour le prompt LLM).
 
-    def pending_descriptions(self, guild_id: int, limit: int = 40) -> list[str]:
-        """Descriptions courtes des suggestions en attente ou refusées d'une guild (pour le prompt).
-
-        Les suggestions refusées sont également incluses pour que le modèle évite de les reproposer.
+        Inclut les refusées pour que le modèle évite de les reproposer.
         """
         with _db() as conn:
             rows = conn.execute(
@@ -285,26 +246,19 @@ class SuggestionStore:
                 p = json.loads(r["payload"]) if r["payload"] else {}
             except (json.JSONDecodeError, TypeError):
                 p = {}
-            desc = p.get("description") or p.get("title") or p.get("info") or ""
+            desc = p.get("description") or p.get("info") or ""
             if desc:
                 label = "refusé" if r["status"] == "rejected" else "en attente"
                 out.append(f"[{r['kind']}|{label}] {desc}")
         return out
 
-    def count_pending(self, *, target_user_id: Optional[int] = None, guild_id: Optional[int] = None, kinds: tuple[str, ...] = ()) -> int:
-        query = "SELECT COUNT(*) FROM suggestions WHERE status='pending'"
-        params: list[Any] = []
-        if target_user_id is not None:
-            query += " AND target_user_id=?"
-            params.append(target_user_id)
-        if guild_id is not None:
-            query += " AND guild_id=?"
-            params.append(guild_id)
-        if kinds:
-            query += f" AND kind IN ({','.join('?' * len(kinds))})"
-            params.extend(kinds)
+    def count_pending(self, user_id: int, kind: str) -> int:
+        """Nombre de suggestions en attente d'un type donné pour un utilisateur."""
         with _db() as conn:
-            row = conn.execute(query, params).fetchone()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM suggestions WHERE status='pending' AND target_user_id=? AND kind=?",
+                (user_id, kind),
+            ).fetchone()
         return row[0] if row else 0
 
     def expire_old(self) -> int:

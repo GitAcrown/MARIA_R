@@ -11,7 +11,7 @@ import json
 import logging
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -28,19 +28,16 @@ from common.rappels import (
     RappelStore,
 )
 from common.suggestions import (
-    EVENT_KINDS,
+    ALL_KINDS,
     KIND_PERSONAL_REMINDER,
     KIND_PROFILE_UPDATE,
-    KIND_SERVER_EVENT,
-    MAX_PENDING_EVENTS,
-    MAX_PENDING_PERSONAL,
-    PERSONAL_KINDS,
+    MAX_PENDING_PROFILES,
+    MAX_PENDING_REMINDERS,
     SuggestionStore,
 )
 from common.timezones import PARIS_TZ
 
 from cogs.watcher.views import (
-    EventCompleteModal,
     ReminderCompleteModal,
     ViewContext,
     build_suggestions_view,
@@ -59,10 +56,10 @@ ANALYZE_INTERVAL_MIN = 10       # période de la boucle de fond
 BUFFER_MAX = 60                # messages conservés par salon
 MIN_MESSAGES_TO_ANALYZE = 5    # ne rien faire en dessous (bruit)
 
-CONFIDENCE_THRESHOLD = 0.80
+CONFIDENCE_THRESHOLD = 0.88
 ANALYSIS_MAX_TOKENS = 1200
 
-_VALID_KINDS = (KIND_PERSONAL_REMINDER, KIND_SERVER_EVENT, KIND_PROFILE_UPDATE)
+_VALID_KINDS = ALL_KINDS
 _VALID_RECURRENCES = (RECURRENCE_NONE, RECURRENCE_DAILY, RECURRENCE_WEEKLY)
 
 # Schéma JSON strict de la sortie nano
@@ -81,7 +78,7 @@ _ANALYSIS_SCHEMA = {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "kind": {"type": "string", "enum": list(_VALID_KINDS)},
+                            "kind": {"type": "string", "enum": list(ALL_KINDS)},
                             "target_user_id": {"type": "string"},
                             "content": {"type": "string"},
                             "when": {"type": "string"},
@@ -101,9 +98,6 @@ _ANALYSIS_SCHEMA = {
     },
 }
 
-# Durée par défaut d'un événement Discord créé (heures)
-EVENT_DEFAULT_DURATION_HOURS = 2
-
 # Schéma de normalisation d'une expression temporelle en ISO 8601
 _DATETIME_SCHEMA = {
     "type": "json_schema",
@@ -119,36 +113,36 @@ _DATETIME_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu es un analyste discret. Tu lis un extrait de conversation Discord et tu proposes des suggestions utiles, sans jamais inventer.
+_SYSTEM_PROMPT = """Tu es un analyste discret. Tu lis un extrait de conversation Discord et tu proposes des suggestions PERSONNELLES utiles, sans jamais inventer.
 
 FORMAT DE LA CONVERSATION :
 Chaque ligne suit le patron : [JJ/MM HH:MM][<id_numérique>] <pseudo>: <message>
 Le champ [<id_numérique>] entre crochets est l'identifiant unique de l'auteur — c'est la seule valeur valide pour target_user_id.
 
-Types de suggestions :
-- personal_reminder : l'utilisateur exprime LUI-MÊME vouloir se souvenir de quelque chose ou être rappelé à un moment précis. target_user_id = son id numérique. when = ISO 8601 (heure Paris) si déductible, sinon "". recurrence = daily/weekly si récurrent, sinon none.
-- server_event : un événement collectif CLAIREMENT ANNONCÉ avec une date ou une intention ferme (soirée, session commune, sortie planifiée). Il doit y avoir une annonce explicite, pas une simple envie vague. target_user_id = "". when = ISO 8601 si connu.
-- profile_update : un FAIT STABLE ET DURABLE qu'un utilisateur révèle sur LUI-MÊME (ville, âge, métier, goût établi). target_user_id = son id numérique. category = identité/préférences/projets/perso. content = le fait, concis, à la 3e personne.
+Deux types de suggestions uniquement :
+- personal_reminder : l'utilisateur demande EXPLICITEMENT à être rappelé, ou dit clairement qu'il risque d'oublier quelque chose à un moment précis. Formulations typiques : "rappelle-moi", "j'oublie toujours", "pense à me dire", "note que je dois X vendredi". Une simple mention d'une tâche future sans demande explicite NE compte PAS.
+- profile_update : un FAIT STABLE ET DURABLE qu'un utilisateur révèle sur LUI-MÊME (ville, âge, métier, goût établi de longue date). Ce doit être une information biographique claire, pas un sujet de discussion, une opinion passagère ou un centre d'intérêt du moment.
 
 Règles d'attribution (critiques) :
-- target_user_id doit être EXACTEMENT l'id numérique entre crochets de la ligne source — copie-le tel quel depuis la conversation.
-- Pour personal_reminder : l'utilisateur doit avoir lui-même exprimé l'intention ("je dois", "rappelle-moi", "j'oublie toujours"…). Un autre utilisateur qui parle d'une tierce personne ne suffit PAS.
+- target_user_id doit être EXACTEMENT l'id numérique entre crochets de la ligne source — copie-le tel quel.
+- Pour personal_reminder : l'utilisateur doit avoir lui-même formulé la demande ou l'intention. Un tiers qui mentionne quelqu'un d'autre ne suffit pas.
 - Pour profile_update : l'utilisateur doit avoir révélé l'info sur lui-même. Si quelqu'un d'autre le décrit, abstiens-toi.
 - Le pseudo d'affichage n'est qu'un nom — ne l'interprète JAMAIS comme une description du comportement ou des goûts.
 
 Règles générales :
+- En cas de doute, ne propose rien. Mieux vaut rater une suggestion que d'en faire une fausse ou intrusive.
 - N'utilise que les informations présentes dans l'extrait. Ne devine pas, n'extrapole pas.
 - Ne propose pas de profile_update déjà présent dans NOTES EXISTANTES.
-- Ne répète pas une suggestion déjà listée dans SUGGESTIONS EN ATTENTE/REFUSÉES — même reformulée différemment.
-- confidence entre 0 et 1. En dessous de 0.80, abstiens-toi.
-- S'il n'y a rien de pertinent, renvoie une liste vide.
+- Ne répète pas une suggestion déjà listée dans SUGGESTIONS EN ATTENTE/REFUSÉES.
+- confidence entre 0 et 1. En dessous de 0.88, abstiens-toi.
+- S'il n'y a rien de clairement pertinent, renvoie une liste vide.
 - content très concis, en français.
 
 Règles spécifiques à profile_update :
-- Maximum 1 profile_update par utilisateur par analyse : choisis le fait le plus certain.
-- "préférences" : un sujet mentionné une seule fois n'est pas une préférence. Il faut un goût durable clairement exprimé ("j'adore depuis toujours", "je joue régulièrement à…"). confidence minimum 0.80.
-- "identité" (ville, âge, prénom, métier) : uniquement si clairement énoncé. confidence minimum 0.85.
-- "projets" : uniquement si l'utilisateur porte activement le projet. confidence minimum 0.80.
+- Maximum 1 profile_update par utilisateur par analyse.
+- "préférences" : un goût durable doit être clairement affirmé ("j'adore X depuis toujours", "je fais Y régulièrement"). Un simple partage ou une discussion sur un sujet NE SUFFIT PAS. confidence minimum 0.88.
+- "identité" (ville, âge, prénom, métier) : uniquement si clairement et directement énoncé par l'intéressé. confidence minimum 0.90.
+- "projets" : uniquement si l'utilisateur décrit un projet qu'il mène activement. confidence minimum 0.88.
 
 Ignore :
 - Les messages de bots.
@@ -371,38 +365,31 @@ class Watcher(commands.Cog):
         if not content:
             return False
 
-        # Résolution de la cible (obligatoire pour les suggestions personnelles)
-        target_user_id: Optional[int] = None
+        # Résolution de la cible (obligatoire — toutes les suggestions sont personnelles)
         raw_target = str(s.get("target_user_id") or "").strip()
-        if raw_target.isdigit():
-            tid = int(raw_target)
-            if tid in participants:
-                target_user_id = tid
-        if kind in PERSONAL_KINDS and target_user_id is None:
+        if not raw_target.isdigit():
             return False
+        tid = int(raw_target)
+        if tid not in participants:
+            return False
+        target_user_id = tid
 
-        # Anti-spam : plafonds par portée
-        if kind in PERSONAL_KINDS:
-            if self.store.count_pending(target_user_id=target_user_id, kinds=PERSONAL_KINDS) >= MAX_PENDING_PERSONAL:
-                return False
-        else:
-            if self.store.count_pending(guild_id=guild_id, kinds=EVENT_KINDS) >= MAX_PENDING_EVENTS:
-                return False
+        # Plafonds par type
+        cap = MAX_PENDING_REMINDERS if kind == KIND_PERSONAL_REMINDER else MAX_PENDING_PROFILES
+        if self.store.count_pending(target_user_id, kind) >= cap:
+            return False
 
         when = (s.get("when") or "").strip()
         recurrence = s.get("recurrence") if s.get("recurrence") in _VALID_RECURRENCES else RECURRENCE_NONE
         category = (s.get("category") or "").strip()
 
         if kind == KIND_PROFILE_UPDATE:
-            # Évite de reproposer un fait déjà noté.
-            existing = self.profiles.get_notes(target_user_id).lower() if target_user_id else ""
+            existing = self.profiles.get_notes(target_user_id).lower()
             if content.lower() in existing:
                 return False
             payload = {"info": content, "category": category or "perso"}
-        elif kind == KIND_PERSONAL_REMINDER:
+        else:  # personal_reminder
             payload = {"description": content, "when": when, "recurrence": recurrence}
-        else:  # server_event / group_activity
-            payload = {"title": content, "when": when}
 
         new_id = self.store.add(
             kind=kind,
@@ -546,12 +533,7 @@ class Watcher(commands.Cog):
 
     def _view_context(self, interaction: discord.Interaction) -> ViewContext:
         guild = interaction.guild
-        is_mod = bool(
-            guild
-            and isinstance(interaction.user, discord.Member)
-            and interaction.user.guild_permissions.manage_events
-        )
-        return ViewContext(interaction.user.id, guild.id if guild else 0, is_mod)
+        return ViewContext(interaction.user.id, guild.id if guild else 0)
 
     @app_commands.command(
         name="suggestions",
@@ -633,73 +615,6 @@ class Watcher(commands.Cog):
             ephemeral=True,
         )
 
-    # --- Événements serveur (modos) -> événement Discord natif --------
-
-    async def handle_event_action(
-        self, interaction: discord.Interaction, suggestion_id: int, *, accept: bool, ctx: ViewContext
-    ) -> None:
-        guild = interaction.guild
-        if not guild or not ctx.is_mod:
-            return await interaction.response.send_message("Action réservée aux modérateurs.", ephemeral=True)
-        sugg = self.store.get(suggestion_id)
-        if not sugg or sugg.status != "pending" or sugg.guild_id != guild.id:
-            return await interaction.response.edit_message(view=build_suggestions_view(self, ctx))
-
-        if not accept:
-            self.store.set_status(suggestion_id, "rejected")
-            return await interaction.response.edit_message(view=build_suggestions_view(self, ctx))
-
-        # Toujours un modal : un événement Discord requiert nom, date et lieu.
-        await interaction.response.send_modal(
-            EventCompleteModal(
-                self, ctx, suggestion_id,
-                name=sugg.payload.get("title", sugg.description),
-                when_raw=sugg.payload.get("when", ""),
-            )
-        )
-
-    async def finish_event_from_modal(
-        self, interaction: discord.Interaction, suggestion_id: int,
-        *, name: str, when_text: str, location: str, ctx: ViewContext,
-    ) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild = interaction.guild
-        if not guild:
-            return await interaction.followup.send("Action serveur uniquement.", ephemeral=True)
-        sugg = self.store.get(suggestion_id)
-        if not sugg or sugg.status != "pending" or sugg.guild_id != guild.id:
-            return await interaction.followup.send("Suggestion déjà traitée.", ephemeral=True)
-
-        start = await self._nl_to_datetime(when_text)
-        if start is None or start <= datetime.now(timezone.utc):
-            return await interaction.followup.send(
-                "Date non reconnue — réessaie en précisant davantage (ex : « samedi 20h », « le 14/07 à 19h »).",
-                ephemeral=True,
-            )
-        end = start + timedelta(hours=EVENT_DEFAULT_DURATION_HOURS)
-
-        try:
-            event = await guild.create_scheduled_event(
-                name=name[:100] or "Événement",
-                start_time=start,
-                end_time=end,
-                entity_type=discord.EntityType.external,
-                privacy_level=discord.PrivacyLevel.guild_only,
-                location=(location or "À préciser")[:100],
-                description=(sugg.source_excerpt or "")[:1000] or None,
-            )
-        except discord.Forbidden:
-            return await interaction.followup.send(
-                "Je n'ai pas la permission **Gérer les événements** sur ce serveur.", ephemeral=True
-            )
-        except discord.HTTPException as e:
-            return await interaction.followup.send(f"Création de l'événement impossible : `{e}`", ephemeral=True)
-
-        self.store.set_status(suggestion_id, "accepted")
-        await interaction.followup.send(
-            view=build_suggestions_view(self, ctx, header=f"✦ Événement créé · **{event.name}** → {event.url}"),
-            ephemeral=True,
-        )
 
 
 async def setup(bot: commands.Bot) -> None:

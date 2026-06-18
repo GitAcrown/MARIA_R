@@ -164,7 +164,15 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
                 "recurrence='daily' ou 'weekly' pour un rappel répété (par défaut 'none')."
             ),
             properties={
-                "task_description": {"type": "string", "description": "Description de la tâche"},
+                "task_description": {
+                    "type": "string",
+                    "description": (
+                        "Description de la tâche — rédige à l'impératif, sans référence temporelle "
+                        "relative ('demain', 'ce soir', 'dans 2h'…), car ces termes n'auront plus de "
+                        "sens au moment du déclenchement. Exemples corrects : 'Appeler le médecin', "
+                        "'Ne pas déjeuner', 'Envoyer le rapport à Paul'. Évite : 'Ne pas déjeuner demain'."
+                    ),
+                },
                 "execute_at": {"type": "string", "description": "Date/heure absolue ISO 8601 (prioritaire sur les délais)"},
                 "delay_minutes": {"type": "integer", "description": "Délai en minutes (si pas de execute_at)"},
                 "delay_hours": {"type": "integer", "description": "Délai en heures (si pas de execute_at)"},

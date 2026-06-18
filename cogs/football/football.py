@@ -380,7 +380,9 @@ def _match_list_container(matches: list, title: str) -> Optional[discord.ui.Cont
         date_str = f"  `{date[:5]}`" if date else ""
         lines.append(f"{home} **{score}** {away}{date_str}")
     children.append(discord.ui.TextDisplay("\n".join(lines)))
-    children += [discord.ui.Separator(), discord.ui.TextDisplay("-# Source : TheSportsDB")]
+
+    source = "API-Football" if any(m.get("_source") == "apifootball" for m in matches) else "TheSportsDB"
+    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Source : {source}")]
     return discord.ui.Container(*children)
 
 
@@ -500,7 +502,7 @@ class Football(commands.Cog):
     # -- TheSportsDB : listes "infos générales" (derniers matchs) ------------
 
     def _tsdb_recent_list(self, team: Optional[dict], team_name: str) -> dict:
-        """Liste des derniers matchs d'une équipe (gratuit, économise le quota)."""
+        """Liste des derniers matchs d'une équipe via TheSportsDB (secours quota)."""
         if not team or not team.get("idTeam"):
             return {"error": f"Équipe introuvable : {team_name!r}"}
         payload = self._tsdb_get("eventslast.php", {"id": team["idTeam"]})
@@ -510,6 +512,31 @@ class Football(commands.Cog):
         matches = [_normalize_tsdb(ev, team) for ev in results[:5]]
         return {"mode": "match_list", "results": matches,
                 "title": team.get("strTeam") or team_name}
+
+    # -- API-Football : liste des derniers matchs (plus précise) ------------
+
+    def _af_recent_list(self, team_id: int, team_name: str, n: int = 5) -> Optional[dict]:
+        """Derniers N matchs terminés via API-Football. None si API indisponible."""
+        payload = self._get("fixtures", {"team": team_id, "last": n})
+        if _af_down(payload) or not payload.get("response"):
+            return None
+        matches = []
+        for fx in payload["response"]:
+            r = fx.get("fixture", {})
+            matches.append({
+                "fixture": r,
+                "teams":   fx.get("teams", {}),
+                "goals":   fx.get("goals", {}),
+                "league":  fx.get("league", {}),
+                "score":   fx.get("score", {}),
+                "_events":     [],
+                "_statistics": [],
+                "_source":     "apifootball",
+                "_kickoff_human": _kickoff_str_human(r),
+            })
+        if not matches:
+            return None
+        return {"mode": "match_list", "results": matches, "title": team_name}
 
     # -- API-Football (source prioritaire) -----------------------------------
 
@@ -600,15 +627,22 @@ class Football(commands.Cog):
     # -- Orchestration -------------------------------------------------------
 
     def _fetch_team_match(self, team_name: str, when: str) -> dict:
-        """API-Football en priorité ; TheSportsDB en secours (quota) ou pour les listes.
+        """API-Football en priorité pour tous les modes ; TheSportsDB en secours quota.
 
         Le nom canonique TheSportsDB sert à résoudre les alias type "PSG" côté API-Football.
         """
         tsdb_team = self._tsdb_resolve(team_name)
         canonical = (tsdb_team or {}).get("strTeam") or ""
 
-        # Infos générales : liste des derniers matchs → API gratuite directement
         if when == "recent":
+            # Essaie API-Football d'abord (résultats plus précis avec buteurs/scores corrects)
+            if self._api_key:
+                team_id = self._af_resolve_id(team_name, canonical)
+                if team_id is not None:
+                    af_list = self._af_recent_list(team_id, canonical or team_name)
+                    if af_list is not None:
+                        return af_list
+            # Secours : TheSportsDB (gratuit, sans quota)
             return self._tsdb_recent_list(tsdb_team, team_name)
 
         # Source prioritaire : API-Football
