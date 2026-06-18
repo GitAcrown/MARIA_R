@@ -62,18 +62,17 @@ def _when_label(when: str) -> str:
 def _reminder_text(s: Suggestion) -> str:
     p = s.payload
     rec = p.get("recurrence", "none")
-    rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(rec, "")
+    rec_str = {"daily": "↻ quotidien · ", "weekly": "↻ hebdo · "}.get(rec, "")
     return (
-        f"**◆ Rappel**{rec_str}\n"
-        f"{p.get('description', '')}\n"
-        f"-# {_when_label(p.get('when', ''))}"
+        f"> {rec_str}{p.get('description', '')}\n"
+        f"> -# {_when_label(p.get('when', ''))}"
     )
 
 
 def _profile_text(s: Suggestion) -> str:
     p = s.payload
     cat = p.get("category", "perso")
-    return f"**◆ Profil** · _{cat}_\n{p.get('info', '')}"
+    return f"> _{cat}_ · {p.get('info', '')}"
 
 
 # ---------------------------------------------------------------------------

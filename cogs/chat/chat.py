@@ -216,7 +216,7 @@ class RappelsView(discord.ui.LayoutView):
             ts = int(r.execute_at.timestamp())
             desc = r.description[:100] + ("…" if len(r.description) > 100 else "")
             rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(r.recurrence, "")
-            text = discord.ui.TextDisplay(f"**#{r.id}**{rec_str} · <t:{ts}:f> (<t:{ts}:R>)\n{desc}")
+            text = discord.ui.TextDisplay(f"> **#{r.id}**{rec_str} · <t:{ts}:f> (<t:{ts}:R>)\n> {desc}")
             children.append(discord.ui.Section(text, accessory=_CancelButton(r.id, user_id, store)))
         self.add_item(discord.ui.Container(*children))
 
