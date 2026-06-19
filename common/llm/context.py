@@ -242,10 +242,28 @@ class ConversationContext:
         self._messages.clear()
         self._needs_trim = False
 
+    # Notes système (injections post-widget) protégées contre l'éviction par âge.
+    _SYSTEM_NOTE_MIN_AGE = timedelta(minutes=15)
+
     def trim(self) -> None:
-        """Supprime messages trop vieux, hors fenêtre tokens, ou hors plafond de messages."""
+        """Supprime messages trop vieux, hors fenêtre tokens, ou hors plafond de messages.
+
+        Les notes système récentes (name='system', < 15 min) sont toujours conservées
+        même si leur âge dépasse context_age : elles portent le contexte actif (widget
+        affiché, match en cours…) indispensable à la cohérence de la prochaine réponse.
+        """
         now = datetime.now(timezone.utc)
-        self._messages = [m for m in self._messages if now - m.created_at < self.context_age]
+
+        def _keep_by_age(m: "MessageRecord") -> bool:
+            age = now - m.created_at
+            if age < self.context_age:
+                return True
+            # Notes système récentes protégées
+            if m.role == "user" and getattr(m, "name", None) == "system":
+                return age < self._SYSTEM_NOTE_MIN_AGE
+            return False
+
+        self._messages = [m for m in self._messages if _keep_by_age(m)]
         # Le prompt développeur (instructions + profils injectés) consomme aussi la fenêtre :
         # on le déduit du budget pour éviter de dépasser context_window une fois assemblé.
         dev_tokens = len(TOKENIZER.encode(self.developer_prompt)) if self.developer_prompt else 0

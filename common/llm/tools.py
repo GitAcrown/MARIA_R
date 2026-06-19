@@ -11,7 +11,13 @@ logger = logging.getLogger("llm.tools")
 
 
 class Tool:
-    """Outil OpenAI function calling."""
+    """Outil OpenAI function calling.
+
+    Paramètres optionnels : utiliser `optional_props` pour lister les propriétés qui peuvent
+    être omises sémantiquement. En strict mode, elles restent dans `required` mais leur type
+    est élargi à `["<type>", "null"]` (+ `null` dans l'enum si présent) afin que le LLM
+    puisse passer `null` quand la valeur n'est pas pertinente.
+    """
 
     def __init__(
         self,
@@ -19,11 +25,13 @@ class Tool:
         description: str,
         properties: dict,
         function: Union[Callable, Callable[..., Awaitable]],
+        optional_props: list[str] | None = None,
     ):
         self.name = name
         self.description = description
         self.properties = properties
         self.function = function
+        self._optional_props: frozenset[str] = frozenset(optional_props or [])
         self._required = list(properties.keys())
 
     async def execute(
@@ -50,6 +58,18 @@ class Tool:
             )
 
     def to_openai_dict(self) -> dict:
+        props: dict = {}
+        for k, v in self.properties.items():
+            if k in self._optional_props:
+                v = dict(v)
+                t = v.get("type", "string")
+                if isinstance(t, str):
+                    v["type"] = [t, "null"]
+                elif isinstance(t, list) and "null" not in t:
+                    v["type"] = list(t) + ["null"]
+                if "enum" in v and None not in v["enum"]:
+                    v["enum"] = list(v["enum"]) + [None]
+            props[k] = v
         return {
             "type": "function",
             "function": {
@@ -58,7 +78,7 @@ class Tool:
                 "strict": True,
                 "parameters": {
                     "type": "object",
-                    "properties": self.properties,
+                    "properties": props,
                     "required": self._required,
                     "additionalProperties": False,
                 },

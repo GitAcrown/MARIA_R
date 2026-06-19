@@ -141,6 +141,9 @@ class ChannelSession:
         # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
         self._ingested_ids: set[int] = set()
         self._ingested_order: deque[int] = deque(maxlen=INGESTED_IDS_MAX)
+        # Notes système injectées récemment (résultats d'outils, widgets affichés…).
+        # Surfacées dans le [FOCUS] pour que le LLM sache immédiatement le contexte actif.
+        self._recent_system_notes: deque[tuple[datetime, str]] = deque(maxlen=6)
 
     def _remember_ingested(self, message_id: int) -> None:
         """Mémorise un ID ingéré en évinçant le plus ancien au-delà de la borne."""
@@ -340,6 +343,11 @@ class ChannelSession:
                 hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"
             else:
                 hint = f"[FOCUS] Tu réponds à {author}."
+            # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
+            # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
+            ctx_hint = self._build_context_hint()
+            if ctx_hint:
+                hint = f"{hint}\n{ctx_hint}"
             messages = messages + [{"role": "user", "content": hint, "name": "system"}]
 
         tools = self.tool_registry.get_compiled() if len(self.tool_registry) > 0 else []
@@ -431,10 +439,41 @@ class ChannelSession:
                     )
                 )
 
+    def record_system_note(self, note: str) -> None:
+        """Enregistre une note système (résultat d'outil, widget…) pour le prochain [FOCUS]."""
+        text = note.strip()
+        if text:
+            self._recent_system_notes.append((datetime.now(timezone.utc), text))
+
+    def _build_context_hint(self, max_age_minutes: int = 20, limit: int = 3) -> str:
+        """Retourne une ligne '[CONTEXTE RÉCENT]' avec les dernières notes système pertinentes.
+
+        Ne répercute pas les notes purement internes (retry vide) ni les notes trop vieilles.
+        """
+        _SKIP = {"[SYSTEM] Réponds maintenant."}
+        now = datetime.now(timezone.utc)
+        cutoff = timedelta(minutes=max_age_minutes)
+        parts: list[str] = []
+        # Parcours inverse : plus récentes en premier
+        for ts, note in reversed(self._recent_system_notes):
+            if now - ts >= cutoff:
+                break
+            raw = note.removeprefix("[SYSTEM] ").strip()
+            if not raw or raw in _SKIP:
+                continue
+            parts.append(raw[:280] + ("…" if len(raw) > 280 else ""))
+            if len(parts) >= limit:
+                break
+        if not parts:
+            return ""
+        parts.reverse()  # ordre chronologique
+        return "[CONTEXTE RÉCENT] " + " | ".join(parts)
+
     def forget(self) -> None:
         self.context.clear()
         self._ingested_ids.clear()
         self._ingested_order.clear()
+        self._recent_system_notes.clear()
         self.trigger_message = None
 
     def get_stats(self) -> dict:

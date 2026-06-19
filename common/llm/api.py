@@ -98,7 +98,8 @@ class MariaGptApi:
 
     async def inject_context_note_async(self, channel: discord.abc.Messageable, note: str) -> None:
         """Injecte une note système en acquérant le lock de session.
-        Garantit que la note est visible pour le prochain run_completion."""
+        Garantit que la note est visible pour le prochain run_completion.
+        Enregistre aussi la note dans le journal récent pour le [FOCUS]."""
         from .context import TextComponent
         session = self.session_manager.get_or_create(channel)
         async with session._lock:
@@ -106,6 +107,7 @@ class MariaGptApi:
                 components=[TextComponent(f"[SYSTEM] {note}")],
                 name="system",
             )
+            session.record_system_note(note)
 
     def update_tools(self, tools: Iterable[Tool]) -> None:
         self.tool_registry.clear()

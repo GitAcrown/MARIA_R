@@ -157,6 +157,16 @@ def _name_matches(target: str, candidate: str) -> bool:
     return t == c or t in c or c in t
 
 
+def _teams_match_query(home: str, away: str, *names: str) -> bool:
+    """True si chaque nom cité correspond à l'une des deux équipes du match."""
+    names = [n for n in names if n]
+    if not names:
+        return False
+    if len(names) == 1:
+        return _name_matches(names[0], home) or _name_matches(names[0], away)
+    return all(_name_matches(n, home) or _name_matches(n, away) for n in names)
+
+
 def _af_down(payload: Optional[dict]) -> bool:
     """True si l'appel API-Football a échoué ou est indisponible (→ repli TheSportsDB)."""
     return payload is None or bool(payload.get("_unavailable"))
@@ -226,21 +236,22 @@ def _match_llm_summary(m: dict) -> str:
 
     stats = m.get("_statistics", [])
     if stats:
-        poss_h = _stat_value(stats, home, "Ball Possession")
-        poss_a = _stat_value(stats, away, "Ball Possession")
-        if poss_h and poss_a:
-            parts.append(f"Possession : {home} {poss_h} / {away} {poss_a}")
-        sh_h = _stat_value(stats, home, "Total Shots")
-        sh_a = _stat_value(stats, away, "Total Shots")
-        if sh_h and sh_a:
-            parts.append(f"Tirs : {home} {sh_h} / {away} {sh_a}")
+        stat_bits = []
+        for key, label in _STAT_LABELS.items():
+            vh = _stat_value(stats, home, key)
+            va = _stat_value(stats, away, key)
+            if vh is None and va is None:
+                continue
+            stat_bits.append(f"{label} : {home} {vh or '0'} / {away} {va or '0'}")
+        if stat_bits:
+            parts.append("Stats : " + " · ".join(stat_bits))
 
     if not _is_started(fixture):
         ko = m.get("_kickoff_human", "")
         if ko:
             parts.append(f"Coup d'envoi : {ko}")
 
-    parts.append("Widget affiché.")
+    parts.append("Widget match détaillé affiché (score, buteurs, stats si en direct).")
     return " | ".join(parts)
 
 
@@ -256,14 +267,14 @@ def _match_list_llm_summary(matches: list, title: str) -> str:
         gh, ga = goals.get("home"), goals.get("away")
         score  = f"{gh}-{ga}" if gh is not None and ga is not None else "vs"
         parts.append(f"{home} {score} {away}")
-    parts.append("Widget affiché.")
+    parts.append("Widget liste affiché.")
     return " | ".join(parts)
 
 
 def _live_list_llm_summary(matches: list) -> str:
     if not matches:
-        return "Aucun match en direct actuellement. Widget affiché."
-    parts = [f"{len(matches)} match(s) en direct :"]
+        return "Aucun match en direct actuellement. Widget liste affiché."
+    parts = [f"LISTE SEULEMENT — {len(matches)} match(s) en direct (scores sans stats détaillées) :"]
     for m in matches[:8]:
         teams = m["teams"]
         goals = m["goals"]
@@ -272,7 +283,10 @@ def _live_list_llm_summary(matches: list) -> str:
         elapsed = m["fixture"].get("status", {}).get("elapsed")
         min_str = f" {elapsed}'" if elapsed else ""
         parts.append(f"{home} {goals.get('home')}-{goals.get('away')} {away}{min_str}")
-    parts.append("Widget affiché.")
+    parts.append(
+        "Pour score/buteurs/stats d'un match précis, rappeler get_football avec team=<équipe> "
+        "(et opponent=<autre équipe> si besoin). Widget liste affiché."
+    )
     return " | ".join(parts)
 
 
@@ -576,6 +590,32 @@ class Football(commands.Cog):
                 return self._enrich_fixture(fx)
         return None
 
+    def _af_find_live_between(self, team_a: str, team_b: str) -> Optional[dict]:
+        """Match en direct où les deux équipes citées s'affrontent."""
+        if not self._api_key or not team_a or not team_b:
+            return None
+        tsdb_a = self._tsdb_resolve(team_a)
+        tsdb_b = self._tsdb_resolve(team_b)
+        names_a = [team_a]
+        names_b = [team_b]
+        if tsdb_a and tsdb_a.get("strTeam"):
+            names_a.append(tsdb_a["strTeam"])
+        if tsdb_b and tsdb_b.get("strTeam"):
+            names_b.append(tsdb_b["strTeam"])
+
+        payload = self._get("fixtures", {"live": "all"})
+        if _af_down(payload) or not payload.get("response"):
+            return None
+        for fx in payload["response"]:
+            teams = fx.get("teams", {})
+            home  = (teams.get("home") or {}).get("name", "")
+            away  = (teams.get("away") or {}).get("name", "")
+            match_a = any(_name_matches(n, home) or _name_matches(n, away) for n in names_a)
+            match_b = any(_name_matches(n, home) or _name_matches(n, away) for n in names_b)
+            if match_a and match_b:
+                return self._enrich_fixture(fx)
+        return None
+
     def _af_team_match(self, name: str, canonical: str, when: str) -> Optional[dict]:
         """Match d'une équipe via API-Football. None = pas trouvé OU API indisponible."""
         if not self._api_key:
@@ -659,6 +699,27 @@ class Football(commands.Cog):
             return {"error": f"{team_name} ne joue pas en ce moment."}
         return {"error": f"Aucun match trouvé pour {team_name}"}
 
+    def _fetch_match_between(self, team_a: str, team_b: str, when: str) -> dict:
+        """Match entre deux équipes (live prioritaire, sinon last/next selon when)."""
+        if when in ("auto", "live"):
+            live = self._af_find_live_between(team_a, team_b)
+            if live:
+                return live
+            if when == "live":
+                return {"error": f"Pas de match en direct entre {team_a} et {team_b}."}
+
+        for primary, other in ((team_a, team_b), (team_b, team_a)):
+            result = self._fetch_team_match(primary, when)
+            if "error" in result or result.get("mode") != "match":
+                continue
+            m = result["result"]
+            home = m["teams"]["home"]["name"]
+            away = m["teams"]["away"]["name"]
+            if _teams_match_query(home, away, other):
+                return result
+
+        return {"error": f"Aucun match trouvé entre {team_a} et {team_b}"}
+
     def _fetch_live_list(self) -> dict:
         if not self._api_key:
             return {"error": "Clé API-Football manquante (API_FOOTBALL_KEY dans .env)"}
@@ -671,17 +732,30 @@ class Football(commands.Cog):
 
     async def _tool_get_football(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         team = (tc.arguments.get("team") or "").strip()
+        opponent = (tc.arguments.get("opponent") or "").strip()
         when = (tc.arguments.get("when") or "auto").strip().lower()
         if when not in ("auto", "live", "next", "last", "recent"):
             when = "auto"
 
-        if team:
+        if team and opponent:
+            data = await asyncio.to_thread(self._fetch_match_between, team, opponent, when)
+            summary = _match_llm_summary(data["result"]) if data.get("mode") == "match" else None
+        elif team:
             data = await asyncio.to_thread(self._fetch_team_match, team, when)
             mode = data.get("mode")
             if mode == "match":
                 summary = _match_llm_summary(data["result"])
             elif mode == "match_list":
                 summary = _match_list_llm_summary(data.get("results", []), data.get("title", team))
+            else:
+                summary = None
+        elif opponent:
+            data = await asyncio.to_thread(self._fetch_team_match, opponent, when)
+            mode = data.get("mode")
+            if mode == "match":
+                summary = _match_llm_summary(data["result"])
+            elif mode == "match_list":
+                summary = _match_list_llm_summary(data.get("results", []), data.get("title", opponent))
             else:
                 summary = None
         else:
@@ -703,15 +777,26 @@ class Football(commands.Cog):
             Tool(
                 name="get_football",
                 description=(
-                    "Affiche le score d'un match de foot avec buteurs (et statistiques si en direct). "
-                    "Renseigne 'team' avec le nom d'un club ou d'une sélection (ex: 'PSG', 'Real Madrid', "
-                    "'France'). Laisse 'team' vide pour lister tous les matchs en direct du moment. "
-                    "Snapshot : rappelle l'outil pour rafraîchir un score en direct."
+                    "Score, buteurs et statistiques d'un match de foot (possession, tirs, cartons…). "
+                    "Renseigne 'team' avec un club ou une sélection (ex: 'PSG', 'USA', 'France'). "
+                    "Si deux équipes sont citées, renseigne aussi 'opponent'. "
+                    "Laisse 'team' ET 'opponent' à null uniquement pour lister tous les matchs en direct "
+                    "(sans stats détaillées). Snapshot : rappelle l'outil pour rafraîchir."
                 ),
                 properties={
                     "team": {
                         "type":        "string",
-                        "description": "Nom du club ou de la sélection. Vide = liste des matchs en direct.",
+                        "description": (
+                            "Nom d'une équipe. Obligatoire pour score/buteurs/stats d'un match précis. "
+                            "null seulement pour la liste générale des matchs en direct."
+                        ),
+                    },
+                    "opponent": {
+                        "type":        "string",
+                        "description": (
+                            "Autre équipe quand les deux adversaires sont cités (ex: team='USA', "
+                            "opponent='Australie'). null si une seule équipe suffit."
+                        ),
                     },
                     "when": {
                         "type":        "string",
@@ -719,11 +804,12 @@ class Football(commands.Cog):
                         "description": (
                             "Quel match : 'auto' (en direct sinon dernier résultat), 'live' (uniquement "
                             "si l'équipe joue maintenant), 'next' (prochain match), 'last' (dernier "
-                            "résultat), 'recent' (liste des 5 derniers matchs de l'équipe). Utilise "
-                            "'recent' pour une demande type «les derniers matchs de telle équipe»."
+                            "résultat), 'recent' (liste des 5 derniers matchs de l'équipe). "
+                            "null = 'auto'."
                         ),
                     },
                 },
+                optional_props=["team", "opponent", "when"],
                 function=self._tool_get_football,
             ),
         ]
