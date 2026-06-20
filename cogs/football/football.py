@@ -700,7 +700,13 @@ class Football(commands.Cog):
         return {"error": f"Aucun match trouvé pour {team_name}"}
 
     def _fetch_match_between(self, team_a: str, team_b: str, when: str) -> dict:
-        """Match entre deux équipes (live prioritaire, sinon last/next selon when)."""
+        """Match entre deux équipes.
+
+        En live : filtre strictement sur les deux noms (+ canoniques TheSportsDB).
+        Non-live : récupère simplement le dernier/prochain match de team_a puis team_b.
+        On n'essaie pas de filtrer par nom d'adversaire hors live — les noms dans l'API
+        sont en anglais et ne correspondent pas aux noms localisés (ex. Allemagne ≠ Germany).
+        """
         if when in ("auto", "live"):
             live = self._af_find_live_between(team_a, team_b)
             if live:
@@ -708,17 +714,15 @@ class Football(commands.Cog):
             if when == "live":
                 return {"error": f"Pas de match en direct entre {team_a} et {team_b}."}
 
-        for primary, other in ((team_a, team_b), (team_b, team_a)):
-            result = self._fetch_team_match(primary, when)
-            if "error" in result or result.get("mode") != "match":
-                continue
-            m = result["result"]
-            home = m["teams"]["home"]["name"]
-            away = m["teams"]["away"]["name"]
-            if _teams_match_query(home, away, other):
-                return result
+        # Non-live : on cherche le match de team_a, puis team_b en fallback.
+        result = self._fetch_team_match(team_a, when)
+        if result.get("mode") == "match":
+            return result
+        result = self._fetch_team_match(team_b, when)
+        if result.get("mode") == "match":
+            return result
 
-        return {"error": f"Aucun match trouvé entre {team_a} et {team_b}"}
+        return {"error": f"Aucun match trouvé pour {team_a} ou {team_b}"}
 
     def _fetch_live_list(self) -> dict:
         if not self._api_key:
