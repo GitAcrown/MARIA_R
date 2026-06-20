@@ -61,15 +61,17 @@ class Tool:
         props: dict = {}
         for k, v in self.properties.items():
             if k in self._optional_props:
+                # OpenAI strict mode ne supporte pas type:array — il faut anyOf.
+                # On sépare la description (niveau anyOf) du reste (niveau type-schema).
                 v = dict(v)
-                t = v.get("type", "string")
-                if isinstance(t, str):
-                    v["type"] = [t, "null"]
-                elif isinstance(t, list) and "null" not in t:
-                    v["type"] = list(t) + ["null"]
-                if "enum" in v and None not in v["enum"]:
-                    v["enum"] = list(v["enum"]) + [None]
-            props[k] = v
+                desc = v.pop("description", None)
+                non_null_schema = {kk: vv for kk, vv in v.items()}
+                entry: dict = {"anyOf": [non_null_schema, {"type": "null"}]}
+                if desc is not None:
+                    entry["description"] = desc
+                props[k] = entry
+            else:
+                props[k] = v
         return {
             "type": "function",
             "function": {
