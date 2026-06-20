@@ -10,6 +10,7 @@ import discord
 from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.emojis import GAMES
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.Steam")
@@ -142,7 +143,7 @@ def _game_container(r: dict) -> Optional[discord.ui.Container]:
     main_section = section_with_thumbnail(body_block, STEAM_HEADER.format(appid) if appid else None)
 
     # Header + séparateur
-    header = discord.ui.TextDisplay(f"## 🎮 {name}")
+    header = discord.ui.TextDisplay(f"## {GAMES} {name}")
     sep1   = discord.ui.Separator()
 
     # Footer méta

@@ -1,0 +1,9 @@
+"""Emojis custom Discord du serveur MARIA (format <:name:id>)."""
+
+SETTINGS = "<:settings:1517996106854830213>"
+FOOTBALL = "<:football:1517996110453670062>"
+FOOTBALL_PLAYER = "<:footballplayer:1517996109581258832>"
+DIRECT = "<:direct:1517996113360064682>"
+MOVIE = "<:movie:1517996108670832660>"
+TV = "<:tv:1517996107748216893>"
+GAMES = "<:games:1517996105529561270>"

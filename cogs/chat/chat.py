@@ -42,6 +42,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from common.dataio import CogData, DictTableBuilder
+from common.emojis import SETTINGS
 from common.llm import MariaGptApi, Tool
 from common.profiles import ProfileStore
 from common.rappels import KIND_EVENT, Rappel, RappelStore, RappelWorker
@@ -482,7 +483,7 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "Lui parler",
         "› Mentionne MARIA ou écris son nom (selon le mode du salon) pour lui parler.\n"
         "› En mode *greedy*, citer son nom suffit.\n"
-        "› ⚙ `/chatbot mode` — règle quand MARIA répond sur ce serveur.",
+        f"› {SETTINGS} `/chatbot mode` — règle quand MARIA répond sur ce serveur.",
     ),
     (
         "Mémoire & profil",
@@ -504,13 +505,13 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     (
         "Vocal",
         "› Ajoute la réaction 🎙️ à un message vocal pour le transcrire à la demande.\n"
-        "› ⚙ `/chatbot autotranscribe` — transcription automatique des messages vocaux sur un salon.",
+        f"› {SETTINGS} `/chatbot autotranscribe` — transcription automatique des messages vocaux sur un salon.",
     ),
     (
         "Suggestions & événements",
         "› En lisant les salons surveillés, MARIA propose des rappels, infos de profil et événements → `/suggestions`.\n"
-        "› ⚙ Dans `/suggestions`, les modos voient aussi les événements — les accepter crée un événement Discord natif.\n"
-        "› ⚙ `/watch toggle` — active/désactive la lecture passive sur un salon · `/watch analyze` — analyse immédiate.",
+        f"› {SETTINGS} Dans `/suggestions`, les modos voient aussi les événements — les accepter crée un événement Discord natif.\n"
+        f"› {SETTINGS} `/watch toggle` — active/désactive la lecture passive sur un salon · `/watch analyze` — analyse immédiate.",
     ),
 ]
 
@@ -522,7 +523,7 @@ class TipsView(discord.ui.LayoutView):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
             discord.ui.TextDisplay("## Tirer le meilleur de MARIA"),
-            discord.ui.TextDisplay("-# ⚙ = commande réservée aux modérateurs."),
+            discord.ui.TextDisplay(f"-# {SETTINGS} = commande réservée aux modérateurs."),
             discord.ui.Separator(),
         ]
         for i, (title, body) in enumerate(_TIPS_SECTIONS):

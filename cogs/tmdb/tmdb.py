@@ -10,6 +10,7 @@ import discord
 from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.TMDB")
@@ -17,7 +18,7 @@ logger = logging.getLogger("MARIA.TMDB")
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG  = "https://image.tmdb.org/t/p/w300{}"
 
-_TYPE_EMOJI = {"movie": "🎬", "tv": "📺"}
+_TYPE_EMOJI = {"movie": MOVIE, "tv": TV}
 _TYPE_LABEL = {"movie": "Film", "tv": "Série"}
 
 
@@ -79,7 +80,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     genres     = [g["name"] for g in r.get("genres", [])]
     poster     = r.get("poster_path")
 
-    emoji      = _TYPE_EMOJI.get(media_type, "🎬")
+    emoji      = _TYPE_EMOJI.get(media_type, MOVIE)
     title_line = f"## {emoji} {title}"
     if year:
         title_line += f"  ·  {year}"
