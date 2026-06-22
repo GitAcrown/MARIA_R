@@ -68,7 +68,8 @@ def _read_sensor() -> dict:
                 }
             except RuntimeError as e:
                 last_error = str(e)
-                continue
+
+            time.sleep(0.5)
 
         logger.warning(f"DHT22 : échec après {_MAX_RETRIES} tentatives — dernière erreur : {last_error}")
         return {"error": f"Lecture DHT22 échouée ({last_error})."}
