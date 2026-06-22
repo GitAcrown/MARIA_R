@@ -24,9 +24,9 @@ try:
     import adafruit_dht
     import board
     _DHT_AVAILABLE = True
-except (ImportError, NotImplementedError):
+except Exception as _dht_import_err:
     _DHT_AVAILABLE = False
-    logger.info("adafruit_dht indisponible — outil DHT22 désactivé.")
+    logger.warning(f"adafruit_dht indisponible — outil DHT22 désactivé. ({type(_dht_import_err).__name__}: {_dht_import_err})")
 
 # Nombre maximum de tentatives avant d'abandonner (le DHT22 est flaky)
 _MAX_RETRIES = 10
