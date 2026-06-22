@@ -35,6 +35,11 @@ try:
 except ImportError:
     _build_image_view = None
 
+try:
+    from cogs.pi.pi import build_sensor_view as _build_sensor_view
+except ImportError:
+    _build_sensor_view = None
+
 import discord
 
 logger = logging.getLogger("MARIA.Chat")
@@ -811,11 +816,12 @@ class Chat(commands.Cog):
 
         # LayoutView avec commentaire intégré (météo, films, jeux…)
         _widget_builders = {
-            "get_weather":   _build_weather_view,
-            "search_media":  _build_media_view,
-            "search_game":   _build_game_view,
-            "get_football":  _build_football_view,
-            "search_images": _build_image_view,
+            "get_weather":    _build_weather_view,
+            "search_media":   _build_media_view,
+            "search_game":    _build_game_view,
+            "get_football":   _build_football_view,
+            "search_images":  _build_image_view,
+            "get_sensor_data": _build_sensor_view,
         }
 
         layout_sent = False

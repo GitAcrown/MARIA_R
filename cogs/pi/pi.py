@@ -13,9 +13,12 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
+import discord
 from discord.ext import commands
 
+from common.discord_ui import layout_with_commentary
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 logger = logging.getLogger("MARIA.Pi")
@@ -34,6 +37,30 @@ _MAX_RETRIES = 5
 _READ_DELAY = 2.0
 # Durée de vie du cache en secondes (évite de spammer le capteur)
 _CACHE_TTL = 30
+
+
+def build_sensor_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Construit le widget LayoutView pour les données du capteur DHT22."""
+    if "error" in data:
+        return None
+
+    temp     = data["temperature"]
+    humidity = data["humidity"]
+    humidex  = data["humidex"]
+    dew      = data["dew_point"]
+    read_at  = data.get("read_at", "")
+
+    header = discord.ui.TextDisplay(f"## 🌡 Salle serveur")
+    sep1   = discord.ui.Separator()
+    main   = discord.ui.TextDisplay(
+        f"# {temp}°C\n"
+        f"-# humidité **{humidity}%**  ·  ressenti **{humidex}°C**  ·  point de rosée {dew}°C"
+    )
+    sep2   = discord.ui.Separator()
+    footer = discord.ui.TextDisplay(f"-# Capteur DHT22  ·  {read_at}")
+
+    container = discord.ui.Container(header, sep1, main, sep2, footer)
+    return layout_with_commentary(container, commentary)
 
 
 def _read_sensor() -> dict:
@@ -61,13 +88,20 @@ def _read_sensor() -> dict:
                     6.11 * math.exp(5417.753 * (1 / 273.16 - 1 / (273.15 + rosee))) - 10
                 )
 
-                return {
+                result = {
                     "temperature":  round(temperature, 1),
                     "humidity":     round(humidity, 1),
                     "dew_point":    round(rosee, 1),
                     "humidex":      round(humidex, 1),
                     "read_at":      datetime.now(timezone.utc).strftime("%H:%M UTC"),
                 }
+                result["_tool"] = "get_sensor_data"
+                result["_llm_summary"] = (
+                    f"Capteur DHT22 (salle serveur) : {result['temperature']}°C, "
+                    f"humidité {result['humidity']}%, ressenti {result['humidex']}°C, "
+                    f"point de rosée {result['dew_point']}°C. Widget affiché."
+                )
+                return result
             except RuntimeError as e:
                 last_error = str(e)
 
