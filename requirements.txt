@@ -11,3 +11,5 @@ trafilatura
 lxml
 numexpr
 tabulate
+# Capteur DHT22 (Raspberry Pi uniquement)
+adafruit-circuitpython-dht
