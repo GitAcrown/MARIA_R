@@ -88,7 +88,7 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_user_profile", "search_user_notes", "math_eval",
     "update_user_notes", "list_reminders",
     "get_weather", "search_media", "search_game",
-    "get_football", "render_table",
+    "get_football", "render_table", "get_sensor_data",
 })
 
 def _fmt_delay(minutes: int) -> str:

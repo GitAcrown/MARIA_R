@@ -40,12 +40,14 @@ def _read_sensor() -> dict:
         return {"error": "Capteur DHT22 indisponible sur cette plateforme."}
 
     device = adafruit_dht.DHT22(board.D4, use_pulseio=False)
+    last_error = "inconnue"
     try:
         for _ in range(_MAX_RETRIES):
             try:
                 temperature = device.temperature
                 humidity    = device.humidity
                 if temperature is None or humidity is None:
+                    last_error = "valeurs nulles"
                     continue
 
                 # Point de rosée (Magnus-Tetens)
@@ -64,10 +66,12 @@ def _read_sensor() -> dict:
                     "humidex":      round(humidex, 1),
                     "read_at":      datetime.now(timezone.utc).strftime("%H:%M UTC"),
                 }
-            except RuntimeError:
+            except RuntimeError as e:
+                last_error = str(e)
                 continue
 
-        return {"error": "Lecture DHT22 échouée après plusieurs tentatives (bruit sur le bus)."}
+        logger.warning(f"DHT22 : échec après {_MAX_RETRIES} tentatives — dernière erreur : {last_error}")
+        return {"error": f"Lecture DHT22 échouée ({last_error})."}
     finally:
         device.exit()
 
