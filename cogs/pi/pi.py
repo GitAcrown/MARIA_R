@@ -50,14 +50,14 @@ def build_sensor_view(data: dict, commentary: str = "") -> Optional[discord.ui.L
     dew      = data["dew_point"]
     read_at  = data.get("read_at", "")
 
-    header = discord.ui.TextDisplay(f"## 🌡 Salle serveur")
+    header = discord.ui.TextDisplay(f"## Chez MARIA")
     sep1   = discord.ui.Separator()
     main   = discord.ui.TextDisplay(
         f"# {temp}°C\n"
         f"-# humidité **{humidity}%**  ·  ressenti **{humidex}°C**  ·  point de rosée {dew}°C"
     )
     sep2   = discord.ui.Separator()
-    footer = discord.ui.TextDisplay(f"-# Capteur DHT22  ·  {read_at}")
+    footer = discord.ui.TextDisplay(f"-# Capteur DHT22 intégré ·  {read_at}")
 
     container = discord.ui.Container(header, sep1, main, sep2, footer)
     return layout_with_commentary(container, commentary)
