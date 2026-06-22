@@ -29,7 +29,9 @@ except Exception as _dht_import_err:
     logger.warning(f"adafruit_dht indisponible — outil DHT22 désactivé. ({type(_dht_import_err).__name__}: {_dht_import_err})")
 
 # Nombre maximum de tentatives avant d'abandonner (le DHT22 est flaky)
-_MAX_RETRIES = 10
+_MAX_RETRIES = 5
+# Délai entre deux lectures (spec DHT22 : min 2s)
+_READ_DELAY = 2.0
 # Durée de vie du cache en secondes (évite de spammer le capteur)
 _CACHE_TTL = 30
 
@@ -69,7 +71,7 @@ def _read_sensor() -> dict:
             except RuntimeError as e:
                 last_error = str(e)
 
-            time.sleep(0.5)
+            time.sleep(_READ_DELAY)
 
         logger.warning(f"DHT22 : échec après {_MAX_RETRIES} tentatives — dernière erreur : {last_error}")
         return {"error": f"Lecture DHT22 échouée ({last_error})."}
