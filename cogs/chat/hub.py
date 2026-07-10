@@ -78,7 +78,7 @@ def _format_rappel_line(r: Rappel) -> str:
         "daily": " <:repeat:1525261027883745342>",
         "weekly": " <:repeat:1525261027883745342>",
     }.get(r.recurrence, "")
-    return f"› **#{r.id}**{rec} · <t:{ts}:R> — {desc}"
+    return f"› **Rappel #{r.id}**{rec} · <t:{ts}:R> — {desc}"
 
 
 def _format_event_line(e: dict) -> Optional[str]:
