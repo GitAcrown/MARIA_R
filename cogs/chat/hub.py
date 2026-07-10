@@ -8,7 +8,7 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
-from common.hub import UserHubStore, hashtag, parse_topics
+from common.hub import UserHubStore, hashtag, parse_topics, truncate_lines
 from common.rappels import Rappel, RappelStore
 from common.timezones import PARIS_TZ, format_french_date
 from common.news import brave_news, build_news_summary
@@ -34,12 +34,12 @@ class HubDisplayData:
 
 
 def _greeting_title(first_name: str) -> str:
-    """'Bonjour/Bonsoir Prénom' selon l'heure, ou titre par défaut si pas de prénom."""
+    """'Hub · Bonjour/Bonsoir Prénom' selon l'heure, ou titre par défaut si pas de prénom."""
     if not first_name:
         return "Ton hub"
     hour = datetime.now(PARIS_TZ).hour
     greeting = "Bonjour" if 5 <= hour < 18 else "Bonsoir"
-    return f"{greeting} {first_name}"
+    return f"Hub · {greeting} {first_name}"
 
 
 def _format_weather(city: str, raw: dict) -> str:
@@ -281,7 +281,7 @@ def build_me_hub_layout(
     if data.config_topics:
         topics_label = " ".join(hashtag(t) for t in data.config_topics)
         if data.news_text:
-            news_display = data.news_text[:900] + ("…" if len(data.news_text) > 900 else "")
+            news_display = truncate_lines(data.news_text, 900)
             children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n{news_display}"))
         else:
             children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n-# Chargement ou indisponible."))

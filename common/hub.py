@@ -17,6 +17,24 @@ def hashtag(topic: str) -> str:
     return "#" + re.sub(r"\s+", "", topic)
 
 
+def truncate_lines(text: str, max_chars: int) -> str:
+    """Tronque `text` en gardant des lignes entières (jamais au milieu d'un lien Markdown)."""
+    if len(text) <= max_chars:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    total = 0
+    for line in lines:
+        added = len(line) + (1 if kept else 0)
+        if total + added > max_chars:
+            break
+        kept.append(line)
+        total += added
+    if not kept:
+        return text[:max_chars] + "…"
+    return "\n".join(kept) + "…"
+
+
 @dataclass
 class UserHubConfig:
     first_name: str = ""
@@ -133,7 +151,7 @@ class UserHubStore:
         config = self.get(user_id)
         now = datetime.now(timezone.utc)
         config.news_cache = {
-            "summary": summary[:1200],
+            "summary": truncate_lines(summary, 1200),
             "updated": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
         }
