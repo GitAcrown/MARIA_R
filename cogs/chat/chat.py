@@ -249,15 +249,15 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Ton hub",
-        "› `/hub` — ton hub perso : météo, rappels, agenda et actu sur tes sujets.\n"
+        "› `/hub` — ton hub perso : météo, agenda (rappels + événements) et actu sur tes sujets.\n"
         "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.\n"
-        "› Ajoute des événements à ton agenda via **+ Événement**.",
+        "› Ajoute/annule rappels et événements directement depuis l'agenda du hub.",
     ),
     (
         "Rappels",
         "› Demande en langage naturel : « rappelle-moi demain 18h d'appeler Léa », « dans 2h… ».\n"
         "› Récurrents possibles (↻ quotidien / hebdo). Tu peux aussi lui demander de modifier ou reporter.\n"
-        "› `/rappels` — liste et annule tes rappels en attente.",
+        "› `/rappels` — liste et annule tes rappels en attente (aussi visibles dans `/hub`).",
     ),
     (
         "Recherche & infos",
@@ -626,7 +626,7 @@ class Chat(commands.Cog):
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="hub", description="Ton hub perso — météo, rappels et actu")
+    @app_commands.command(name="hub", description="Ton hub perso — météo, agenda et actu")
     async def cmd_hub(self, interaction: discord.Interaction) -> None:
         brave_key = getattr(self.bot, "config", {}).get("BRAVE_API_KEY", "") or ""
         await show_me_hub(interaction, self.hub, self.rappels, self.bot, brave_key=brave_key)

@@ -35,7 +35,7 @@ class HubDisplayData:
     config_city: str = ""
     config_topics: list[str] = field(default_factory=list)
     weather_line: str = ""
-    reminders_lines: list[str] = field(default_factory=list)
+    reminders: list[Rappel] = field(default_factory=list)
     news_text: str = ""
     is_empty: bool = True
     tz_offset: Optional[int] = None  # secondes par rapport à UTC, déduit de la ville
@@ -71,19 +71,24 @@ def _format_weather(city: str, raw: dict) -> str:
     return f"{_weather_emoji(icon)} **{city_name}** · {temp}°C (ressenti {feels}°C) · {desc}"
 
 
-def _format_reminders(rappels: list[Rappel]) -> list[str]:
-    lines: list[str] = []
-    for r in rappels[:5]:
-        ts = int(r.execute_at.timestamp())
-        desc = r.description[:80] + ("…" if len(r.description) > 80 else "")
-        rec = {
-            "daily": " <:repeat:1525261027883745342>",
-            "weekly": " <:repeat:1525261027883745342>",
-        }.get(r.recurrence, "")
-        lines.append(f"› **#{r.id}**{rec} · <t:{ts}:R> — {desc}")
-    if len(rappels) > 5:
-        lines.append(f"-# +{len(rappels) - 5} autre(s) rappel(s)")
-    return lines
+def _format_rappel_line(r: Rappel) -> str:
+    ts = int(r.execute_at.timestamp())
+    desc = r.description[:80] + ("…" if len(r.description) > 80 else "")
+    rec = {
+        "daily": " <:repeat:1525261027883745342>",
+        "weekly": " <:repeat:1525261027883745342>",
+    }.get(r.recurrence, "")
+    return f"› **#{r.id}**{rec} · <t:{ts}:R> — {desc}"
+
+
+def _format_event_line(e: dict) -> Optional[str]:
+    try:
+        d = date_cls.fromisoformat(e.get("date", ""))
+    except ValueError:
+        return None
+    ts = int(datetime(d.year, d.month, d.day, tzinfo=PARIS_TZ).timestamp())
+    title_txt = e.get("title", "")[:80]
+    return f"› <t:{ts}:D> (<t:{ts}:R>) — {title_txt}"
 
 
 async def _fetch_weather(bot: commands.Bot, city: str) -> tuple[str, Optional[int]]:
@@ -137,9 +142,8 @@ async def fetch_hub_data(
         is_empty=config.is_empty,
     )
 
-    rappel_list = rappels.get_user_rappels(user_id)
-    data.reminders_lines = _format_reminders(rappel_list)
-    data.agenda_events = hub_store.get_upcoming_agenda(user_id, limit=3)
+    data.reminders = rappels.get_user_rappels(user_id)
+    data.agenda_events = hub_store.get_upcoming_agenda(user_id, limit=10)
 
     fetch_tasks: list[tuple[str, object]] = []
     if config.city:
@@ -331,6 +335,35 @@ class _AddAgendaButton(discord.ui.Button):
         )
 
 
+class _CancelRappelButton(discord.ui.Button):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        hub_store: UserHubStore,
+        rappels: RappelStore,
+        user_id: int,
+        rappel_id: int,
+        *,
+        brave_key: str = "",
+    ):
+        super().__init__(label="✕", style=discord.ButtonStyle.secondary)
+        self.bot = bot
+        self.hub_store = hub_store
+        self.rappels = rappels
+        self.user_id = user_id
+        self.rappel_id = rappel_id
+        self.brave_key = brave_key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
+        self.rappels.cancel(self.rappel_id, self.user_id)
+        await interaction.response.defer()
+        data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
+        view = build_me_hub_layout(data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key)
+        await interaction.edit_original_response(view=view)
+
+
 class _DeleteAgendaButton(discord.ui.Button):
     def __init__(
         self,
@@ -377,7 +410,7 @@ def build_me_hub_layout(
         discord.ui.Separator(),
     ]
 
-    if data.is_empty and not data.reminders_lines:
+    if data.is_empty and not data.reminders and not data.agenda_events:
         children.append(discord.ui.TextDisplay(
             "-# Ajoute ta ville et tes sujets pour personnaliser ton hub."
         ))
@@ -387,28 +420,34 @@ def build_me_hub_layout(
         children.append(discord.ui.TextDisplay(f"### Météo\n{data.weather_line}"))
         children.append(discord.ui.Separator())
 
-    if data.reminders_lines:
-        body = "\n".join(data.reminders_lines)
-        children.append(discord.ui.TextDisplay(f"### Rappels\n{body}"))
-        children.append(discord.ui.Separator())
-    elif not data.is_empty:
-        children.append(discord.ui.TextDisplay("### Rappels\n-# Aucun rappel en attente."))
-        children.append(discord.ui.Separator())
-
-    children.append(discord.ui.TextDisplay("### Agenda"))
+    # Agenda fusionné : rappels (récurrents ou non) + événements ponctuels, triés
+    # chronologiquement, chacun avec son propre bouton de suppression.
+    combined: list[tuple[str, str, object, datetime]] = []
+    for r in data.reminders:
+        combined.append(("rappel", r.id, r, r.execute_at))
     for e in data.agenda_events:
         try:
             d = date_cls.fromisoformat(e.get("date", ""))
         except ValueError:
             continue
-        ts = int(datetime(d.year, d.month, d.day, tzinfo=PARIS_TZ).timestamp())
-        title_txt = e.get("title", "")[:80]
-        children.append(discord.ui.Section(
-            discord.ui.TextDisplay(f"› <t:{ts}:D> (<t:{ts}:R>) — {title_txt}"),
-            accessory=_DeleteAgendaButton(bot, hub_store, rappels, user_id, e.get("id", ""), brave_key=brave_key),
-        ))
-    if not data.agenda_events:
-        children.append(discord.ui.TextDisplay("-# Aucun événement à venir."))
+        combined.append(("event", e.get("id", ""), e, datetime(d.year, d.month, d.day, tzinfo=PARIS_TZ)))
+    combined.sort(key=lambda item: item[3])
+
+    children.append(discord.ui.TextDisplay("### Agenda"))
+    for kind, item_id, obj, _ in combined[:6]:
+        line = _format_rappel_line(obj) if kind == "rappel" else _format_event_line(obj)
+        if not line:
+            continue
+        button = (
+            _CancelRappelButton(bot, hub_store, rappels, user_id, item_id, brave_key=brave_key)
+            if kind == "rappel"
+            else _DeleteAgendaButton(bot, hub_store, rappels, user_id, item_id, brave_key=brave_key)
+        )
+        children.append(discord.ui.Section(discord.ui.TextDisplay(line), accessory=button))
+    if len(combined) > 6:
+        children.append(discord.ui.TextDisplay(f"-# +{len(combined) - 6} autre(s)"))
+    if not combined:
+        children.append(discord.ui.TextDisplay("-# Rien de prévu."))
     children.append(discord.ui.Section(
         discord.ui.TextDisplay("-# Ajoute un événement à ton agenda."),
         accessory=_AddAgendaButton(bot, hub_store, rappels, user_id, brave_key=brave_key),
