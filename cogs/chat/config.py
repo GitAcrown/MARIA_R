@@ -5,7 +5,7 @@ Centralise les valeurs qui étaient auparavant éparpillées et incohérentes en
 """
 
 # Modèles OpenAI
-MODEL_MAIN = "gpt-5.4-mini"   # réponses conversationnelles
+MODEL_MAIN = "gpt-5.6-luna"   # réponses conversationnelles
 MODEL_NANO = "gpt-5.4-nano"   # tâches structurées simples (rappels, calculs)
 
 # Fenêtre de contexte / budget de la session de chat

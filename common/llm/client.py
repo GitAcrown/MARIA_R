@@ -1,4 +1,4 @@
-"""Client OpenAI — wrapper minimal gpt-5.4-mini / nano."""
+"""Client OpenAI — wrapper minimal gpt-5.6-luna / nano."""
 
 import logging
 from typing import Any, Optional
@@ -9,7 +9,7 @@ import openai
 logger = logging.getLogger("llm.client")
 
 # Modèles
-MODEL_MAIN = "gpt-5.4-nano"
+MODEL_MAIN = "gpt-5.6-luna"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
 
 # Réseau — timeout par requête et nombre de tentatives.

@@ -66,7 +66,11 @@ async def load_cogs(bot: commands.Bot) -> None:
         logger.warning("Dossier ./cogs introuvable — aucun cog chargé.")
         return
     for folder in os.listdir("./cogs"):
-        if not os.path.isdir(os.path.join("./cogs", folder)):
+        folder_path = os.path.join("./cogs", folder)
+        if not os.path.isdir(folder_path):
+            continue
+        if not os.path.isfile(os.path.join(folder_path, f"{folder}.py")):
+            # Dossier résiduel (ex. données orphelines) sans module d'extension — on l'ignore.
             continue
         ext = _cog_path(folder)
         try:
