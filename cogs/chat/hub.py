@@ -12,7 +12,7 @@ from discord.ext import commands
 
 from cogs.chat.config import MODEL_NANO
 from common.hub import UserHubStore, hashtag, parse_topics, truncate_lines
-from common.rappels import RECURRENCE_NONE, Rappel, RappelStore
+from common.rappels import RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore
 from common.timezones import PARIS_TZ, format_french_date
 from common.news import brave_news, build_news_summary
 
@@ -38,28 +38,40 @@ _DATETIME_SCHEMA = {
                     "type": ["string", "null"],
                     "description": "Date/heure ISO 8601 (Europe/Paris, sans décalage) ou null si indéterminable",
                 },
+                "recurrence": {
+                    "type": "string",
+                    "enum": list(VALID_RECURRENCES),
+                    "description": (
+                        "'daily' si répété chaque jour ('tous les jours à 8h', 'chaque matin'…), "
+                        "'weekly' si répété chaque semaine ('tous les lundis'…), sinon 'none'."
+                    ),
+                },
             },
-            "required": ["execute_at"],
+            "required": ["execute_at", "recurrence"],
             "additionalProperties": False,
         },
     },
 }
 
 
-async def _parse_natural_datetime(bot: commands.Bot, text: str) -> Optional[datetime]:
-    """Interprète une date/heure en langage naturel via le modèle nano (ex: 'demain 18h', 'dans 3 jours')."""
+async def _parse_natural_datetime(bot: commands.Bot, text: str) -> tuple[Optional[datetime], str]:
+    """Interprète une date/heure + récurrence en langage naturel via le modèle nano.
+
+    Ex: 'demain 18h' → (dt, 'none'). 'tous les jours à 8h' → (dt, 'daily').
+    """
     chat_cog = bot.get_cog("Chat")
     if chat_cog is None or not hasattr(chat_cog, "gpt_api"):
-        return None
+        return None, RECURRENCE_NONE
     now_str = datetime.now(PARIS_TZ).strftime("%A %d/%m/%Y %H:%M")
     messages = [
         {
             "role": "system",
             "content": (
                 f"Nous sommes le {now_str} (fuseau Europe/Paris). Convertis la date/heure donnée par "
-                "l'utilisateur en ISO 8601 local (Europe/Paris, sans décalage, ex. '2026-08-15T18:00:00'). "
-                "Si aucune heure n'est précisée, utilise 09:00. Si la date/heure est indéterminable ou "
-                "déjà passée, renvoie null."
+                "l'utilisateur en ISO 8601 local (Europe/Paris, sans décalage, ex. '2026-08-15T18:00:00') "
+                "pour son PREMIER déclenchement, et détecte une éventuelle récurrence. "
+                "Si aucune heure n'est précisée, utilise 09:00. Si la date/heure est indéterminable, "
+                "renvoie execute_at=null."
             ),
         },
         {"role": "user", "content": text},
@@ -70,15 +82,18 @@ async def _parse_natural_datetime(bot: commands.Bot, text: str) -> Optional[date
         )
         raw = json.loads(completion.choices[0].message.content or "{}")
         execute_at_str = raw.get("execute_at")
+        recurrence = raw.get("recurrence") or RECURRENCE_NONE
+        if recurrence not in VALID_RECURRENCES:
+            recurrence = RECURRENCE_NONE
         if not execute_at_str:
-            return None
+            return None, recurrence
         dt = datetime.fromisoformat(execute_at_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=PARIS_TZ)
-        return dt.astimezone(timezone.utc)
+        return dt.astimezone(timezone.utc), recurrence
     except Exception as e:
         logger.warning(f"Parsing date rappel échoué ({text!r}): {e}")
-        return None
+        return None, RECURRENCE_NONE
 
 
 @dataclass
@@ -338,7 +353,7 @@ class AddRappelModal(discord.ui.Modal, title="Ajouter un rappel"):
         )
         self.when_input = discord.ui.TextInput(
             label="Quand ?",
-            placeholder="Ex: demain 18h, lundi prochain, dans 3 jours, 2026-08-15",
+            placeholder="Ex: demain 18h, tous les jours à 8h, tous les lundis midi",
             max_length=60,
         )
         self.add_item(self.desc_input)
@@ -352,7 +367,7 @@ class AddRappelModal(discord.ui.Modal, title="Ajouter un rappel"):
                 f"Max {REMINDER_MAX_PENDING} rappels en attente.", ephemeral=True,
             )
         await interaction.response.defer()
-        execute_at = await _parse_natural_datetime(self.bot, self.when_input.value)
+        execute_at, recurrence = await _parse_natural_datetime(self.bot, self.when_input.value)
         if not execute_at:
             return await interaction.followup.send(
                 "Date pas comprise. Essaie « demain 18h », « lundi prochain » ou « 2026-08-15 ».",
@@ -360,7 +375,7 @@ class AddRappelModal(discord.ui.Modal, title="Ajouter un rappel"):
             )
         self.rappels.add(
             self.channel_id, self.user_id, self.desc_input.value.strip(), execute_at,
-            recurrence=RECURRENCE_NONE,
+            recurrence=recurrence,
         )
         data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
         view = build_me_hub_layout(

@@ -196,8 +196,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "Ton hub",
         "› `/hub` — ton hub perso : météo, agenda et actu sur tes sujets.\n"
         "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.\n"
-        "› Ajoute un rappel via **+ Rappel** en langage naturel (« demain 18h », « dans 2h »…), "
-        "avec récurrence possible (↻ quotidien / hebdo) en le demandant à l'IA. Annule-le d'un clic.",
+        "› Ajoute un rappel via **+ Rappel** en langage naturel (« demain 18h », « tous les jours à 8h », "
+        "« tous les lundis »…) — récurrence ↻ détectée automatiquement. Annule-le d'un clic.",
     ),
     (
         "Recherche & infos",
