@@ -159,7 +159,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
             required=False,
         )
         self.topics_input = discord.ui.TextInput(
-            label="Sujets d'actu (virgules ou #)",
+            label="Sujets d'actu (max 3, virgules ou #)",
             placeholder="Ex: tech, cinéma, PSG",
             default=topics_str[:200],
             max_length=200,

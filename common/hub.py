@@ -8,7 +8,7 @@ from typing import Optional
 
 from common.dataio import CogData, DictTableBuilder
 
-MAX_TOPICS = 5
+MAX_TOPICS = 3
 NEWS_STALE_AFTER = timedelta(hours=20)
 
 
@@ -38,9 +38,12 @@ class UserHubConfig:
 
 
 def parse_topics(raw: str) -> list[str]:
-    """Parse sujets séparés par virgules ou préfixés #."""
+    """Parse des sujets séparés par virgules et/ou préfixés #.
+
+    Chaque `#` démarre un nouveau sujet, même sans virgule ('#tech #cinéma' → 2 sujets).
+    """
     topics: list[str] = []
-    for chunk in raw.replace("#", " ").split(","):
+    for chunk in re.split(r"[,#]+", raw):
         t = chunk.strip()
         if t and t.lower() not in {x.lower() for x in topics}:
             topics.append(t)
