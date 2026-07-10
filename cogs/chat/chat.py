@@ -1,10 +1,11 @@
 """Cog Chat — Maria GPT avec contexte complet, hub personnel, rappels."""
 
 import asyncio
+import json
 import logging
 import re
 from collections import deque
-from datetime import datetime
+from datetime import date as date_cls, datetime, timezone
 from typing import Optional
 
 import discord
@@ -17,7 +18,7 @@ from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
 from common.hub import UserHubStore
 from common.llm import MariaGptApi, Tool
-from common.rappels import KIND_EVENT, RECURRENCE_NONE, Rappel, RappelStore, RappelWorker
+from common.rappels import KIND_EVENT, RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore, RappelWorker
 from common.timezones import PARIS_TZ
 from common.widgets import build_widget
 
@@ -31,12 +32,47 @@ from cogs.chat.config import (
     MODEL_NANO,
 )
 from cogs.chat.hub import show_me_hub
-from cogs.chat.tools_reminders import build_reminder_tools
+from cogs.chat.tools_reminders import REMINDER_MAX_PENDING, build_reminder_tools
 from cogs.chat.tools_discord import build_discord_tools
 
 # Patterns pour la sélection du modèle nano (tâches structurées simples)
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
 _NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
+
+# Détection d'une date JJ/MM/AAAA dans un message — réaction pour créer un rappel en un clic.
+_DATE_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b')
+_DATE_REACTION_EMOJI = "📅"
+
+_REMINDER_FROM_TEXT_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "reminder_from_message",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Résumé concis et impersonnel de l'événement/tâche mentionné dans le message "
+                        "(sans répéter la date), rédigé de manière neutre. Max 100 caractères."
+                    ),
+                },
+                "execute_at": {
+                    "type": ["string", "null"],
+                    "description": "Date/heure ISO 8601 (Europe/Paris, sans décalage) ou null si indéterminable",
+                },
+                "recurrence": {
+                    "type": "string",
+                    "enum": list(VALID_RECURRENCES),
+                    "description": "'daily'/'weekly' si le message évoque une répétition, sinon 'none'.",
+                },
+            },
+            "required": ["description", "execute_at", "recurrence"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 # Easter eggs — déclenchés par match exact sur le message nettoyé (mention retirée, casse ignorée)
 _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
@@ -200,6 +236,12 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "« tous les lundis »…) — récurrence ↻ détectée automatiquement. Annule-le d'un clic.",
     ),
     (
+        "Dates dans le tchat",
+        "› Une date JJ/MM/AAAA dans un message ? MARIA réagit avec 📅 — clique pour te créer un rappel "
+        "(elle lit le reste du message pour deviner de quoi il s'agit).\n"
+        f"› {SETTINGS} `/chatbot datedetect` — active/désactive cette détection sur un salon.",
+    ),
+    (
         "Recherche & infos",
         "› Elle cherche le web pour les faits récents et définit l'argot (Urban Dictionary).\n"
         "› Météo, films/séries, jeux Steam, scores de foot, images — demande simplement.",
@@ -246,6 +288,7 @@ class Chat(commands.Cog):
             DictTableBuilder("channel_config", {
                 "respond_everyone": False,
                 "auto_transcribe": False,
+                "date_detect": False,
             }),
         )
         self.hub = UserHubStore()
@@ -360,6 +403,73 @@ class Chat(commands.Cog):
         if isinstance(target, discord.TextChannel):
             return self.data.get(target).settings("channel_config")
         return {}
+
+    def _has_valid_date(self, content: str) -> bool:
+        """Vrai si le message contient une date JJ/MM/AAAA calendaire valide."""
+        for m in _DATE_RE.finditer(content):
+            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                date_cls(year, month, day)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    async def _create_reminder_from_message(self, message: discord.Message, requester: discord.abc.User) -> None:
+        """Crée un rappel pour `requester` à partir d'une date JJ/MM/AAAA détectée dans `message`."""
+        if self.rappels.count_pending(requester.id) >= REMINDER_MAX_PENDING:
+            await message.channel.send(
+                f"{requester.mention} max {REMINDER_MAX_PENDING} rappels en attente.", delete_after=15,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+            return
+        now_str = datetime.now(PARIS_TZ).strftime("%A %d/%m/%Y %H:%M")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"Nous sommes le {now_str} (fuseau Europe/Paris). Le message ci-dessous contient une "
+                    "date JJ/MM/AAAA. Extrait-en un rappel : description concise et impersonnelle de "
+                    "l'événement/tâche (sans répéter la date), date/heure ISO 8601 locale correspondante "
+                    "(09:00 si l'heure n'est pas précisée), et une éventuelle récurrence."
+                ),
+            },
+            {"role": "user", "content": message.content},
+        ]
+        try:
+            completion = await self.gpt_api.client.chat(
+                messages, model=MODEL_NANO, response_format=_REMINDER_FROM_TEXT_SCHEMA,
+            )
+            raw = json.loads(completion.choices[0].message.content or "{}")
+            execute_at_str = raw.get("execute_at")
+            if not execute_at_str:
+                raise ValueError("date indéterminable")
+            execute_at = datetime.fromisoformat(execute_at_str)
+            if execute_at.tzinfo is None:
+                execute_at = execute_at.replace(tzinfo=PARIS_TZ)
+            execute_at = execute_at.astimezone(timezone.utc)
+            recurrence = raw.get("recurrence") or RECURRENCE_NONE
+            if recurrence not in VALID_RECURRENCES:
+                recurrence = RECURRENCE_NONE
+            description = (raw.get("description") or "Rappel").strip()[:150]
+        except Exception as e:
+            logger.warning(f"Extraction rappel depuis message échouée : {e}")
+            await message.channel.send(
+                f"{requester.mention} date pas exploitable pour un rappel.", delete_after=15,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+            return
+
+        rid = self.rappels.add(
+            message.channel.id, requester.id, description, execute_at, message.id, recurrence=recurrence,
+        )
+        ts = int(execute_at.timestamp())
+        repeat_str = " <:repeat:1525261027883745342>" if recurrence != RECURRENCE_NONE else ""
+        await message.reply(
+            f"📅 **Rappel #{rid}**{repeat_str} créé pour {requester.mention} · <t:{ts}:F> (<t:{ts}:R>)\n{description}",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     def _should_respond(self, message: discord.Message) -> bool:
         if not message.guild:
@@ -517,6 +627,12 @@ class Chat(commands.Cog):
             return
         self._processed.append(key)
 
+        if self._channel_config(message.channel).get("date_detect", False) and self._has_valid_date(message.content):
+            try:
+                await message.add_reaction(_DATE_REACTION_EMOJI)
+            except discord.HTTPException:
+                pass
+
         should_respond = self._should_respond(message)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
@@ -561,6 +677,19 @@ class Chat(commands.Cog):
         task = asyncio.create_task(_delayed(message, task_holder))
         task_holder.append(task)
         self._pending_responses[channel_id] = task
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.abc.User) -> None:
+        if user.bot or str(reaction.emoji) != _DATE_REACTION_EMOJI:
+            return
+        message = reaction.message
+        if not message.guild or not self._has_valid_date(message.content):
+            return
+        try:
+            await reaction.remove(user)
+        except discord.HTTPException:
+            pass
+        await self._create_reminder_from_message(message, user)
 
     # ------------------------------------------------------------------
     # Slash commands
@@ -647,6 +776,20 @@ class Chat(commands.Cog):
         state = "activée" if actif else "désactivée"
         await interaction.response.send_message(
             f"Transcription automatique des messages vocaux **{state}** sur ce salon.", ephemeral=True
+        )
+
+    @chatbot.command(name="datedetect", description="Définit si MARIA détecte les dates JJ/MM/AAAA pour proposer un rappel")
+    @app_commands.describe(actif="Activer ou désactiver la détection de dates")
+    async def chatbot_datedetect(self, interaction: discord.Interaction, actif: bool) -> None:
+        ch = interaction.channel
+        target = ch.parent if isinstance(ch, discord.Thread) else ch
+        if not isinstance(target, discord.TextChannel):
+            return await interaction.response.send_message("Salon textuel requis.", ephemeral=True)
+        self.data.get(target).settings("channel_config")["date_detect"] = actif
+        state = "activée" if actif else "désactivée"
+        await interaction.response.send_message(
+            f"Détection de dates (JJ/MM/AAAA → {_DATE_REACTION_EMOJI} rappel) **{state}** sur ce salon.",
+            ephemeral=True,
         )
 
 
