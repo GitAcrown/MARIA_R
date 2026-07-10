@@ -1,4 +1,4 @@
-"""Helpers Brave News — partagés par le hub /me."""
+"""Helpers Brave News — partagés par le hub /hub."""
 
 import logging
 

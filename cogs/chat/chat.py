@@ -79,7 +79,7 @@ Réponses très courtes style tchat. Pas de listes sauf si utile. Utiliser du fo
 [FOCUS] indique à qui tu réponds — adresse-toi uniquement à cette personne, le reste est contexte.
 « {bot_name} » (ou ton nom sous toutes ses formes) dans un message, c'est TOI : on s'adresse à toi ou on parle de toi. Ne commence jamais tes réponses par « {bot_name} ».
 
-HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom...), dis d'aller sur son hub personnel via la commande /me (bouton "Configurer") — tu ne peux pas les modifier toi-même.
+HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom, agenda...), dis d'aller sur son hub personnel via la commande /hub (boutons "Configurer" / "+ Événement") — tu ne peux pas les modifier toi-même.
 
 OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, un chiffre, une actu, un titre ou une source. Si tu n'es pas sûre ou si c'est trop récent, tu APPELLES l'outil approprié avant de répondre, ou tu dis que tu ne sais pas. Sauf si spécifié, les utilisateurs vivent en France.
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. 
@@ -249,8 +249,9 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Ton hub",
-        "› `/me` — ton hub perso : météo, rappels et actu sur tes sujets.\n"
-        "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.",
+        "› `/hub` — ton hub perso : météo, rappels, agenda et actu sur tes sujets.\n"
+        "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.\n"
+        "› Ajoute des événements à ton agenda via **+ Événement**.",
     ),
     (
         "Rappels",
@@ -625,8 +626,8 @@ class Chat(commands.Cog):
     # Slash commands
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="me", description="Ton hub perso — météo, rappels et actu")
-    async def cmd_me(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="hub", description="Ton hub perso — météo, rappels et actu")
+    async def cmd_hub(self, interaction: discord.Interaction) -> None:
         brave_key = getattr(self.bot, "config", {}).get("BRAVE_API_KEY", "") or ""
         await show_me_hub(interaction, self.hub, self.rappels, self.bot, brave_key=brave_key)
 

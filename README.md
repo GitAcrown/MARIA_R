@@ -8,7 +8,7 @@ Personnalité directe et Gen Z, Maria s'adapte au ton de chaque salon, et cherch
 
 ## Ce qu'elle fait
 
-- **Conversation** — contexte restreint par salon, hub personnel configurable (`/me`)
+- **Conversation** — contexte restreint par salon, hub personnel configurable (`/hub`)
 - **Recherche web** — Brave Search (+ fallback DuckDuckGo) avec crawling de pages
 - **Rappels** — planification et envoi de rappels personnalisés
 - **Médias** — analyse d'images, transcription audio
