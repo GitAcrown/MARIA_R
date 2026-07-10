@@ -19,17 +19,20 @@ def hashtag(topic: str) -> str:
 
 @dataclass
 class UserHubConfig:
+    first_name: str = ""
     city: str = ""
     topics: list[str] = field(default_factory=list)
     news_cache: dict = field(default_factory=dict)
 
     @property
     def is_empty(self) -> bool:
-        return not self.city and not self.topics
+        return not self.first_name and not self.city and not self.topics
 
     def prompt_line(self) -> str:
         """Ligne succincte pour injection dans le prompt."""
         parts: list[str] = []
+        if self.first_name:
+            parts.append(f"prénom : {self.first_name}")
         if self.city:
             parts.append(f"ville : {self.city}")
         if self.topics:
@@ -75,6 +78,7 @@ class UserHubStore:
         except json.JSONDecodeError:
             return UserHubConfig()
         return UserHubConfig(
+            first_name=(data.get("first_name") or "").strip(),
             city=(data.get("city") or "").strip(),
             topics=list(data.get("topics") or [])[:MAX_TOPICS],
             news_cache=dict(data.get("news_cache") or {}),
@@ -82,14 +86,24 @@ class UserHubStore:
 
     def save(self, user_id: int, config: UserHubConfig) -> None:
         payload = {
+            "first_name": config.first_name.strip(),
             "city": config.city.strip(),
             "topics": config.topics[:MAX_TOPICS],
             "news_cache": config.news_cache,
         }
         self._db.settings("user_profiles").set(self._key(user_id), json.dumps(payload, ensure_ascii=False))
 
-    def update(self, user_id: int, *, city: Optional[str] = None, topics: Optional[list[str]] = None) -> UserHubConfig:
+    def update(
+        self,
+        user_id: int,
+        *,
+        first_name: Optional[str] = None,
+        city: Optional[str] = None,
+        topics: Optional[list[str]] = None,
+    ) -> UserHubConfig:
         config = self.get(user_id)
+        if first_name is not None:
+            config.first_name = first_name.strip()
         if city is not None:
             config.city = city.strip()
         if topics is not None:

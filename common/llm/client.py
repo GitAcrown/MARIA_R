@@ -11,6 +11,9 @@ logger = logging.getLogger("llm.client")
 # Modèles
 MODEL_MAIN = "gpt-5.6-luna"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
+# Modèle de repli si MODEL_MAIN renvoie une erreur de permissions (401) — ex. accès
+# au modèle pas encore activé sur l'organisation/clé API.
+MODEL_FALLBACK = "gpt-5.4-mini"
 
 # Réseau — timeout par requête et nombre de tentatives.
 # Le SDK OpenAI relance automatiquement sur 429, 5xx et erreurs réseau/timeout.
@@ -81,6 +84,17 @@ class MariaLLMClient:
 
         try:
             return await self._client.chat.completions.create(**kwargs)
+        except openai.AuthenticationError as e:
+            # 401 "insufficient permissions" typique d'un modèle pas encore
+            # accessible sur le compte/projet — on retente une fois avec un modèle de repli.
+            if kwargs["model"] == MODEL_FALLBACK:
+                raise MariaOpenAIError(str(e)) from e
+            logger.warning(f"Modèle {kwargs['model']!r} refusé (401), repli sur {MODEL_FALLBACK!r}: {e}")
+            kwargs["model"] = MODEL_FALLBACK
+            try:
+                return await self._client.chat.completions.create(**kwargs)
+            except (openai.BadRequestError, openai.OpenAIError) as e2:
+                raise MariaOpenAIError(str(e2)) from e2
         except (openai.BadRequestError, openai.OpenAIError) as e:
             raise MariaOpenAIError(str(e)) from e
 

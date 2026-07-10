@@ -38,10 +38,11 @@ def build_news_summary(results: list[dict], date_str: str) -> str:
         seen.add(title)
         url = (r.get("url") or "").strip()
         desc = (r.get("description") or "").strip()
-        label = f"[{title}]({url})" if url else title
-        line = f"- {label}"
+        line = f"- {title}"
         if desc:
             line += f" : {desc[:120]}"
+        if url:
+            line += " ([lien](" + url + "))"
         lines.append(line)
         if len(lines) >= 7:
             break

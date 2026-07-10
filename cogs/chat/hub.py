@@ -24,12 +24,22 @@ logger = logging.getLogger("MARIA.Hub")
 
 @dataclass
 class HubDisplayData:
+    config_first_name: str = ""
     config_city: str = ""
     config_topics: list[str] = field(default_factory=list)
     weather_line: str = ""
     reminders_lines: list[str] = field(default_factory=list)
     news_text: str = ""
     is_empty: bool = True
+
+
+def _greeting_title(first_name: str) -> str:
+    """'Bonjour/Bonsoir Prénom' selon l'heure, ou titre par défaut si pas de prénom."""
+    if not first_name:
+        return "Ton hub"
+    hour = datetime.now(PARIS_TZ).hour
+    greeting = "Bonjour" if 5 <= hour < 18 else "Bonsoir"
+    return f"{greeting} {first_name}"
 
 
 def _format_weather(city: str, raw: dict) -> str:
@@ -103,6 +113,7 @@ async def fetch_hub_data(
 ) -> HubDisplayData:
     config = hub_store.get(user_id)
     data = HubDisplayData(
+        config_first_name=config.first_name,
         config_city=config.city,
         config_topics=list(config.topics),
         is_empty=config.is_empty,
@@ -140,6 +151,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        first_name: str,
         city: str,
         topics_str: str,
         *,
@@ -151,6 +163,13 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
         self.rappels = rappels
         self.user_id = user_id
         self.brave_key = brave_key
+        self.first_name_input = discord.ui.TextInput(
+            label="Prénom",
+            placeholder="Ex: Alex",
+            default=first_name[:50],
+            max_length=50,
+            required=False,
+        )
         self.city_input = discord.ui.TextInput(
             label="Ville",
             placeholder="Ex: Lyon, Paris, Marseille…",
@@ -165,6 +184,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
             max_length=200,
             required=False,
         )
+        self.add_item(self.first_name_input)
         self.add_item(self.city_input)
         self.add_item(self.topics_input)
 
@@ -173,6 +193,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
             return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
         self.hub_store.update(
             self.user_id,
+            first_name=self.first_name_input.value.strip(),
             city=self.city_input.value.strip(),
             topics=parse_topics(self.topics_input.value),
         )
@@ -195,6 +216,7 @@ class _ConfigureHubButton(discord.ui.Button):
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        first_name: str,
         city: str,
         topics_str: str,
         *,
@@ -205,6 +227,7 @@ class _ConfigureHubButton(discord.ui.Button):
         self.hub_store = hub_store
         self.rappels = rappels
         self.user_id = user_id
+        self.first_name = first_name
         self.city = city
         self.topics_str = topics_str
         self.brave_key = brave_key
@@ -215,7 +238,7 @@ class _ConfigureHubButton(discord.ui.Button):
         await interaction.response.send_modal(
             ConfigureHubModal(
                 self.bot, self.hub_store, self.rappels, self.user_id,
-                self.city, self.topics_str, brave_key=self.brave_key,
+                self.first_name, self.city, self.topics_str, brave_key=self.brave_key,
             )
         )
 
@@ -230,8 +253,9 @@ def build_me_hub_layout(
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=180)
     today_str = format_french_date(datetime.now(PARIS_TZ))
+    title = _greeting_title(data.config_first_name)
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay("## <:hub:1525259996315652209> Ton hub"),
+        discord.ui.TextDisplay(f"## <:hub:1525259996315652209> {title}"),
         discord.ui.TextDisplay(f"-# {today_str}"),
         discord.ui.Separator(),
     ]
@@ -266,12 +290,13 @@ def build_me_hub_layout(
     topics_str = ", ".join(data.config_topics)
     topics_display = " ".join(hashtag(t) for t in data.config_topics) if data.config_topics else "—"
     config_line = discord.ui.TextDisplay(
-        f"-# Ville : {data.config_city or '—'} · Sujets : {topics_display}"
+        f"-# Prénom : {data.config_first_name or '—'} · Ville : {data.config_city or '—'} · Sujets : {topics_display}"
     )
     config_section = discord.ui.Section(
         config_line,
         accessory=_ConfigureHubButton(
-            bot, hub_store, rappels, user_id, data.config_city, topics_str, brave_key=brave_key,
+            bot, hub_store, rappels, user_id, data.config_first_name, data.config_city, topics_str,
+            brave_key=brave_key,
         ),
     )
     children.append(config_section)
