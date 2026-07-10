@@ -79,7 +79,7 @@ Réponses très courtes style tchat. Pas de listes sauf si utile. Utiliser du fo
 [FOCUS] indique à qui tu réponds — adresse-toi uniquement à cette personne, le reste est contexte.
 « {bot_name} » (ou ton nom sous toutes ses formes) dans un message, c'est TOI : on s'adresse à toi ou on parle de toi. Ne commence jamais tes réponses par « {bot_name} ».
 
-HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom, agenda...), dis d'aller sur son hub personnel via la commande /hub (boutons "Configurer" / "+ Événement") — tu ne peux pas les modifier toi-même.
+HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom), dis d'aller sur son hub personnel via la commande /hub (bouton "Configurer") — tu ne peux pas les modifier toi-même. Les rappels, eux, restent gérables directement par toi (schedule_reminder etc.) ou via le bouton "+ Rappel" du hub.
 
 OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, un chiffre, une actu, un titre ou une source. Si tu n'es pas sûre ou si c'est trop récent, tu APPELLES l'outil approprié avant de répondre, ou tu dis que tu ne sais pas. Sauf si spécifié, les utilisateurs vivent en France.
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. 
@@ -149,61 +149,6 @@ async def send_long(
 # UI — composants réutilisables
 # ---------------------------------------------------------------------------
 
-class _CancelButton(discord.ui.Button):
-    """Bouton d'annulation d'un rappel, utilisé comme accessory dans une Section."""
-
-    def __init__(self, rappel_id: int, user_id: int, store: RappelStore):
-        super().__init__(
-            style=discord.ButtonStyle.danger,
-            label="Annuler",
-            custom_id=f"cancel_rappel_{rappel_id}_{user_id}",
-        )
-        self.rappel_id = rappel_id
-        self.user_id = user_id
-        self.store = store
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message(
-                "Ce rappel ne t'appartient pas.", ephemeral=True
-            )
-        ok = self.store.cancel(self.rappel_id, self.user_id)
-        if not ok:
-            return await interaction.response.send_message(
-                "Ce rappel est déjà exécuté ou annulé.", ephemeral=True
-            )
-        remaining = self.store.get_user_rappels(self.user_id)
-        new_view = RappelsView(remaining, self.user_id, self.store) if remaining else _empty_rappels_view()
-        await interaction.response.edit_message(view=new_view)
-
-
-def _empty_rappels_view() -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=30)
-    view.add_item(discord.ui.Container(discord.ui.TextDisplay("Aucun rappel en attente.")))
-    return view
-
-
-class RappelsView(discord.ui.LayoutView):
-    """Liste des rappels en attente avec bouton Annuler par entrée."""
-
-    def __init__(self, rappels: list[Rappel], user_id: int, store: RappelStore):
-        super().__init__(timeout=120)
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## Tes rappels"),
-            discord.ui.Separator(),
-        ]
-        for r in rappels:
-            ts = int(r.execute_at.timestamp())
-            desc = r.description[:100] + ("…" if len(r.description) > 100 else "")
-            rec_str = {
-                "daily": " · <:repeat:1525261027883745342> quotidien",
-                "weekly": " · <:repeat:1525261027883745342> hebdo",
-            }.get(r.recurrence, "")
-            text = discord.ui.TextDisplay(f"> **#{r.id}**{rec_str} · <t:{ts}:f> (<t:{ts}:R>)\n> {desc}")
-            children.append(discord.ui.Section(text, accessory=_CancelButton(r.id, user_id, store)))
-        self.add_item(discord.ui.Container(*children))
-
-
 class InfoView(discord.ui.LayoutView):
     """Stats de la session en cours — lecture seule."""
 
@@ -249,15 +194,10 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Ton hub",
-        "› `/hub` — ton hub perso : météo, agenda (rappels + événements) et actu sur tes sujets.\n"
+        "› `/hub` — ton hub perso : météo, agenda et actu sur tes sujets.\n"
         "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.\n"
-        "› Ajoute/annule rappels et événements directement depuis l'agenda du hub.",
-    ),
-    (
-        "Rappels",
-        "› Demande en langage naturel : « rappelle-moi demain 18h d'appeler Léa », « dans 2h… ».\n"
-        "› Récurrents possibles (↻ quotidien / hebdo). Tu peux aussi lui demander de modifier ou reporter.\n"
-        "› `/rappels` — liste et annule tes rappels en attente (aussi visibles dans `/hub`).",
+        "› Ajoute un rappel via **+ Rappel** en langage naturel (« demain 18h », « dans 2h »…), "
+        "avec récurrence possible (↻ quotidien / hebdo) en le demandant à l'IA. Annule-le d'un clic.",
     ),
     (
         "Recherche & infos",
@@ -630,16 +570,6 @@ class Chat(commands.Cog):
     async def cmd_hub(self, interaction: discord.Interaction) -> None:
         brave_key = getattr(self.bot, "config", {}).get("BRAVE_API_KEY", "") or ""
         await show_me_hub(interaction, self.hub, self.rappels, self.bot, brave_key=brave_key)
-
-    @app_commands.command(name="rappels", description="Liste tes rappels en attente")
-    async def cmd_rappels(self, interaction: discord.Interaction) -> None:
-        tasks = self.rappels.get_user_rappels(interaction.user.id)
-        if not tasks:
-            await interaction.response.send_message("Aucun rappel en attente.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            view=RappelsView(tasks, interaction.user.id, self.rappels), ephemeral=True
-        )
 
     @app_commands.command(name="tips", description="Quelques astuces pour utiliser MARIA")
     async def cmd_tips(self, interaction: discord.Interaction) -> None:

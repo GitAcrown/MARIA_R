@@ -1,16 +1,18 @@
 """Hub personnel — vue LayoutView pour /hub."""
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date as date_cls, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
+from cogs.chat.config import MODEL_NANO
 from common.hub import UserHubStore, hashtag, parse_topics, truncate_lines
-from common.rappels import Rappel, RappelStore
+from common.rappels import RECURRENCE_NONE, Rappel, RappelStore
 from common.timezones import PARIS_TZ, format_french_date
 from common.news import brave_news, build_news_summary
 
@@ -20,13 +22,63 @@ except ImportError:
     def _weather_emoji(icon: str) -> str:
         return "🌡️"
 
-try:
-    from cogs.meteo.meteo import _parse_target_date
-except ImportError:
-    def _parse_target_date(_target_date: str) -> Optional[date_cls]:
-        return None
-
 logger = logging.getLogger("MARIA.Hub")
+
+REMINDER_MAX_PENDING = 10
+
+_DATETIME_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "datetime_extraction",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "execute_at": {
+                    "type": ["string", "null"],
+                    "description": "Date/heure ISO 8601 (Europe/Paris, sans décalage) ou null si indéterminable",
+                },
+            },
+            "required": ["execute_at"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def _parse_natural_datetime(bot: commands.Bot, text: str) -> Optional[datetime]:
+    """Interprète une date/heure en langage naturel via le modèle nano (ex: 'demain 18h', 'dans 3 jours')."""
+    chat_cog = bot.get_cog("Chat")
+    if chat_cog is None or not hasattr(chat_cog, "gpt_api"):
+        return None
+    now_str = datetime.now(PARIS_TZ).strftime("%A %d/%m/%Y %H:%M")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"Nous sommes le {now_str} (fuseau Europe/Paris). Convertis la date/heure donnée par "
+                "l'utilisateur en ISO 8601 local (Europe/Paris, sans décalage, ex. '2026-08-15T18:00:00'). "
+                "Si aucune heure n'est précisée, utilise 09:00. Si la date/heure est indéterminable ou "
+                "déjà passée, renvoie null."
+            ),
+        },
+        {"role": "user", "content": text},
+    ]
+    try:
+        completion = await chat_cog.gpt_api.client.chat(
+            messages, model=MODEL_NANO, response_format=_DATETIME_SCHEMA,
+        )
+        raw = json.loads(completion.choices[0].message.content or "{}")
+        execute_at_str = raw.get("execute_at")
+        if not execute_at_str:
+            return None
+        dt = datetime.fromisoformat(execute_at_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=PARIS_TZ)
+        return dt.astimezone(timezone.utc)
+    except Exception as e:
+        logger.warning(f"Parsing date rappel échoué ({text!r}): {e}")
+        return None
 
 
 @dataclass
@@ -39,7 +91,6 @@ class HubDisplayData:
     news_text: str = ""
     is_empty: bool = True
     tz_offset: Optional[int] = None  # secondes par rapport à UTC, déduit de la ville
-    agenda_events: list[dict] = field(default_factory=list)
 
 
 def _local_hour(tz_offset: Optional[int]) -> int:
@@ -79,16 +130,6 @@ def _format_rappel_line(r: Rappel) -> str:
         "weekly": " <:repeat:1525261027883745342>",
     }.get(r.recurrence, "")
     return f"› **Rappel #{r.id}**{rec} · <t:{ts}:R> — {desc}"
-
-
-def _format_event_line(e: dict) -> Optional[str]:
-    try:
-        d = date_cls.fromisoformat(e.get("date", ""))
-    except ValueError:
-        return None
-    ts = int(datetime(d.year, d.month, d.day, tzinfo=PARIS_TZ).timestamp())
-    title_txt = e.get("title", "")[:80]
-    return f"› <t:{ts}:D> (<t:{ts}:R>) — {title_txt}"
 
 
 async def _fetch_weather(bot: commands.Bot, city: str) -> tuple[str, Optional[int]]:
@@ -143,7 +184,6 @@ async def fetch_hub_data(
     )
 
     data.reminders = rappels.get_user_rappels(user_id)
-    data.agenda_events = hub_store.get_upcoming_agenda(user_id, limit=10)
 
     fetch_tasks: list[tuple[str, object]] = []
     if config.city:
@@ -174,6 +214,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        channel_id: int,
         first_name: str,
         city: str,
         topics_str: str,
@@ -185,6 +226,7 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
         self.hub_store = hub_store
         self.rappels = rappels
         self.user_id = user_id
+        self.channel_id = channel_id
         self.brave_key = brave_key
         self.first_name_input = discord.ui.TextInput(
             label="Prénom",
@@ -228,7 +270,10 @@ class ConfigureHubModal(discord.ui.Modal, title="Configurer ton hub"):
             self.bot, self.user_id, self.hub_store, self.rappels,
             brave_key=self.brave_key, refresh_news=True,
         )
-        view = build_me_hub_layout(data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key)
+        view = build_me_hub_layout(
+            data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key,
+            channel_id=self.channel_id,
+        )
         await interaction.edit_original_response(view=view)
 
 
@@ -239,6 +284,7 @@ class _ConfigureHubButton(discord.ui.Button):
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        channel_id: int,
         first_name: str,
         city: str,
         topics_str: str,
@@ -250,6 +296,7 @@ class _ConfigureHubButton(discord.ui.Button):
         self.hub_store = hub_store
         self.rappels = rappels
         self.user_id = user_id
+        self.channel_id = channel_id
         self.first_name = first_name
         self.city = city
         self.topics_str = topics_str
@@ -260,19 +307,20 @@ class _ConfigureHubButton(discord.ui.Button):
             return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
         await interaction.response.send_modal(
             ConfigureHubModal(
-                self.bot, self.hub_store, self.rappels, self.user_id,
+                self.bot, self.hub_store, self.rappels, self.user_id, self.channel_id,
                 self.first_name, self.city, self.topics_str, brave_key=self.brave_key,
             )
         )
 
 
-class AddAgendaEventModal(discord.ui.Modal, title="Ajouter un événement"):
+class AddRappelModal(discord.ui.Modal, title="Ajouter un rappel"):
     def __init__(
         self,
         bot: commands.Bot,
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        channel_id: int,
         *,
         brave_key: str = "",
     ):
@@ -281,57 +329,73 @@ class AddAgendaEventModal(discord.ui.Modal, title="Ajouter un événement"):
         self.hub_store = hub_store
         self.rappels = rappels
         self.user_id = user_id
+        self.channel_id = channel_id
         self.brave_key = brave_key
-        self.title_input = discord.ui.TextInput(
-            label="Titre",
-            placeholder="Ex: Anniversaire de Sam",
-            max_length=100,
+        self.desc_input = discord.ui.TextInput(
+            label="Rappel",
+            placeholder="Ex: Anniversaire de Sam, appeler le médecin…",
+            max_length=200,
         )
-        self.date_input = discord.ui.TextInput(
-            label="Date",
-            placeholder="Ex: demain, lundi, 2026-08-15",
-            max_length=30,
+        self.when_input = discord.ui.TextInput(
+            label="Quand ?",
+            placeholder="Ex: demain 18h, lundi prochain, dans 3 jours, 2026-08-15",
+            max_length=60,
         )
-        self.add_item(self.title_input)
-        self.add_item(self.date_input)
+        self.add_item(self.desc_input)
+        self.add_item(self.when_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
-        parsed = _parse_target_date(self.date_input.value)
-        if not parsed:
+        if self.rappels.count_pending(self.user_id) >= REMINDER_MAX_PENDING:
             return await interaction.response.send_message(
-                "Date pas comprise. Essaie « demain », « lundi » ou « 2026-08-15 ».", ephemeral=True,
+                f"Max {REMINDER_MAX_PENDING} rappels en attente.", ephemeral=True,
             )
-        self.hub_store.add_agenda_event(self.user_id, self.title_input.value, parsed)
         await interaction.response.defer()
+        execute_at = await _parse_natural_datetime(self.bot, self.when_input.value)
+        if not execute_at:
+            return await interaction.followup.send(
+                "Date pas comprise. Essaie « demain 18h », « lundi prochain » ou « 2026-08-15 ».",
+                ephemeral=True,
+            )
+        self.rappels.add(
+            self.channel_id, self.user_id, self.desc_input.value.strip(), execute_at,
+            recurrence=RECURRENCE_NONE,
+        )
         data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
-        view = build_me_hub_layout(data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key)
+        view = build_me_hub_layout(
+            data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key,
+            channel_id=self.channel_id,
+        )
         await interaction.edit_original_response(view=view)
 
 
-class _AddAgendaButton(discord.ui.Button):
+class _AddRappelButton(discord.ui.Button):
     def __init__(
         self,
         bot: commands.Bot,
         hub_store: UserHubStore,
         rappels: RappelStore,
         user_id: int,
+        channel_id: int,
         *,
         brave_key: str = "",
     ):
-        super().__init__(label="+ Événement", style=discord.ButtonStyle.secondary)
+        super().__init__(label="+ Rappel", style=discord.ButtonStyle.secondary)
         self.bot = bot
         self.hub_store = hub_store
         self.rappels = rappels
         self.user_id = user_id
+        self.channel_id = channel_id
         self.brave_key = brave_key
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
         await interaction.response.send_modal(
-            AddAgendaEventModal(self.bot, self.hub_store, self.rappels, self.user_id, brave_key=self.brave_key)
+            AddRappelModal(
+                self.bot, self.hub_store, self.rappels, self.user_id, self.channel_id, brave_key=self.brave_key,
+            )
         )
 
 
@@ -343,6 +407,7 @@ class _CancelRappelButton(discord.ui.Button):
         rappels: RappelStore,
         user_id: int,
         rappel_id: int,
+        channel_id: int,
         *,
         brave_key: str = "",
     ):
@@ -352,6 +417,7 @@ class _CancelRappelButton(discord.ui.Button):
         self.rappels = rappels
         self.user_id = user_id
         self.rappel_id = rappel_id
+        self.channel_id = channel_id
         self.brave_key = brave_key
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -360,36 +426,10 @@ class _CancelRappelButton(discord.ui.Button):
         self.rappels.cancel(self.rappel_id, self.user_id)
         await interaction.response.defer()
         data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
-        view = build_me_hub_layout(data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key)
-        await interaction.edit_original_response(view=view)
-
-
-class _DeleteAgendaButton(discord.ui.Button):
-    def __init__(
-        self,
-        bot: commands.Bot,
-        hub_store: UserHubStore,
-        rappels: RappelStore,
-        user_id: int,
-        event_id: str,
-        *,
-        brave_key: str = "",
-    ):
-        super().__init__(label="✕", style=discord.ButtonStyle.secondary)
-        self.bot = bot
-        self.hub_store = hub_store
-        self.rappels = rappels
-        self.user_id = user_id
-        self.event_id = event_id
-        self.brave_key = brave_key
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
-        self.hub_store.remove_agenda_event(self.user_id, self.event_id)
-        await interaction.response.defer()
-        data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
-        view = build_me_hub_layout(data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key)
+        view = build_me_hub_layout(
+            data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key,
+            channel_id=self.channel_id,
+        )
         await interaction.edit_original_response(view=view)
 
 
@@ -400,6 +440,7 @@ def build_me_hub_layout(
     bot: commands.Bot,
     rappels: RappelStore,
     brave_key: str = "",
+    channel_id: int = 0,
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=180)
     today_str = format_french_date(datetime.now(PARIS_TZ))
@@ -410,7 +451,7 @@ def build_me_hub_layout(
         discord.ui.Separator(),
     ]
 
-    if data.is_empty and not data.reminders and not data.agenda_events:
+    if data.is_empty and not data.reminders:
         children.append(discord.ui.TextDisplay(
             "-# Ajoute ta ville et tes sujets pour personnaliser ton hub."
         ))
@@ -420,37 +461,24 @@ def build_me_hub_layout(
         children.append(discord.ui.TextDisplay(f"### Météo\n{data.weather_line}"))
         children.append(discord.ui.Separator())
 
-    # Agenda fusionné : rappels (récurrents ou non) + événements ponctuels, triés
-    # chronologiquement, chacun avec son propre bouton de suppression.
-    combined: list[tuple[str, str, object, datetime]] = []
-    for r in data.reminders:
-        combined.append(("rappel", r.id, r, r.execute_at))
-    for e in data.agenda_events:
-        try:
-            d = date_cls.fromisoformat(e.get("date", ""))
-        except ValueError:
-            continue
-        combined.append(("event", e.get("id", ""), e, datetime(d.year, d.month, d.day, tzinfo=PARIS_TZ)))
-    combined.sort(key=lambda item: item[3])
-
+    # Agenda : tous les rappels (récurrents ou non), triés chronologiquement,
+    # chacun avec son propre bouton d'annulation.
+    reminders_sorted = sorted(data.reminders, key=lambda r: r.execute_at)
     children.append(discord.ui.TextDisplay("### Agenda"))
-    for kind, item_id, obj, _ in combined[:6]:
-        line = _format_rappel_line(obj) if kind == "rappel" else _format_event_line(obj)
-        if not line:
-            continue
-        button = (
-            _CancelRappelButton(bot, hub_store, rappels, user_id, item_id, brave_key=brave_key)
-            if kind == "rappel"
-            else _DeleteAgendaButton(bot, hub_store, rappels, user_id, item_id, brave_key=brave_key)
-        )
-        children.append(discord.ui.Section(discord.ui.TextDisplay(line), accessory=button))
-    if len(combined) > 6:
-        children.append(discord.ui.TextDisplay(f"-# +{len(combined) - 6} autre(s)"))
-    if not combined:
+    for r in reminders_sorted[:6]:
+        children.append(discord.ui.Section(
+            discord.ui.TextDisplay(_format_rappel_line(r)),
+            accessory=_CancelRappelButton(
+                bot, hub_store, rappels, user_id, r.id, channel_id, brave_key=brave_key,
+            ),
+        ))
+    if len(reminders_sorted) > 6:
+        children.append(discord.ui.TextDisplay(f"-# +{len(reminders_sorted) - 6} autre(s)"))
+    if not reminders_sorted:
         children.append(discord.ui.TextDisplay("-# Rien de prévu."))
     children.append(discord.ui.Section(
-        discord.ui.TextDisplay("-# Ajoute un événement à ton agenda."),
-        accessory=_AddAgendaButton(bot, hub_store, rappels, user_id, brave_key=brave_key),
+        discord.ui.TextDisplay("-# Ajoute un rappel à ton agenda."),
+        accessory=_AddRappelButton(bot, hub_store, rappels, user_id, channel_id, brave_key=brave_key),
     ))
     children.append(discord.ui.Separator())
 
@@ -471,7 +499,8 @@ def build_me_hub_layout(
     config_section = discord.ui.Section(
         config_line,
         accessory=_ConfigureHubButton(
-            bot, hub_store, rappels, user_id, data.config_first_name, data.config_city, topics_str,
+            bot, hub_store, rappels, user_id, channel_id,
+            data.config_first_name, data.config_city, topics_str,
             brave_key=brave_key,
         ),
     )
@@ -489,13 +518,14 @@ async def build_me_hub_view(
     *,
     brave_key: str = "",
     refresh_news: bool = False,
+    channel_id: int = 0,
 ) -> discord.ui.LayoutView:
     data = await fetch_hub_data(
         bot, user_id, hub_store, rappels,
         brave_key=brave_key,
         refresh_news=refresh_news,
     )
-    return build_me_hub_layout(data, hub_store, user_id, bot, rappels, brave_key)
+    return build_me_hub_layout(data, hub_store, user_id, bot, rappels, brave_key, channel_id=channel_id)
 
 
 async def show_me_hub(
@@ -507,5 +537,8 @@ async def show_me_hub(
     brave_key: str = "",
 ) -> None:
     await interaction.response.defer(ephemeral=True)
-    view = await build_me_hub_view(bot, interaction.user.id, hub_store, rappels, brave_key=brave_key)
+    view = await build_me_hub_view(
+        bot, interaction.user.id, hub_store, rappels, brave_key=brave_key,
+        channel_id=interaction.channel_id or 0,
+    )
     await interaction.followup.send(view=view, ephemeral=True)

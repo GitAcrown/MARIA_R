@@ -2,16 +2,13 @@
 
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from common.dataio import CogData, DictTableBuilder
-from common.timezones import PARIS_TZ
 
 MAX_TOPICS = 3
-MAX_AGENDA_EVENTS = 20
 NEWS_STALE_AFTER = timedelta(hours=20)
 
 
@@ -44,11 +41,10 @@ class UserHubConfig:
     city: str = ""
     topics: list[str] = field(default_factory=list)
     news_cache: dict = field(default_factory=dict)
-    agenda: list[dict] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not self.first_name and not self.city and not self.topics and not self.agenda
+        return not self.first_name and not self.city and not self.topics
 
     def prompt_line(self) -> str:
         """Ligne succincte pour injection dans le prompt."""
@@ -104,7 +100,6 @@ class UserHubStore:
             city=(data.get("city") or "").strip(),
             topics=list(data.get("topics") or [])[:MAX_TOPICS],
             news_cache=dict(data.get("news_cache") or {}),
-            agenda=list(data.get("agenda") or [])[:MAX_AGENDA_EVENTS],
         )
 
     def save(self, user_id: int, config: UserHubConfig) -> None:
@@ -113,7 +108,6 @@ class UserHubStore:
             "city": config.city.strip(),
             "topics": config.topics[:MAX_TOPICS],
             "news_cache": config.news_cache,
-            "agenda": config.agenda[:MAX_AGENDA_EVENTS],
         }
         self._db.settings("user_profiles").set(self._key(user_id), json.dumps(payload, ensure_ascii=False))
 
@@ -162,36 +156,3 @@ class UserHubStore:
             "date": now.strftime("%Y-%m-%d"),
         }
         self.save(user_id, config)
-
-    def add_agenda_event(self, user_id: int, title: str, event_date: date) -> UserHubConfig:
-        config = self.get(user_id)
-        # On élague les événements passés à chaque ajout pour ne pas accumuler indéfiniment.
-        config.agenda = [e for e in config.agenda if not _agenda_event_is_past(e)]
-        config.agenda.append({
-            "id": uuid.uuid4().hex[:8],
-            "title": title.strip()[:100],
-            "date": event_date.isoformat(),
-        })
-        config.agenda.sort(key=lambda e: e.get("date", ""))
-        config.agenda = config.agenda[:MAX_AGENDA_EVENTS]
-        self.save(user_id, config)
-        return config
-
-    def remove_agenda_event(self, user_id: int, event_id: str) -> UserHubConfig:
-        config = self.get(user_id)
-        config.agenda = [e for e in config.agenda if e.get("id") != event_id]
-        self.save(user_id, config)
-        return config
-
-    def get_upcoming_agenda(self, user_id: int, limit: int = 3) -> list[dict]:
-        config = self.get(user_id)
-        upcoming = [e for e in config.agenda if not _agenda_event_is_past(e)]
-        upcoming.sort(key=lambda e: e.get("date", ""))
-        return upcoming[:limit]
-
-
-def _agenda_event_is_past(event: dict) -> bool:
-    try:
-        return date.fromisoformat(event.get("date", "")) < datetime.now(PARIS_TZ).date()
-    except ValueError:
-        return False
