@@ -39,9 +39,12 @@ from cogs.chat.tools_discord import build_discord_tools
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
 _NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
 
-# Détection d'une date JJ/MM/AAAA dans un message — réaction pour créer un rappel en un clic.
-_DATE_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b')
+# Détection d'une date JJ/MM/AAAA ou JJ/MM (année en cours) dans un message —
+# réaction pour créer un rappel en un clic.
+_DATE_FULL_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b')
+_DATE_SHORT_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})\b(?!/\d)')
 _DATE_REACTION_EMOJI = "📅"
+_DATE_REACTION_TTL = 3600  # 1h avant de retirer la réaction proposée par MARIA
 
 _REMINDER_FROM_TEXT_SCHEMA = {
     "type": "json_schema",
@@ -60,7 +63,11 @@ _REMINDER_FROM_TEXT_SCHEMA = {
                 },
                 "execute_at": {
                     "type": ["string", "null"],
-                    "description": "Date/heure ISO 8601 (Europe/Paris, sans décalage) ou null si indéterminable",
+                    "description": (
+                        "Date/heure ISO 8601 (Europe/Paris, sans décalage) ou null si indéterminable. "
+                        "Si le message donne juste JJ/MM (sans année), utilise l'année en cours, ou "
+                        "l'année suivante si cette date est déjà passée."
+                    ),
                 },
                 "recurrence": {
                     "type": "string",
@@ -237,8 +244,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Dates dans le tchat",
-        "› Une date JJ/MM/AAAA dans un message ? MARIA réagit avec 📅 — clique pour te créer un rappel "
-        "(elle lit le reste du message pour deviner de quoi il s'agit).\n"
+        "› Une date JJ/MM/AAAA ou JJ/MM dans un message ? MARIA réagit avec 📅 — clique pour te créer un "
+        "rappel (elle lit le reste du message pour deviner de quoi il s'agit).\n"
         f"› {SETTINGS} `/chatbot datedetect` — active/désactive cette détection sur un salon.",
     ),
     (
@@ -405,21 +412,36 @@ class Chat(commands.Cog):
         return {}
 
     def _has_valid_date(self, content: str) -> bool:
-        """Vrai si le message contient une date JJ/MM/AAAA calendaire valide."""
-        for m in _DATE_RE.finditer(content):
+        """Vrai si le message contient une date JJ/MM/AAAA ou JJ/MM calendaire valide."""
+        for m in _DATE_FULL_RE.finditer(content):
             day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
             try:
                 date_cls(year, month, day)
                 return True
             except ValueError:
                 continue
+        for m in _DATE_SHORT_RE.finditer(content):
+            day, month = int(m.group(1)), int(m.group(2))
+            try:
+                date_cls(datetime.now(PARIS_TZ).year, month, day)
+                return True
+            except ValueError:
+                continue
         return False
 
+    async def _expire_date_reaction(self, message: discord.Message) -> None:
+        """Retire la réaction 📅 proposée par MARIA après un long délai (laisse le temps de cliquer)."""
+        await asyncio.sleep(_DATE_REACTION_TTL)
+        try:
+            await message.remove_reaction(_DATE_REACTION_EMOJI, self.bot.user)
+        except discord.HTTPException:
+            pass
+
     async def _create_reminder_from_message(self, message: discord.Message, requester: discord.abc.User) -> None:
-        """Crée un rappel pour `requester` à partir d'une date JJ/MM/AAAA détectée dans `message`."""
+        """Crée un rappel pour `requester` à partir d'une date JJ/MM/AAAA ou JJ/MM détectée dans `message`."""
         if self.rappels.count_pending(requester.id) >= REMINDER_MAX_PENDING:
             await message.channel.send(
-                f"{requester.mention} max {REMINDER_MAX_PENDING} rappels en attente.", delete_after=15,
+                f"{requester.mention} max {REMINDER_MAX_PENDING} rappels en attente.", delete_after=10,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
             return
@@ -429,8 +451,8 @@ class Chat(commands.Cog):
                 "role": "system",
                 "content": (
                     f"Nous sommes le {now_str} (fuseau Europe/Paris). Le message ci-dessous contient une "
-                    "date JJ/MM/AAAA. Extrait-en un rappel : description concise et impersonnelle de "
-                    "l'événement/tâche (sans répéter la date), date/heure ISO 8601 locale correspondante "
+                    "date JJ/MM/AAAA ou JJ/MM. Extrait-en un rappel : description concise et impersonnelle "
+                    "de l'événement/tâche (sans répéter la date), date/heure ISO 8601 locale correspondante "
                     "(09:00 si l'heure n'est pas précisée), et une éventuelle récurrence."
                 ),
             },
@@ -455,7 +477,7 @@ class Chat(commands.Cog):
         except Exception as e:
             logger.warning(f"Extraction rappel depuis message échouée : {e}")
             await message.channel.send(
-                f"{requester.mention} date pas exploitable pour un rappel.", delete_after=15,
+                f"{requester.mention} date pas exploitable pour un rappel.", delete_after=10,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
             return
@@ -466,9 +488,11 @@ class Chat(commands.Cog):
         ts = int(execute_at.timestamp())
         repeat_str = " <:repeat:1525261027883745342>" if recurrence != RECURRENCE_NONE else ""
         await message.reply(
-            f"📅 **Rappel #{rid}**{repeat_str} créé pour {requester.mention} · <t:{ts}:F> (<t:{ts}:R>)\n{description}",
+            f"> **#{rid}**{repeat_str} · <t:{ts}:f> (<t:{ts}:R>)\n> {description}"
+            f"\n-# Rappel créé · {requester.mention}",
             mention_author=False,
             allowed_mentions=discord.AllowedMentions(users=True),
+            delete_after=10,
         )
 
     def _should_respond(self, message: discord.Message) -> bool:
@@ -630,6 +654,7 @@ class Chat(commands.Cog):
         if self._channel_config(message.channel).get("date_detect", False) and self._has_valid_date(message.content):
             try:
                 await message.add_reaction(_DATE_REACTION_EMOJI)
+                asyncio.create_task(self._expire_date_reaction(message))
             except discord.HTTPException:
                 pass
 
@@ -778,7 +803,7 @@ class Chat(commands.Cog):
             f"Transcription automatique des messages vocaux **{state}** sur ce salon.", ephemeral=True
         )
 
-    @chatbot.command(name="datedetect", description="Définit si MARIA détecte les dates JJ/MM/AAAA pour proposer un rappel")
+    @chatbot.command(name="datedetect", description="Définit si MARIA détecte les dates (JJ/MM/AAAA ou JJ/MM) pour proposer un rappel")
     @app_commands.describe(actif="Activer ou désactiver la détection de dates")
     async def chatbot_datedetect(self, interaction: discord.Interaction, actif: bool) -> None:
         ch = interaction.channel
@@ -788,7 +813,7 @@ class Chat(commands.Cog):
         self.data.get(target).settings("channel_config")["date_detect"] = actif
         state = "activée" if actif else "désactivée"
         await interaction.response.send_message(
-            f"Détection de dates (JJ/MM/AAAA → {_DATE_REACTION_EMOJI} rappel) **{state}** sur ce salon.",
+            f"Détection de dates (JJ/MM/AAAA ou JJ/MM → {_DATE_REACTION_EMOJI} rappel) **{state}** sur ce salon.",
             ephemeral=True,
         )
 
