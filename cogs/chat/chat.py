@@ -17,7 +17,7 @@ from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
 from common.hub import UserHubStore
 from common.llm import MariaGptApi, Tool
-from common.rappels import KIND_EVENT, Rappel, RappelStore, RappelWorker
+from common.rappels import KIND_EVENT, RECURRENCE_NONE, Rappel, RappelStore, RappelWorker
 from common.timezones import PARIS_TZ
 from common.widgets import build_widget
 
@@ -195,7 +195,10 @@ class RappelsView(discord.ui.LayoutView):
         for r in rappels:
             ts = int(r.execute_at.timestamp())
             desc = r.description[:100] + ("…" if len(r.description) > 100 else "")
-            rec_str = {"daily": " · ↻ quotidien", "weekly": " · ↻ hebdo"}.get(r.recurrence, "")
+            rec_str = {
+                "daily": " · <:repeat:1525261027883745342> quotidien",
+                "weekly": " · <:repeat:1525261027883745342> hebdo",
+            }.get(r.recurrence, "")
             text = discord.ui.TextDisplay(f"> **#{r.id}**{rec_str} · <t:{ts}:f> (<t:{ts}:R>)\n> {desc}")
             children.append(discord.ui.Section(text, accessory=_CancelButton(r.id, user_id, store)))
         self.add_item(discord.ui.Container(*children))
@@ -368,7 +371,8 @@ class Chat(commands.Cog):
             await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
             return
 
-        content = f"{r.description}\n-# Rappel · <@{r.user_id}> · <t:{ts}:R>"
+        repeat_str = " <:repeat:1525261027883745342>" if r.recurrence != RECURRENCE_NONE else ""
+        content = f"{r.description}\n-# Rappel{repeat_str} · <@{r.user_id}> · <t:{ts}:R>"
         mentions = discord.AllowedMentions(users=True)
 
         orig = None

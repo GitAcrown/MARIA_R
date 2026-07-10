@@ -50,7 +50,10 @@ def _format_reminders(rappels: list[Rappel]) -> list[str]:
     for r in rappels[:5]:
         ts = int(r.execute_at.timestamp())
         desc = r.description[:80] + ("…" if len(r.description) > 80 else "")
-        rec = {"daily": " ↻", "weekly": " ↻"}.get(r.recurrence, "")
+        rec = {
+            "daily": " <:repeat:1525261027883745342>",
+            "weekly": " <:repeat:1525261027883745342>",
+        }.get(r.recurrence, "")
         lines.append(f"› **#{r.id}**{rec} · <t:{ts}:R> — {desc}")
     if len(rappels) > 5:
         lines.append(f"-# +{len(rappels) - 5} autre(s) rappel(s)")
