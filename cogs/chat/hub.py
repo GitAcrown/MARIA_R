@@ -8,10 +8,16 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
-from common.hub import UserHubStore, parse_topics
+from common.hub import UserHubStore, hashtag, parse_topics
 from common.rappels import Rappel, RappelStore
-from common.timezones import PARIS_TZ
+from common.timezones import PARIS_TZ, format_french_date
 from common.news import brave_news, build_news_summary
+
+try:
+    from cogs.meteo.meteo import _emoji as _weather_emoji
+except ImportError:
+    def _weather_emoji(icon: str) -> str:
+        return "🌡️"
 
 logger = logging.getLogger("MARIA.Hub")
 
@@ -32,9 +38,11 @@ def _format_weather(city: str, raw: dict) -> str:
     main = raw.get("main", {})
     temp = round(main.get("temp", 0))
     feels = round(main.get("feels_like", temp))
-    desc = (raw.get("weather") or [{}])[0].get("description", "")
+    weather = (raw.get("weather") or [{}])[0]
+    desc = weather.get("description", "")
+    icon = weather.get("icon", "01d")
     city_name = raw.get("name") or city
-    return f"**{city_name}** · {temp}°C (ressenti {feels}°C) · {desc}"
+    return f"{_weather_emoji(icon)} **{city_name}** · {temp}°C (ressenti {feels}°C) · {desc}"
 
 
 def _format_reminders(rappels: list[Rappel]) -> list[str]:
@@ -218,8 +226,10 @@ def build_me_hub_layout(
     brave_key: str = "",
 ) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=180)
+    today_str = format_french_date(datetime.now(PARIS_TZ))
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay("## Ton hub"),
+        discord.ui.TextDisplay("## <:hub:1525259996315652209> Ton hub"),
+        discord.ui.TextDisplay(f"-# {today_str}"),
         discord.ui.Separator(),
     ]
 
@@ -230,29 +240,30 @@ def build_me_hub_layout(
         children.append(discord.ui.Separator())
 
     if data.weather_line:
-        children.append(discord.ui.TextDisplay(f"**Météo**\n{data.weather_line}"))
+        children.append(discord.ui.TextDisplay(f"### Météo\n{data.weather_line}"))
         children.append(discord.ui.Separator())
 
     if data.reminders_lines:
         body = "\n".join(data.reminders_lines)
-        children.append(discord.ui.TextDisplay(f"**Rappels**\n{body}"))
+        children.append(discord.ui.TextDisplay(f"### Rappels\n{body}"))
         children.append(discord.ui.Separator())
     elif not data.is_empty:
-        children.append(discord.ui.TextDisplay("**Rappels**\n-# Aucun rappel en attente."))
+        children.append(discord.ui.TextDisplay("### Rappels\n-# Aucun rappel en attente."))
         children.append(discord.ui.Separator())
 
     if data.config_topics:
+        topics_label = " ".join(hashtag(t) for t in data.config_topics)
         if data.news_text:
             news_display = data.news_text[:900] + ("…" if len(data.news_text) > 900 else "")
-            topics_label = ", ".join(data.config_topics)
-            children.append(discord.ui.TextDisplay(f"**Actu** · {topics_label}\n{news_display}"))
+            children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n{news_display}"))
         else:
-            children.append(discord.ui.TextDisplay("**Actu**\n-# Chargement ou indisponible."))
+            children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n-# Chargement ou indisponible."))
         children.append(discord.ui.Separator())
 
     topics_str = ", ".join(data.config_topics)
+    topics_display = " ".join(hashtag(t) for t in data.config_topics) if data.config_topics else "—"
     config_line = discord.ui.TextDisplay(
-        f"-# Ville : {data.config_city or '—'} · Sujets : {topics_str or '—'}"
+        f"-# Ville : {data.config_city or '—'} · Sujets : {topics_display}"
     )
     config_section = discord.ui.Section(
         config_line,

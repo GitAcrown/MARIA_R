@@ -1,6 +1,7 @@
 """Hub personnel utilisateur — config structurée (ville, sujets, cache actu)."""
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -9,6 +10,11 @@ from common.dataio import CogData, DictTableBuilder
 
 MAX_TOPICS = 5
 NEWS_STALE_AFTER = timedelta(hours=20)
+
+
+def hashtag(topic: str) -> str:
+    """Formate un sujet en hashtag pour l'affichage : 'jeux vidéo' → '#jeuxvidéo'."""
+    return "#" + re.sub(r"\s+", "", topic)
 
 
 @dataclass

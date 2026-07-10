@@ -73,6 +73,9 @@ class MariaLLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["parallel_tool_calls"] = True
+            # Les modèles gpt-5.x à raisonnement natif refusent les function tools
+            # sur /v1/chat/completions sauf si reasoning_effort='none' est explicite.
+            kwargs["reasoning_effort"] = "none"
         if response_format:
             kwargs["response_format"] = response_format
 
