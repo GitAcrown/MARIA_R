@@ -312,7 +312,7 @@ class _ConfigureHubButton(discord.ui.Button):
     ):
         super().__init__(
             style=discord.ButtonStyle.primary,
-            emoji=discord.PartialEmoji.from_str("<:hub_settings:1525413373381054574>"),
+            emoji=discord.PartialEmoji.from_str("<:hub_settings:1525414682096304228>"),
         )
         self.bot = bot
         self.hub_store = hub_store
@@ -403,7 +403,10 @@ class _AddRappelButton(discord.ui.Button):
         *,
         brave_key: str = "",
     ):
-        super().__init__(label="✚", style=discord.ButtonStyle.secondary)
+        super().__init__(
+            style=discord.ButtonStyle.secondary, 
+            emoji=discord.PartialEmoji.from_str("<:plus:1525414681181945867>")
+            )
         self.bot = bot
         self.hub_store = hub_store
         self.rappels = rappels
@@ -433,7 +436,10 @@ class _CancelRappelButton(discord.ui.Button):
         *,
         brave_key: str = "",
     ):
-        super().__init__(label="✕", style=discord.ButtonStyle.secondary)
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str("<:cross:1525414680120656042>"),
+        )
         self.bot = bot
         self.hub_store = hub_store
         self.rappels = rappels
