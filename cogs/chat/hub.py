@@ -405,7 +405,7 @@ class _AddRappelButton(discord.ui.Button):
     ):
         super().__init__(
             style=discord.ButtonStyle.secondary, 
-            emoji=discord.PartialEmoji.from_str("<:plus:1525414681181945867>")
+            emoji=discord.PartialEmoji.from_str("<:plus:1525415530624843867>")
             )
         self.bot = bot
         self.hub_store = hub_store
@@ -438,7 +438,7 @@ class _CancelRappelButton(discord.ui.Button):
     ):
         super().__init__(
             style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str("<:cross:1525414680120656042>"),
+            emoji=discord.PartialEmoji.from_str("<:cross:1525415531555983370>"),
         )
         self.bot = bot
         self.hub_store = hub_store
