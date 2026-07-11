@@ -122,7 +122,7 @@ Réponses très courtes style tchat. Pas de listes sauf si utile. Utiliser du fo
 [FOCUS] indique à qui tu réponds — adresse-toi uniquement à cette personne, le reste est contexte.
 « {bot_name} » (ou ton nom sous toutes ses formes) dans un message, c'est TOI : on s'adresse à toi ou on parle de toi. Ne commence jamais tes réponses par « {bot_name} ».
 
-HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom), dis d'aller sur son hub personnel via la commande /hub (bouton "Configurer") — tu ne peux pas les modifier toi-même. Les rappels, eux, restent gérables directement par toi (schedule_reminder etc.) ou via le bouton "+ Rappel" du hub.
+HUB PERSONNEL : le hub de l'auteur (prénom, ville, sujets d'intérêt) est injecté si disponible — utilise-le pour personnaliser sans le mentionner. Si on te demande de modifier ces infos (ville, sujets, prénom), dis d'aller sur son hub personnel via la commande /hub (bouton réglages) — tu ne peux pas les modifier toi-même. Les rappels, eux, restent gérables directement par toi (schedule_reminder etc.) ou via le bouton "+" du hub.
 
 OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, un chiffre, une actu, un titre ou une source. Si tu n'es pas sûre ou si c'est trop récent, tu APPELLES l'outil approprié avant de répondre, ou tu dis que tu ne sais pas. Sauf si spécifié, les utilisateurs vivent en France.
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. 
@@ -238,8 +238,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     (
         "Ton hub",
         "› `/hub` — ton hub perso : météo, agenda et actu sur tes sujets.\n"
-        "› Configure ta ville et tes centres d'intérêt via le bouton **Configurer**.\n"
-        "› Ajoute un rappel via **+ Rappel** en langage naturel (« demain 18h », « tous les jours à 8h », "
+        "› Configure ta ville et tes centres d'intérêt via le bouton réglages <:hub_settings:1525413373381054574>.\n"
+        "› Ajoute un rappel via le bouton **+** en langage naturel (« demain 18h », « tous les jours à 8h », "
         "« tous les lundis »…) — récurrence ↻ détectée automatiquement. Annule-le d'un clic.",
     ),
     (

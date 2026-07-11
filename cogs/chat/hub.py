@@ -168,9 +168,13 @@ async def _fetch_news(
     date_str = datetime.now(PARIS_TZ).strftime("%d/%m/%Y")
     tasks = [asyncio.to_thread(brave_news, brave_key, topic, 3) for topic in topics[:3]]
     results_lists = await asyncio.gather(*tasks)
+    # Intercalé (round-robin) plutôt que séquentiel : sinon le 1er sujet peut, à lui
+    # seul, remplir tout le quota de lignes de build_news_summary avant les suivants.
     all_results: list[dict] = []
-    for res in results_lists:
-        all_results.extend(res)
+    for i in range(max((len(r) for r in results_lists), default=0)):
+        for res in results_lists:
+            if i < len(res):
+                all_results.append(res[i])
 
     summary = build_news_summary(all_results, date_str)
     if not summary:
@@ -306,7 +310,10 @@ class _ConfigureHubButton(discord.ui.Button):
         *,
         brave_key: str = "",
     ):
-        super().__init__(label="Configurer", style=discord.ButtonStyle.primary)
+        super().__init__(
+            style=discord.ButtonStyle.primary,
+            emoji=discord.PartialEmoji.from_str("<:hub_settings:1525413373381054574>"),
+        )
         self.bot = bot
         self.hub_store = hub_store
         self.rappels = rappels
@@ -396,7 +403,7 @@ class _AddRappelButton(discord.ui.Button):
         *,
         brave_key: str = "",
     ):
-        super().__init__(label="+ Rappel", style=discord.ButtonStyle.secondary)
+        super().__init__(label="✚", style=discord.ButtonStyle.secondary)
         self.bot = bot
         self.hub_store = hub_store
         self.rappels = rappels
@@ -461,7 +468,7 @@ def build_me_hub_layout(
     today_str = format_french_date(datetime.now(PARIS_TZ))
     title = _greeting_title(data.config_first_name, data.tz_offset)
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"## <:hub:1525259996315652209> {title}"),
+        discord.ui.TextDisplay(f"## <:hub:1525413532701560982> {title}"),
         discord.ui.TextDisplay(f"-# {today_str}"),
         discord.ui.Separator(),
     ]
