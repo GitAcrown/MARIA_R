@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -102,6 +103,8 @@ class HubDisplayData:
     config_city: str = ""
     config_topics: list[str] = field(default_factory=list)
     weather_line: str = ""
+    weather_alert: str = ""
+    forecast_line: str = ""
     reminders: list[Rappel] = field(default_factory=list)
     news_text: str = ""
     is_empty: bool = True
@@ -147,14 +150,59 @@ def _format_rappel_line(r: Rappel) -> str:
     return f"›{rec} <t:{ts}:R> — {desc}"
 
 
-async def _fetch_weather(bot: commands.Bot, city: str) -> tuple[str, Optional[int]]:
-    """Renvoie (ligne météo formatée, offset UTC en secondes déduit de la ville)."""
+_RAIN_ICONS = {"09", "10", "11", "13"}  # pluie, averses, orage, neige
+
+
+def _weather_alert(forecast_raw: dict) -> str:
+    """Alerte si pluie/orage/neige prévu dans les prochaines ~24h (8 créneaux de 3h)."""
+    now = datetime.now(PARIS_TZ)
+    for item in forecast_raw.get("list", [])[:8]:
+        weather = (item.get("weather") or [{}])[0]
+        icon = weather.get("icon", "")
+        if icon[:2] not in _RAIN_ICONS:
+            continue
+        dt = datetime.fromtimestamp(item["dt"], tz=PARIS_TZ)
+        when = "aujourd'hui" if dt.date() == now.date() else "demain"
+        desc = weather.get("description", "").capitalize()
+        return f"⚠️ {desc} prévu {when} vers {dt.strftime('%Hh')}"
+    return ""
+
+
+def _tomorrow_forecast_line(forecast_raw: dict) -> str:
+    """Ligne compacte de prévision pour le lendemain."""
+    tomorrow = datetime.now(PARIS_TZ).date() + timedelta(days=1)
+    slots = [
+        item for item in forecast_raw.get("list", [])
+        if datetime.fromtimestamp(item["dt"], tz=PARIS_TZ).date() == tomorrow
+    ]
+    if not slots:
+        return ""
+    temps = [s["main"]["temp"] for s in slots]
+    icons = [(s.get("weather") or [{}])[0].get("icon", "01d") for s in slots]
+    descs = [(s.get("weather") or [{}])[0].get("description", "") for s in slots]
+    icon = Counter(icons).most_common(1)[0][0]
+    desc = Counter(descs).most_common(1)[0][0]
+    t_max, t_min = round(max(temps)), round(min(temps))
+    return f"-# Demain {_weather_emoji(icon)} {t_max}°/{t_min}° · {desc}"
+
+
+async def _fetch_weather(bot: commands.Bot, city: str) -> tuple[str, Optional[int], str, str]:
+    """Renvoie (ligne météo, offset UTC déduit de la ville, alerte, prévision demain)."""
     meteo = bot.get_cog("Meteo")
     if meteo is None or not hasattr(meteo, "_fetch_current"):
-        return "-# Météo indisponible (cog Meteo absent).", None
+        return "-# Météo indisponible (cog Meteo absent).", None, "", ""
     raw = await asyncio.to_thread(meteo._fetch_current, city)
     tz_offset = raw.get("timezone") if "error" not in raw else None
-    return _format_weather(city, raw), tz_offset
+    weather_line = _format_weather(city, raw)
+
+    alert, forecast_line = "", ""
+    if "error" not in raw and hasattr(meteo, "_fetch_forecast"):
+        forecast_raw = await asyncio.to_thread(meteo._fetch_forecast, city)
+        if "error" not in forecast_raw:
+            alert = _weather_alert(forecast_raw)
+            forecast_line = _tomorrow_forecast_line(forecast_raw)
+
+    return weather_line, tz_offset, alert, forecast_line
 
 
 async def _fetch_news(
@@ -220,7 +268,7 @@ async def fetch_hub_data(
                 logger.warning(f"Hub fetch {name} failed: {result}")
                 continue
             if name == "weather":
-                data.weather_line, data.tz_offset = result
+                data.weather_line, data.tz_offset, data.weather_alert, data.forecast_line = result
             elif name == "news":
                 data.news_text = result
 
@@ -489,6 +537,10 @@ def build_me_hub_layout(
 
     if data.weather_line:
         children.append(discord.ui.TextDisplay(f"{data.weather_line}"))
+        if data.weather_alert:
+            children.append(discord.ui.TextDisplay(data.weather_alert))
+        if data.forecast_line:
+            children.append(discord.ui.TextDisplay(data.forecast_line))
         children.append(discord.ui.Separator())
 
     # Agenda : tous les rappels (récurrents ou non), triés chronologiquement,
