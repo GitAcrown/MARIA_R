@@ -27,7 +27,7 @@ def brave_news(api_key: str, query: str, n: int = 6) -> list[dict]:
         return []
 
 
-def build_news_summary(results: list[dict], date_str: str) -> str:
+def build_news_summary(results: list[dict], date_str: str, max_lines: int = 9) -> str:
     """Construit un résumé compact (avec liens Markdown) à partir des résultats Brave."""
     lines: list[str] = []
     seen: set[str] = set()
@@ -44,7 +44,7 @@ def build_news_summary(results: list[dict], date_str: str) -> str:
         if url:
             line += " ([lien](" + url + "))"
         lines.append(line)
-        if len(lines) >= 7:
+        if len(lines) >= max_lines:
             break
     if not lines:
         return ""
