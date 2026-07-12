@@ -539,8 +539,6 @@ def build_me_hub_layout(
         children.append(discord.ui.TextDisplay(f"{data.weather_line}"))
         if data.weather_alert:
             children.append(discord.ui.TextDisplay(data.weather_alert))
-        if data.forecast_line:
-            children.append(discord.ui.TextDisplay(data.forecast_line))
         children.append(discord.ui.Separator())
 
     # Agenda : tous les rappels (récurrents ou non), triés chronologiquement,
