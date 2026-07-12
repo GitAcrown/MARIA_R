@@ -9,7 +9,7 @@ from typing import Optional
 from common.dataio import CogData, DictTableBuilder
 
 MAX_TOPICS = 3
-NEWS_STALE_AFTER = timedelta(hours=20)
+NEWS_STALE_AFTER = timedelta(hours=6)
 
 
 def hashtag(topic: str) -> str:

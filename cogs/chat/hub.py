@@ -313,6 +313,7 @@ class _ConfigureHubButton(discord.ui.Button):
     ):
         super().__init__(
             style=discord.ButtonStyle.primary,
+            label="Configurer",
             emoji=discord.PartialEmoji.from_str("<:hub_settings:1525414682096304228>"),
         )
         self.bot = bot
@@ -405,7 +406,7 @@ class _AddRappelButton(discord.ui.Button):
         brave_key: str = "",
     ):
         super().__init__(
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.success,
             emoji=discord.PartialEmoji.from_str("<:reminder:1525808272341336236>"),
         )
         self.bot = bot
@@ -455,43 +456,6 @@ class _CancelRappelButton(discord.ui.Button):
         self.rappels.cancel(self.rappel_id, self.user_id)
         await interaction.response.defer()
         data = await fetch_hub_data(self.bot, self.user_id, self.hub_store, self.rappels, brave_key=self.brave_key)
-        view = build_me_hub_layout(
-            data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key,
-            channel_id=self.channel_id,
-        )
-        await interaction.edit_original_response(view=view)
-
-
-class _RefreshNewsButton(discord.ui.Button):
-    def __init__(
-        self,
-        bot: commands.Bot,
-        hub_store: UserHubStore,
-        rappels: RappelStore,
-        user_id: int,
-        channel_id: int,
-        *,
-        brave_key: str = "",
-    ):
-        super().__init__(
-            style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str("<:repeat:1525261027883745342>"),
-        )
-        self.bot = bot
-        self.hub_store = hub_store
-        self.rappels = rappels
-        self.user_id = user_id
-        self.channel_id = channel_id
-        self.brave_key = brave_key
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("C'est pas ton hub.", ephemeral=True)
-        await interaction.response.defer()
-        data = await fetch_hub_data(
-            self.bot, self.user_id, self.hub_store, self.rappels,
-            brave_key=self.brave_key, refresh_news=True,
-        )
         view = build_me_hub_layout(
             data, self.hub_store, self.user_id, self.bot, self.rappels, self.brave_key,
             channel_id=self.channel_id,
@@ -556,7 +520,6 @@ def build_me_hub_layout(
     topics_str = ", ".join(data.config_topics)
     children.append(discord.ui.ActionRow(
         _AddRappelButton(bot, hub_store, rappels, user_id, channel_id, brave_key=brave_key),
-        _RefreshNewsButton(bot, hub_store, rappels, user_id, channel_id, brave_key=brave_key),
         _ConfigureHubButton(
             bot, hub_store, rappels, user_id, channel_id,
             data.config_first_name, data.config_city, topics_str,
