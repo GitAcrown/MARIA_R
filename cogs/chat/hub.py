@@ -561,7 +561,7 @@ def build_me_hub_layout(
     if data.config_topics:
         topics_label = " ".join(hashtag(t) for t in data.config_topics)
         if data.news_text:
-            news_display = truncate_lines(data.news_text, 900)
+            news_display = truncate_lines(data.news_text, 1200)
             children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n{news_display}"))
         else:
             children.append(discord.ui.TextDisplay(f"### Actu · {topics_label}\n-# Chargement ou indisponible."))
