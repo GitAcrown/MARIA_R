@@ -10,14 +10,13 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.discord_ui import layout_with_commentary
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
 
 logger = logging.getLogger("MARIA.Meteo")
 
 OWM_BASE = "https://api.openweathermap.org/data/2.5"
-OWM_ICON  = "https://openweathermap.org/img/wn/{}@2x.png"
 
 _ICON_EMOJI: dict[str, str] = {
     "01": "☀️", "02": "🌤️", "03": "⛅", "04": "☁️",
@@ -135,7 +134,6 @@ def _current_container(city: str, d: dict) -> discord.ui.Container:
         f"# {temp}°C\n"
         f"-# {description}  ·  ressenti **{feels}°C**  ·  {temp_min}° / {temp_max}°"
     )
-    main_section = section_with_thumbnail(temp_block, OWM_ICON.format(icon_code))
 
     sep2    = discord.ui.Separator()
     details = discord.ui.TextDisplay(
@@ -147,7 +145,7 @@ def _current_container(city: str, d: dict) -> discord.ui.Container:
     sep3   = discord.ui.Separator()
     footer = discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC  ·  OpenWeatherMap")
 
-    return discord.ui.Container(header, sep1, main_section, sep2, details, sep3, footer)
+    return discord.ui.Container(header, sep1, temp_block, sep2, details, sep3, footer)
 
 
 def _forecast_container(city: str, d: dict) -> discord.ui.Container:

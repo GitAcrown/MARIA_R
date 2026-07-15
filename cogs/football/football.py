@@ -22,7 +22,7 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.discord_ui import layout_with_commentary
 from common.emojis import DIRECT, FOOTBALL, FOOTBALL_PLAYER
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
@@ -341,12 +341,9 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
         ko = _kickoff_str(fixture)
         score_line = f"### {home}  vs  {away}\n-# {ko}" if ko else f"### {home}  vs  {away}"
 
-    # Thumbnail logo de ligue
-    logo = league.get("logo")
     score_block = discord.ui.TextDisplay(score_line)
-    score_section = section_with_thumbnail(score_block, logo)
 
-    children: list = [header, discord.ui.Separator(), score_section]
+    children: list = [header, discord.ui.Separator(), score_block]
 
     # Buteurs
     scorers = _scorers_by_team(m.get("_events", []))
