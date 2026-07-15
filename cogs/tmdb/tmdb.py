@@ -168,17 +168,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     overview_short = overview[:380] + "…" if len(overview) > 380 else overview
     body_text      = f"{rating_ln}\n{overview_short}" if rating_ln else overview_short
     body_block     = discord.ui.TextDisplay(body_text or "-# Aucune description disponible.")
-
-    # Poster en MediaGallery (plus visible qu'une Thumbnail Section),
-    # sinon fallback vignette si la galerie échoue.
-    poster_item: Optional[discord.ui.Item] = None
-    if poster_url:
-        try:
-            gallery = discord.ui.MediaGallery()
-            gallery.add_item(media=poster_url, description=title[:256])
-            poster_item = gallery
-        except Exception:
-            poster_item = section_with_thumbnail(body_block, poster_url)
+    main_section   = section_with_thumbnail(body_block, poster_url)
 
     # Infos supplémentaires
     extra = []
@@ -197,14 +187,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     if tmdb_id:
         footer_parts.append(f"[TMDB](https://www.themoviedb.org/{media_type}/{tmdb_id})")
 
-    children: list = [header, sep1]
-    if poster_item is not None and isinstance(poster_item, discord.ui.MediaGallery):
-        children += [poster_item, discord.ui.Separator(), body_block]
-    elif poster_item is not None:
-        children.append(poster_item)  # Section avec thumbnail + body
-    else:
-        children.append(body_block)
-
+    children: list = [header, sep1, main_section]
     if footer_parts:
         children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {'  ·  '.join(footer_parts)}")]
     else:
