@@ -30,7 +30,7 @@ def section_with_thumbnail(body: discord.ui.Item, url: Optional[str]):
     if not url:
         return body
     try:
-        thumb = discord.ui.Thumbnail(discord.ui.UnfurledMediaItem(url=url))
+        thumb = discord.ui.Thumbnail(url)
         return discord.ui.Section(body, accessory=thumb)
     except Exception:
         return body
