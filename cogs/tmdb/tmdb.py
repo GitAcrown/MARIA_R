@@ -46,12 +46,16 @@ def _parse_query_year(query: str) -> tuple[str, Optional[int]]:
     return cleaned or query.strip(), year
 
 
-def _pick_best_result(results: list[dict], query: str, year: Optional[int] = None) -> dict:
-    """Choisit le meilleur résultat movie/tv (match exact + année → match exact → année → popularité).
+def _pick_best_result(results: list[dict], query: str, year: Optional[int] = None) -> Optional[dict]:
+    """Choisit le meilleur résultat movie/tv (match exact → popularité), ou None si aucun
+    résultat n'est fiable pour une année explicitement demandée.
 
     /search/multi renvoie un ordre de « pertinence » qui change avec language=
     et inclut des personnes. Après filtre, le 1er n'est pas toujours le bon —
     notamment pour un titre repris par plusieurs œuvres (ex: plusieurs "Backrooms").
+    Si l'utilisateur précise une année et qu'aucun résultat ne matche ni le titre
+    exact ni cette année, mieux vaut ne rien renvoyer qu'afficher un homonyme
+    populaire mais faux (ex: un vieux film qui remonte pour "X (2026)").
     """
     q = query.strip().casefold()
 
@@ -68,12 +72,21 @@ def _pick_best_result(results: list[dict], query: str, year: Optional[int] = Non
             or (r.get("original_title") or r.get("original_name") or "").strip().casefold() == q
         )
 
+    candidates = results
+    if year is not None:
+        candidates = [r for r in results if is_exact(r) or year_of(r) == year]
+        if not candidates:
+            return None
+    else:
+        exact = [r for r in results if is_exact(r)]
+        candidates = exact or results
+
     def score(r: dict) -> tuple[int, int, float]:
         exact = is_exact(r)
         year_match = year is not None and year_of(r) == year
         return (int(exact and year_match), int(exact or year_match), float(r.get("popularity") or 0.0))
 
-    return max(results, key=score)
+    return max(candidates, key=score)
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +245,10 @@ class TMDB(commands.Cog):
             results = [x for x in r.json().get("results", []) if x.get("media_type") in ("movie", "tv")]
             if not results:
                 return {"error": f"Aucun résultat pour : {query!r}"}
-            return {"first": _pick_best_result(results, clean_query, year)}
+            best = _pick_best_result(results, clean_query, year)
+            if best is None:
+                return {"error": f"Aucune fiche fiable pour {clean_query!r} ({year}) — probablement pas encore sur TMDB"}
+            return {"first": best}
         except requests.RequestException as e:
             return {"error": str(e)}
 
@@ -289,13 +305,17 @@ class TMDB(commands.Cog):
                     "(titre, note, synopsis, genres, durée/saisons). "
                     "Utilise le titre exact ou le plus précis possible. "
                     "Si tu n'es pas sûr du titre (description vague, «le film avec X», titre approximatif), "
-                    "utilise d'abord search_web pour identifier le bon titre, puis appelle search_media."
+                    "utilise d'abord search_web pour identifier le bon titre, puis appelle search_media. "
+                    "Questions de suivi SANS titre explicite ('et celui de 2026 ?', 'et la suite ?', "
+                    "'et la série ?') → réutiliser le titre du dernier search_media visible en contexte, "
+                    "complété par le nouvel élément (année, numéro…) — jamais transmettre le suivi brut "
+                    "(ex: pas juste 'celui de 2026', mais 'Backrooms 2026')."
                 ),
                 properties={
                     "query": {
                         "type":        "string",
                         "description": (
-                            "Titre du film ou de la série. "
+                            "Titre du film ou de la série, complet (jamais un simple pronom/suivi). "
                             "Ajouter l'année si ambigu (ex: 'Dune 2021')."
                         ),
                     },
