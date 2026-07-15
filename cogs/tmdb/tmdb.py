@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -28,24 +29,51 @@ def _poster_url(path: Optional[str]) -> Optional[str]:
     return TMDB_IMG.format(path)
 
 
-def _pick_best_result(results: list[dict], query: str) -> dict:
-    """Choisit le meilleur résultat movie/tv (match exact → popularité).
+_YEAR_RE = re.compile(r"\s*[\(\[]?(19\d{2}|20\d{2})[\)\]]?\s*$")
+
+
+def _parse_query_year(query: str) -> tuple[str, Optional[int]]:
+    """Sépare un éventuel millésime en fin de requête : 'Backrooms (2026)' → ('Backrooms', 2026).
+
+    /search/multi (contrairement à /search/movie ou /search/tv) n'a pas de paramètre
+    année : le laisser dans le texte de recherche pollue le matching plutôt que de l'aider.
+    """
+    m = _YEAR_RE.search(query)
+    if not m:
+        return query.strip(), None
+    year = int(m.group(1))
+    cleaned = query[: m.start()].strip()
+    return cleaned or query.strip(), year
+
+
+def _pick_best_result(results: list[dict], query: str, year: Optional[int] = None) -> dict:
+    """Choisit le meilleur résultat movie/tv (match exact + année → match exact → année → popularité).
 
     /search/multi renvoie un ordre de « pertinence » qui change avec language=
-    et inclut des personnes. Après filtre, le 1er n'est pas toujours le bon.
+    et inclut des personnes. Après filtre, le 1er n'est pas toujours le bon —
+    notamment pour un titre repris par plusieurs œuvres (ex: plusieurs "Backrooms").
     """
     q = query.strip().casefold()
 
     def title_of(r: dict) -> str:
         return (r.get("title") or r.get("name") or "").strip()
 
-    exact = [
-        r for r in results
-        if title_of(r).casefold() == q
-        or (r.get("original_title") or r.get("original_name") or "").strip().casefold() == q
-    ]
-    pool = exact or results
-    return max(pool, key=lambda r: float(r.get("popularity") or 0.0))
+    def year_of(r: dict) -> Optional[int]:
+        date_str = (r.get("release_date") or r.get("first_air_date") or "")[:4]
+        return int(date_str) if date_str.isdigit() else None
+
+    def is_exact(r: dict) -> bool:
+        return (
+            title_of(r).casefold() == q
+            or (r.get("original_title") or r.get("original_name") or "").strip().casefold() == q
+        )
+
+    def score(r: dict) -> tuple[int, int, float]:
+        exact = is_exact(r)
+        year_match = year is not None and year_of(r) == year
+        return (int(exact and year_match), int(exact or year_match), float(r.get("popularity") or 0.0))
+
+    return max(results, key=score)
 
 
 # ---------------------------------------------------------------------------
@@ -185,11 +213,12 @@ class TMDB(commands.Cog):
     def _search_multi(self, query: str) -> dict:
         if not self._api_key:
             return {"error": "Clé API TMDB manquante (TMDB_API_KEY dans .env)"}
+        clean_query, year = _parse_query_year(query)
         try:
             r = requests.get(
                 f"{TMDB_BASE}/search/multi",
                 params={
-                    "query":          query,
+                    "query":          clean_query,
                     "api_key":        self._api_key,
                     "language":       "fr-FR",
                     "include_adult":  False,
@@ -203,7 +232,7 @@ class TMDB(commands.Cog):
             results = [x for x in r.json().get("results", []) if x.get("media_type") in ("movie", "tv")]
             if not results:
                 return {"error": f"Aucun résultat pour : {query!r}"}
-            return {"first": _pick_best_result(results, query)}
+            return {"first": _pick_best_result(results, clean_query, year)}
         except requests.RequestException as e:
             return {"error": str(e)}
 
