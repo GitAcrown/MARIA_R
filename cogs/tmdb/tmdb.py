@@ -16,10 +16,36 @@ from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 logger = logging.getLogger("MARIA.TMDB")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG  = "https://image.tmdb.org/t/p/w300{}"
+TMDB_IMG  = "https://image.tmdb.org/t/p/w500{}"
 
 _TYPE_EMOJI = {"movie": MOVIE, "tv": TV}
 _TYPE_LABEL = {"movie": "Film", "tv": "Série"}
+
+
+def _poster_url(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    return TMDB_IMG.format(path)
+
+
+def _pick_best_result(results: list[dict], query: str) -> dict:
+    """Choisit le meilleur résultat movie/tv (match exact → popularité).
+
+    /search/multi renvoie un ordre de « pertinence » qui change avec language=
+    et inclut des personnes. Après filtre, le 1er n'est pas toujours le bon.
+    """
+    q = query.strip().casefold()
+
+    def title_of(r: dict) -> str:
+        return (r.get("title") or r.get("name") or "").strip()
+
+    exact = [
+        r for r in results
+        if title_of(r).casefold() == q
+        or (r.get("original_title") or r.get("original_name") or "").strip().casefold() == q
+    ]
+    pool = exact or results
+    return max(pool, key=lambda r: float(r.get("popularity") or 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +104,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     date_str   = r.get("release_date") or r.get("first_air_date") or ""
     year       = date_str[:4] if date_str else ""
     genres     = [g["name"] for g in r.get("genres", [])]
-    poster     = r.get("poster_path")
+    poster_url = _poster_url(r.get("poster_path"))
 
     emoji      = _TYPE_EMOJI.get(media_type, MOVIE)
     title_line = f"## {emoji} {title}"
@@ -102,7 +128,16 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     body_text      = f"{rating_ln}\n{overview_short}" if rating_ln else overview_short
     body_block     = discord.ui.TextDisplay(body_text or "-# Aucune description disponible.")
 
-    main_section = section_with_thumbnail(body_block, TMDB_IMG.format(poster) if poster else None)
+    # Poster en MediaGallery (plus visible qu'une Thumbnail Section),
+    # sinon fallback vignette si la galerie échoue.
+    poster_item: Optional[discord.ui.Item] = None
+    if poster_url:
+        try:
+            gallery = discord.ui.MediaGallery()
+            gallery.add_item(media=poster_url, description=title[:256])
+            poster_item = gallery
+        except Exception:
+            poster_item = section_with_thumbnail(body_block, poster_url)
 
     # Infos supplémentaires
     extra = []
@@ -121,7 +156,14 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     if tmdb_id:
         footer_parts.append(f"[TMDB](https://www.themoviedb.org/{media_type}/{tmdb_id})")
 
-    children: list = [header, sep1, main_section]
+    children: list = [header, sep1]
+    if poster_item is not None and isinstance(poster_item, discord.ui.MediaGallery):
+        children += [poster_item, discord.ui.Separator(), body_block]
+    elif poster_item is not None:
+        children.append(poster_item)  # Section avec thumbnail + body
+    else:
+        children.append(body_block)
+
     if footer_parts:
         children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {'  ·  '.join(footer_parts)}")]
     else:
@@ -161,7 +203,7 @@ class TMDB(commands.Cog):
             results = [x for x in r.json().get("results", []) if x.get("media_type") in ("movie", "tv")]
             if not results:
                 return {"error": f"Aucun résultat pour : {query!r}"}
-            return {"first": results[0]}
+            return {"first": _pick_best_result(results, query)}
         except requests.RequestException as e:
             return {"error": str(e)}
 
@@ -223,7 +265,10 @@ class TMDB(commands.Cog):
                 properties={
                     "query": {
                         "type":        "string",
-                        "description": "Titre du film ou de la série à rechercher",
+                        "description": (
+                            "Titre du film ou de la série. "
+                            "Ajouter l'année si ambigu (ex: 'Dune 2021')."
+                        ),
                     },
                 },
                 function=self._tool_search_media,
