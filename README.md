@@ -9,6 +9,7 @@ Personnalité directe et Gen Z, Maria s'adapte au ton de chaque salon, et cherch
 ## Ce qu'elle fait
 
 - **Conversation** — contexte restreint par salon
+- **Mémoire long terme** — souvenirs durables (préférences, gags, événements) via RAG
 - **Recherche web** — Brave Search (+ fallback DuckDuckGo) avec crawling de pages
 - **Rappels** — planification et envoi de rappels personnalisés
 - **Médias** — analyse d'images, transcription audio
@@ -17,9 +18,9 @@ Personnalité directe et Gen Z, Maria s'adapte au ton de chaque salon, et cherch
 ## Stack
 
 - [discord.py](https://discordpy.readthedocs.io/) — interface Discord
-- [OpenAI](https://platform.openai.com/) — `gpt-5.6-luna` (principal) · `gpt-5.4-nano` (tâches simples) · `gpt-4o-transcribe`
+- [OpenAI](https://platform.openai.com/) — `gpt-5.6-luna` (principal) · `gpt-5.4-nano` (tâches simples / mémoire) · `gpt-4o-transcribe`
 - [Brave Search API](https://brave.com/search/api/) — recherche web (optionnel)
-- SQLite — persistance locale
+- SQLite + [Chroma](https://www.trychroma.com/) — persistance locale et recherche sémantique
 
 ## Licence
 

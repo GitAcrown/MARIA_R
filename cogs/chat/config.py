@@ -16,3 +16,9 @@ MAX_TOKENS = 2800
 
 # Debounce des réponses (regroupe les messages rapprochés en un seul appel)
 DEBOUNCE_SECONDS: float = 0.5
+
+# Mémoire long terme — flush hybride + RAG
+MEMORY_FLUSH_MESSAGES = 20
+MEMORY_FLUSH_MINUTES = 15
+MEMORY_BUFFER_CAP = 40
+MEMORY_TOP_K = 5
