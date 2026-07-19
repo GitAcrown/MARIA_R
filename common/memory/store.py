@@ -22,15 +22,20 @@ CATEGORY_EVENT = "event"
 VALID_CATEGORIES = (CATEGORY_USER, CATEGORY_SERVER, CATEGORY_EVENT)
 
 STATUS_ACTIVE = "active"
+STATUS_PENDING = "pending"
 STATUS_ARCHIVED = "archived"
 
 CONFIDENCE_CREATE = 0.35
+CONFIDENCE_PENDING = 0.2
 CONFIDENCE_UPDATE_DELTA = 0.15
 CONFIDENCE_CONTRADICT_DELTA = 0.25
 CONFIDENCE_ARCHIVE_BELOW = 0.2
 CONFIDENCE_DECAY = 0.05
 CONFIDENCE_DECAY_ARCHIVE_BELOW = 0.15
 DECAY_AFTER_DAYS = 30
+# 2e observation → promotion pending → active (évite les one-shots type « running gag »)
+HITS_TO_PROMOTE = 2
+PENDING_EXPIRE_DAYS = 14
 
 
 @dataclass
@@ -45,6 +50,7 @@ class Memory:
     status: str = STATUS_ACTIVE
     user_id: Optional[int] = None
     chroma_id: Optional[str] = None
+    hits: int = 1
 
 
 def _init_db() -> None:
@@ -75,6 +81,10 @@ def _init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_memories_user "
             "ON memories(guild_id, user_id, status)"
         )
+        # Migration douce : compteur d'observations (tampon pending → active).
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        if "hits" not in cols:
+            conn.execute("ALTER TABLE memories ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
 
 
 @contextmanager
@@ -99,6 +109,7 @@ def _parse_dt(value: str) -> datetime:
 
 
 def _row_to_memory(r: sqlite3.Row) -> Memory:
+    keys = r.keys()
     return Memory(
         id=r["id"],
         category=r["category"],
@@ -110,6 +121,7 @@ def _row_to_memory(r: sqlite3.Row) -> Memory:
         confidence=float(r["confidence"]),
         status=r["status"] or STATUS_ACTIVE,
         chroma_id=r["chroma_id"],
+        hits=int(r["hits"]) if "hits" in keys and r["hits"] is not None else 1,
     )
 
 
@@ -142,29 +154,36 @@ class MemoryStore:
         *,
         limit: int = 15,
     ) -> list[Memory]:
-        """Souvenirs user (globaux) du batch + souvenirs serveur du guild courant."""
+        """Actifs + pending (tampon) pour l'agent : users globaux + serveur local."""
+        statuses = (STATUS_ACTIVE, STATUS_PENDING)
         with _db() as conn:
             server_rows = conn.execute(
                 """
                 SELECT * FROM memories
-                WHERE guild_id = ? AND status = ? AND category = ?
-                ORDER BY confirmed_at DESC
+                WHERE guild_id = ? AND status IN (?, ?) AND category IN (?, ?)
+                ORDER BY
+                    CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                    confirmed_at DESC
                 LIMIT ?
                 """,
-                (guild_id, STATUS_ACTIVE, CATEGORY_SERVER, max(3, limit // 3)),
+                (
+                    guild_id, STATUS_ACTIVE, STATUS_PENDING,
+                    CATEGORY_SERVER, CATEGORY_EVENT, max(5, limit // 2),
+                ),
             ).fetchall()
             if not user_ids:
                 return [_row_to_memory(r) for r in server_rows][:limit]
             placeholders = ",".join("?" * len(user_ids))
-            # Mémoire membre = globale (tous serveurs).
             user_rows = conn.execute(
                 f"""
                 SELECT * FROM memories
-                WHERE status = ? AND category = ? AND user_id IN ({placeholders})
-                ORDER BY confirmed_at DESC
+                WHERE status IN (?, ?) AND category = ? AND user_id IN ({placeholders})
+                ORDER BY
+                    CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                    confirmed_at DESC
                 LIMIT ?
                 """,
-                (STATUS_ACTIVE, CATEGORY_USER, *user_ids, limit),
+                (STATUS_ACTIVE, STATUS_PENDING, CATEGORY_USER, *user_ids, limit),
             ).fetchall()
         seen: set[str] = set()
         out: list[Memory] = []
@@ -243,10 +262,13 @@ class MemoryStore:
         guild_id: int,
         content: str,
         user_id: Optional[int] = None,
-        confidence: float = CONFIDENCE_CREATE,
+        confidence: float = CONFIDENCE_PENDING,
+        status: str = STATUS_PENDING,
     ) -> Memory:
         now = datetime.now(timezone.utc)
         mid = str(uuid.uuid4())
+        if status not in (STATUS_ACTIVE, STATUS_PENDING, STATUS_ARCHIVED):
+            status = STATUS_PENDING
         mem = Memory(
             id=mid,
             category=category if category in VALID_CATEGORIES else CATEGORY_USER,
@@ -256,21 +278,22 @@ class MemoryStore:
             created_at=now,
             confirmed_at=now,
             confidence=max(0.0, min(1.0, confidence)),
-            status=STATUS_ACTIVE,
-            chroma_id=mid,
+            status=status,
+            chroma_id=mid if status == STATUS_ACTIVE else None,
+            hits=1,
         )
         with _db() as conn:
             conn.execute(
                 """
                 INSERT INTO memories
                 (id, category, guild_id, user_id, content, created_at, confirmed_at,
-                 confidence, status, chroma_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, status, chroma_id, hits)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     mem.id, mem.category, mem.guild_id, mem.user_id, mem.content,
                     mem.created_at.isoformat(), mem.confirmed_at.isoformat(),
-                    mem.confidence, mem.status, mem.chroma_id,
+                    mem.confidence, mem.status, mem.chroma_id, mem.hits,
                 ),
             )
         return mem
@@ -282,19 +305,30 @@ class MemoryStore:
         *,
         confidence_delta: float = CONFIDENCE_UPDATE_DELTA,
     ) -> Optional[Memory]:
+        """Renforce un souvenir (hits++) ; promeut pending → active si assez d'observations."""
         mem = self.get(memory_id)
-        if mem is None or mem.status != STATUS_ACTIVE:
+        if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
             return None
         now = datetime.now(timezone.utc)
+        new_hits = mem.hits + 1
         new_conf = max(0.0, min(1.0, mem.confidence + confidence_delta))
+        new_status = mem.status
+        chroma_id = mem.chroma_id
+        if mem.status == STATUS_PENDING and new_hits >= HITS_TO_PROMOTE:
+            new_status = STATUS_ACTIVE
+            chroma_id = mem.id
         with _db() as conn:
             conn.execute(
                 """
                 UPDATE memories
-                SET content = ?, confirmed_at = ?, confidence = ?
+                SET content = ?, confirmed_at = ?, confidence = ?, hits = ?,
+                    status = ?, chroma_id = ?
                 WHERE id = ?
                 """,
-                (content.strip(), now.isoformat(), new_conf, memory_id),
+                (
+                    content.strip(), now.isoformat(), new_conf, new_hits,
+                    new_status, chroma_id, memory_id,
+                ),
             )
         return self.get(memory_id)
 
@@ -321,8 +355,12 @@ class MemoryStore:
 
     def contradict(self, memory_id: str) -> Optional[Memory]:
         mem = self.get(memory_id)
-        if mem is None or mem.status != STATUS_ACTIVE:
+        if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
             return None
+        # Pending invalidé : on archive directement (jamais vu 2 fois = pas solide).
+        if mem.status == STATUS_PENDING:
+            self.archive(memory_id)
+            return self.get(memory_id)
         new_conf = max(0.0, mem.confidence - CONFIDENCE_CONTRADICT_DELTA)
         if new_conf < CONFIDENCE_ARCHIVE_BELOW:
             self.archive(memory_id)
@@ -342,23 +380,38 @@ class MemoryStore:
             )
 
     def apply_decay(self) -> list[str]:
-        """Baisse la confiance des souvenirs non confirmés depuis DECAY_AFTER_DAYS.
+        """Expire les pending trop vieux + decay des actifs non confirmés.
 
-        Renvoie les ids archivés (à retirer de Chroma).
+        Renvoie les ids à retirer de Chroma (actifs archivés).
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=DECAY_AFTER_DAYS)
+        now = datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(days=DECAY_AFTER_DAYS)
+        pending_cutoff = now - timedelta(days=PENDING_EXPIRE_DAYS)
         archived: list[str] = []
         with _db() as conn:
+            # Tampon : jamais reconfirmé → oubli silencieux.
+            pending = conn.execute(
+                """
+                SELECT id FROM memories
+                WHERE status = ? AND confirmed_at < ?
+                """,
+                (STATUS_PENDING, pending_cutoff.isoformat()),
+            ).fetchall()
+            for r in pending:
+                conn.execute(
+                    "UPDATE memories SET status = ? WHERE id = ?",
+                    (STATUS_ARCHIVED, r["id"]),
+                )
+
             rows = conn.execute(
                 """
                 SELECT id, confidence FROM memories
                 WHERE status = ? AND confirmed_at < ?
                 """,
-                (STATUS_ACTIVE, cutoff.isoformat()),
+                (STATUS_ACTIVE, active_cutoff.isoformat()),
             ).fetchall()
             for r in rows:
                 if float(r["confidence"]) >= 0.99:
-                    # Souvenirs déclarés manuellement (confiance max) : pas de decay.
                     continue
                 new_conf = max(0.0, float(r["confidence"]) - CONFIDENCE_DECAY)
                 if new_conf < CONFIDENCE_DECAY_ARCHIVE_BELOW:
@@ -372,6 +425,9 @@ class MemoryStore:
                         "UPDATE memories SET confidence = ? WHERE id = ?",
                         (new_conf, r["id"]),
                     )
-        if archived:
-            logger.info("Decay: %d souvenir(s) archivé(s)", len(archived))
+        if archived or pending:
+            logger.info(
+                "Decay: %d actif(s) archivé(s), %d pending expiré(s)",
+                len(archived), len(pending),
+            )
         return archived

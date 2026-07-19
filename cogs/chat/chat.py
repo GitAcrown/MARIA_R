@@ -18,7 +18,7 @@ from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
 from common.llm import MariaGptApi, Tool
 from common.memory import MemoryStore, MemoryWorker, format_memory_ctx, retrieve_memories
-from common.memory.store import CATEGORY_USER, Memory
+from common.memory.store import CATEGORY_USER, STATUS_ACTIVE, Memory
 from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
 from common.rappels import KIND_EVENT, RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore, RappelWorker
@@ -313,6 +313,7 @@ class AddPersonalMemoryModal(discord.ui.Modal, title="À retenir sur moi"):
             content=content,
             user_id=self.user_id,
             confidence=1.0,
+            status=STATUS_ACTIVE,
         )
         self.vectors.upsert(
             mem.id, mem.content,

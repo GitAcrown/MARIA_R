@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from common.memory.store import Memory
+from common.memory.store import Memory, STATUS_PENDING
 
 logger = logging.getLogger("MARIA.Memory.Agent")
 
@@ -45,7 +45,7 @@ _MEMORY_SCHEMA = {
                             },
                             "confidence_delta": {
                                 "type": "number",
-                                "description": "Suggestion optionnelle ; ignorée côté serveur si hors règles",
+                                "description": "Suggestion optionnelle ; ignorée côté serveur",
                             },
                         },
                         "required": [
@@ -63,29 +63,35 @@ _MEMORY_SCHEMA = {
 }
 
 _SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA, un bot Discord sur un petit serveur de potes.
-Tu analyses un lot de messages et tu décides quoi RETENIR pour plusieurs semaines/mois.
 
-SOIS TRÈS SÉLECTIF. Préfère 0 souvenir plutôt que du bruit. Max 3 souvenirs par lot.
-Si rien de clairement durable → {"memories": []}.
+Tu as DEUX niveaux de mémoire :
+1) PENDING (tampon) — observation fragile, pas encore « vraie » mémoire.
+2) ACTIVE — souvenir confirmé (vu au moins 2 fois, ou déclaré manuellement).
 
-NE RETIENS QUE si c'est clairement utile dans ≥ 1 mois :
-préférence durable, projet, relation, rôle, habitude, running gag récurrent, événement important.
+PRIORITÉ ABSOLUE : regarde d'abord les PENDING. Si un sujet / gag / préférence REVIENT
+dans les messages → action update ou merge sur ce pending (target_id = son id).
+C'est comme ça qu'un one-shot devient un running gag. NE crée PAS un nouveau souvenir
+si un pending proche existe déjà.
 
-IGNORE absolument : blagues ponctuelles, débats du jour, scores/actus, demandes au bot,
-avis passagers, petits faits sans lendemain, « j'aime bien X » dit une seule fois sans suite.
+SOIS TRÈS SÉLECTIF. Préfère 0 action plutôt que du bruit. Max 3 actions par lot.
+Si rien de clair → {"memories": []}.
 
-CATÉGORIES — ne les confonds JAMAIS :
-- user : info PERSONNELLE sur UN membre précis (goût, projet, habitude, relation).
-  Obligatoire : user_id = l'id Discord de CE membre (fourni dans les messages).
-  Ces souvenirs sont GLOBAUX (tous les serveurs) — n'en crée pas un doublon par serveur.
-  N'attribue jamais à user une info collective (« on fait souvent… », gag du serveur).
-- server : info COLLECTIVE de CE serveur (règle implicite, gag partagé, habitude de groupe).
-  user_id = null. Ne range JAMAIS ici le goût ou le projet d'une seule personne.
-- event : événement ponctuel mais mémorable sur CE serveur (arrivée/départ, soirée…).
-  user_id = le membre concerné si pertinent, sinon null.
+RÈGLE ANTI ONE-SHOT :
+- Une blague, une anecdote, un événement raconté UNE fois ≠ running gag.
+- Un « j'aime X » dit une fois ≠ préférence solide.
+- Pour un possible gag / habitude / préférence : create (→ ira en pending).
+- Seulement si ça REVIENT (pending existant ou répétition claire dans le lot) : update/merge.
+- event : réservé aux vrais jalons (arrivée, départ, soirée organisée, lancement de projet) — pas une anecdote.
 
-Actions : create (target_id=null) | update | merge | contradict (target_id = id existant).
-Rédige content en français, 1 phrase neutre et concise, à la 3e personne."""
+IGNORE : débats du jour, scores/actus, demandes au bot, avis passagers.
+
+CATÉGORIES :
+- user : perso d'UN membre (user_id obligatoire). Global tous serveurs. Pas de gag collectif ici.
+- server : collectif de CE serveur (user_id=null). Gags/habitudes de groupe.
+- event : jalon de CE serveur.
+
+Actions : create (target_id=null) | update | merge | contradict (target_id = id).
+Content : français, 1 phrase neutre, 3e personne."""
 
 
 async def extract_memories(
@@ -101,8 +107,10 @@ async def extract_memories(
         lines = []
         for m in existing:
             uid = f" user={m.user_id}" if m.user_id else ""
+            level = "PENDING" if m.status == STATUS_PENDING else "ACTIVE"
             lines.append(
-                f"- id={m.id} [{m.category}]{uid} conf={m.confidence:.2f}: {m.content}"
+                f"- id={m.id} [{level}/{m.category}]{uid} "
+                f"hits={m.hits} conf={m.confidence:.2f}: {m.content}"
             )
         existing_block = "\n".join(lines)
 
@@ -111,7 +119,7 @@ async def extract_memories(
         {
             "role": "user",
             "content": (
-                f"SOUVENIRS EXISTANTS (à update/merge/contradict si pertinent) :\n"
+                f"SOUVENIRS (pending = à confirmer si ça revient ; active = déjà retenus) :\n"
                 f"{existing_block}\n\n"
                 f"MESSAGES RÉCENTS :\n{batch_text}"
             ),

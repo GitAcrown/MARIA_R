@@ -12,9 +12,10 @@ from discord.ext import tasks
 
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
-    CONFIDENCE_CREATE,
+    CONFIDENCE_PENDING,
     CONFIDENCE_UPDATE_DELTA,
     STATUS_ACTIVE,
+    STATUS_PENDING,
     VALID_CATEGORIES,
     MemoryStore,
 )
@@ -167,19 +168,16 @@ class MemoryWorker:
             elif category == "server":
                 user_id = None
             # event : user_id optionnel
+            # Première observation → tampon pending (pas de Chroma / pas de RAG).
             mem = self.store.create(
                 category=category,
                 guild_id=guild_id,
                 content=content,
                 user_id=user_id,
-                confidence=CONFIDENCE_CREATE,
+                confidence=CONFIDENCE_PENDING,
+                status=STATUS_PENDING,
             )
-            self.vectors.upsert(
-                mem.id, mem.content,
-                category=mem.category, guild_id=mem.guild_id,
-                user_id=mem.user_id, confidence=mem.confidence,
-            )
-            logger.debug("Mémoire créée %s: %s", mem.id[:8], mem.content[:60])
+            logger.debug("Mémoire pending %s: %s", mem.id[:8], mem.content[:60])
             return
 
         if not target_id:
@@ -192,16 +190,22 @@ class MemoryWorker:
             return
 
         if kind in ("update", "merge"):
+            was_pending = existing.status == STATUS_PENDING
             new_content = content or existing.content
             mem = self.store.update_content(
                 target_id, new_content, confidence_delta=CONFIDENCE_UPDATE_DELTA,
             )
-            if mem and mem.status == STATUS_ACTIVE:
+            if mem is None:
+                return
+            # Promotion pending → active : indexation Chroma seulement à ce moment.
+            if mem.status == STATUS_ACTIVE and (was_pending or mem.chroma_id):
                 self.vectors.upsert(
                     mem.id, mem.content,
                     category=mem.category, guild_id=mem.guild_id,
                     user_id=mem.user_id, confidence=mem.confidence,
                 )
+            if was_pending and mem.status == STATUS_ACTIVE:
+                logger.info("Mémoire promue %s (hits=%s): %s", mem.id[:8], mem.hits, mem.content[:60])
             return
 
         if kind == "contradict":
