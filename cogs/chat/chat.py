@@ -18,6 +18,8 @@ from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
 from common.llm import MariaGptApi, Tool
 from common.memory import MemoryStore, MemoryWorker, format_memory_ctx, retrieve_memories
+from common.memory.store import Memory
+from common.memory.summary import summarize_memories_for_user
 from common.memory.vector import VectorStore
 from common.rappels import KIND_EVENT, RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore, RappelWorker
 from common.timezones import PARIS_TZ
@@ -238,6 +240,11 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         f"› {SETTINGS} `/chatbot datedetect` — active/désactive cette détection sur un salon.",
     ),
     (
+        "Mémoire",
+        "› `/memory` — vois ce que MARIA a retenu de toi (préférences, projets, gags…).\n"
+        "› Elle n'enregistre pas tout : seulement ce qui reste utile sur le long terme.",
+    ),
+    (
         "Recherche & infos",
         "› Elle cherche le web pour les faits récents et définit l'argot (Urban Dictionary).\n"
         "› Météo, films/séries, jeux Steam, scores de foot, images — demande simplement.",
@@ -264,6 +271,44 @@ class TipsView(discord.ui.LayoutView):
             children.append(discord.ui.TextDisplay(f"**{title}**\n{body}"))
             if i < len(_TIPS_SECTIONS) - 1:
                 children.append(discord.ui.Separator())
+        self.add_item(discord.ui.Container(*children))
+
+
+class MemoryView(discord.ui.LayoutView):
+    """Résumé de ce que MARIA sait d'un membre."""
+
+    def __init__(self, display_name: str, summary: str, memories: list[Memory]):
+        super().__init__(timeout=180)
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(f"## Ce que je sais de {display_name}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(summary),
+        ]
+        if memories:
+            by_cat: dict[str, list[Memory]] = {}
+            for m in memories:
+                by_cat.setdefault(m.category, []).append(m)
+            labels = {"user": "Sur toi", "server": "Sur le serveur", "event": "Événements"}
+            for cat in ("user", "server", "event"):
+                items = by_cat.get(cat) or []
+                if not items:
+                    continue
+                lines = [
+                    f"› {m.content}  ·  conf. {m.confidence:.0%}"
+                    for m in items[:8]
+                ]
+                children += [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(f"**{labels.get(cat, cat)}**\n" + "\n".join(lines)),
+                ]
+            children.append(discord.ui.TextDisplay(
+                f"-# {len(memories)} souvenir(s) · confiance basse = info encore fragile"
+            ))
+        else:
+            children += [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("-# Aucun souvenir enregistré pour l'instant."),
+            ]
         self.add_item(discord.ui.Container(*children))
 
 
@@ -746,6 +791,29 @@ class Chat(commands.Cog):
     @app_commands.command(name="tips", description="Quelques astuces pour utiliser MARIA")
     async def cmd_tips(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(view=TipsView(), ephemeral=True)
+
+    @app_commands.command(name="memory", description="Ce que MARIA a retenu de toi")
+    async def cmd_memory(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "Disponible uniquement sur un serveur.", ephemeral=True,
+            )
+        await interaction.response.defer(ephemeral=True)
+        memories = await asyncio.to_thread(
+            self.memory_store.list_for_user,
+            interaction.guild.id,
+            interaction.user.id,
+            limit=40,
+            include_server=True,
+        )
+        summary = await summarize_memories_for_user(
+            self.gpt_api.client,
+            model=MODEL_NANO,
+            display_name=interaction.user.display_name,
+            memories=memories,
+        )
+        view = MemoryView(interaction.user.display_name, summary, memories)
+        await interaction.followup.send(view=view, ephemeral=True)
 
     @app_commands.command(name="info", description="Statistiques de la session en cours")
     async def cmd_info(self, interaction: discord.Interaction) -> None:

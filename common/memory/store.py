@@ -177,6 +177,46 @@ class MemoryStore:
                 break
         return out
 
+    def list_for_user(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int = 40,
+        include_server: bool = True,
+    ) -> list[Memory]:
+        """Souvenirs actifs d'un membre (+ optionnellement souvenirs serveur)."""
+        with _db() as conn:
+            user_rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE guild_id = ? AND status = ? AND user_id = ?
+                ORDER BY confidence DESC, confirmed_at DESC
+                LIMIT ?
+                """,
+                (guild_id, STATUS_ACTIVE, user_id, limit),
+            ).fetchall()
+            server_rows = []
+            if include_server:
+                server_rows = conn.execute(
+                    """
+                    SELECT * FROM memories
+                    WHERE guild_id = ? AND status = ? AND category = ?
+                    ORDER BY confidence DESC, confirmed_at DESC
+                    LIMIT ?
+                    """,
+                    (guild_id, STATUS_ACTIVE, CATEGORY_SERVER, min(10, limit // 2)),
+                ).fetchall()
+        seen: set[str] = set()
+        out: list[Memory] = []
+        for r in list(user_rows) + list(server_rows):
+            m = _row_to_memory(r)
+            if m.id in seen:
+                continue
+            seen.add(m.id)
+            out.append(m)
+        return out
+
     def create(
         self,
         *,
