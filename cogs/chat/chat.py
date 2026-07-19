@@ -243,9 +243,9 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Mémoire",
-        "› `/me` — ce que MARIA a retenu de toi (tous serveurs) ; bouton pour forcer une info à 100 %.\n"
-        "› `/all` — mémoire collective de ce serveur (gags, habitudes, événements).\n"
-        "› Elle n'enregistre pas tout : seulement ce qui reste utile sur le long terme.",
+        "› `/me` — ta mémoire perso (tous serveurs) ; Retenir… / Tout oublier.\n"
+        "› `/all` — mémoire collective du serveur ; reset réservé aux admins.\n"
+        "› Elle n'enregistre pas tout : perso = sélectif, collectif = plus ouvert.",
     ),
     (
         "Recherche & infos",
@@ -369,6 +369,129 @@ class _AddPersonalMemoryButton(discord.ui.Button):
         )
 
 
+class _ResetPersonalButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.danger, label="Tout oublier")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        await interaction.response.edit_message(
+            view=ConfirmResetMeView(
+                self.store, self.vectors, self.guild_id, self.user_id, self.display_name,
+            ),
+        )
+
+
+class _ConfirmResetMeButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.danger, label="Confirmer")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        await interaction.response.defer()
+        chroma_ids = await asyncio.to_thread(self.store.clear_user, self.user_id)
+        for mid in chroma_ids:
+            self.vectors.delete(mid)
+        view = MeMemoryView(
+            self.display_name, "Mémoire perso vidée.", [],
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _CancelResetMeButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Annuler")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        await interaction.response.defer()
+        memories = await asyncio.to_thread(
+            self.store.list_for_user, self.guild_id, self.user_id, limit=40, include_server=False,
+        )
+        summary = "Aucun souvenir perso pour l'instant."
+        if memories:
+            chat_cog = interaction.client.get_cog("Chat")
+            if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
+                summary = await summarize_memories(
+                    chat_cog.gpt_api.client,
+                    model=MODEL_NANO,
+                    memories=memories,
+                    scope="user",
+                    display_name=self.display_name,
+                )
+            else:
+                summary = "\n".join(f"› {m.content}" for m in memories[:8])
+        view = MeMemoryView(
+            self.display_name, summary, memories,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class ConfirmResetMeView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(timeout=60)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"## Mémoire · {display_name}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("Effacer **toute** ta mémoire perso ? Irréversible."),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(
+                _ConfirmResetMeButton(store, vectors, guild_id, user_id, display_name),
+                _CancelResetMeButton(store, vectors, guild_id, user_id, display_name),
+            ),
+        ))
+
+
 class MeMemoryView(discord.ui.LayoutView):
     """Mémoire personnelle — /me."""
 
@@ -408,15 +531,155 @@ class MeMemoryView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.ActionRow(
                 _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
+                _ResetPersonalButton(store, vectors, guild_id, user_id, display_name),
             ),
         ]
         self.add_item(discord.ui.Container(*children))
 
 
+def _is_memory_admin(member: discord.Member | discord.User) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    perms = member.guild_permissions
+    return bool(perms.administrator or perms.manage_guild)
+
+
+class _ResetServerButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        guild_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.danger, label="Tout oublier")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not _is_memory_admin(interaction.user):
+            return await interaction.response.send_message(
+                "Réservé aux admins du serveur.", ephemeral=True,
+            )
+        await interaction.response.edit_message(
+            view=ConfirmResetAllView(
+                self.store, self.vectors, self.guild_id, self.guild_name,
+            ),
+        )
+
+
+class _ConfirmResetAllButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        guild_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.danger, label="Confirmer")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not _is_memory_admin(interaction.user):
+            return await interaction.response.send_message(
+                "Réservé aux admins du serveur.", ephemeral=True,
+            )
+        await interaction.response.defer()
+        chroma_ids = await asyncio.to_thread(self.store.clear_server, self.guild_id)
+        for mid in chroma_ids:
+            self.vectors.delete(mid)
+        view = AllMemoryView(
+            self.guild_name, "Mémoire collective vidée.", [],
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, can_reset=True,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _CancelResetAllButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        guild_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Annuler")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not _is_memory_admin(interaction.user):
+            return await interaction.response.send_message(
+                "Réservé aux admins du serveur.", ephemeral=True,
+            )
+        await interaction.response.defer()
+        memories = await asyncio.to_thread(self.store.list_server, self.guild_id, limit=40)
+        summary = "Aucun souvenir serveur pour l'instant."
+        if memories:
+            chat_cog = interaction.client.get_cog("Chat")
+            if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
+                summary = await summarize_memories(
+                    chat_cog.gpt_api.client,
+                    model=MODEL_NANO,
+                    memories=memories,
+                    scope="server",
+                    display_name=self.guild_name,
+                )
+            else:
+                summary = "\n".join(f"› {m.content}" for m in memories[:8])
+        view = AllMemoryView(
+            self.guild_name, summary, memories,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, can_reset=True,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class ConfirmResetAllView(discord.ui.LayoutView):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        guild_name: str,
+    ):
+        super().__init__(timeout=60)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"## Mémoire · {guild_name}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(
+                "Effacer **toute** la mémoire collective de ce serveur ? Irréversible."
+            ),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(
+                _ConfirmResetAllButton(store, vectors, guild_id, guild_name),
+                _CancelResetAllButton(store, vectors, guild_id, guild_name),
+            ),
+        ))
+
+
 class AllMemoryView(discord.ui.LayoutView):
     """Mémoire collective — /all."""
 
-    def __init__(self, guild_name: str, summary: str, memories: list[Memory]):
+    def __init__(
+        self,
+        guild_name: str,
+        summary: str,
+        memories: list[Memory],
+        *,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        can_reset: bool = False,
+    ):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
             discord.ui.TextDisplay(f"## Mémoire · {guild_name}"),
@@ -445,6 +708,13 @@ class AllMemoryView(discord.ui.LayoutView):
             children += [
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucun souvenir serveur pour l'instant."),
+            ]
+        if can_reset:
+            children += [
+                discord.ui.Separator(),
+                discord.ui.ActionRow(
+                    _ResetServerButton(store, vectors, guild_id, guild_name),
+                ),
             ]
         self.add_item(discord.ui.Container(*children))
 
@@ -977,7 +1247,12 @@ class Chat(commands.Cog):
             scope="server",
             display_name=interaction.guild.name,
         )
-        view = AllMemoryView(interaction.guild.name, summary, memories)
+        view = AllMemoryView(
+            interaction.guild.name, summary, memories,
+            store=self.memory_store, vectors=self.memory_vectors,
+            guild_id=interaction.guild.id,
+            can_reset=_is_memory_admin(interaction.user),
+        )
         await interaction.followup.send(view=view, ephemeral=True)
 
     @app_commands.command(name="info", description="Statistiques de la session en cours")

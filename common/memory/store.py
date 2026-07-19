@@ -168,7 +168,7 @@ class MemoryStore:
                 """,
                 (
                     guild_id, STATUS_ACTIVE, STATUS_PENDING,
-                    CATEGORY_SERVER, CATEGORY_EVENT, max(5, limit // 2),
+                    CATEGORY_SERVER, CATEGORY_EVENT, max(8, limit // 2),
                 ),
             ).fetchall()
             if not user_ids:
@@ -447,6 +447,49 @@ class MemoryStore:
                 "UPDATE memories SET status = ? WHERE id = ?",
                 (STATUS_ARCHIVED, memory_id),
             )
+
+    def clear_user(self, user_id: int) -> list[str]:
+        """Archive toutes les mémoires perso d'un membre. Renvoie les ids à retirer de Chroma."""
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, status, chroma_id FROM memories
+                WHERE category = ? AND user_id = ? AND status IN (?, ?)
+                """,
+                (CATEGORY_USER, user_id, STATUS_ACTIVE, STATUS_PENDING),
+            ).fetchall()
+            chroma_ids: list[str] = []
+            for r in rows:
+                if r["status"] == STATUS_ACTIVE or r["chroma_id"]:
+                    chroma_ids.append(r["id"])
+                conn.execute(
+                    "UPDATE memories SET status = ? WHERE id = ?",
+                    (STATUS_ARCHIVED, r["id"]),
+                )
+        return chroma_ids
+
+    def clear_server(self, guild_id: int) -> list[str]:
+        """Archive server + event d'un guild. Renvoie les ids à retirer de Chroma."""
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, status, chroma_id FROM memories
+                WHERE guild_id = ? AND category IN (?, ?) AND status IN (?, ?)
+                """,
+                (
+                    guild_id, CATEGORY_SERVER, CATEGORY_EVENT,
+                    STATUS_ACTIVE, STATUS_PENDING,
+                ),
+            ).fetchall()
+            chroma_ids: list[str] = []
+            for r in rows:
+                if r["status"] == STATUS_ACTIVE or r["chroma_id"]:
+                    chroma_ids.append(r["id"])
+                conn.execute(
+                    "UPDATE memories SET status = ? WHERE id = ?",
+                    (STATUS_ARCHIVED, r["id"]),
+                )
+        return chroma_ids
 
     def apply_decay(self) -> list[str]:
         """Expire les pending trop vieux + decay des actifs non confirmés.

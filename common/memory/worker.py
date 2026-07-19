@@ -12,6 +12,9 @@ from discord.ext import tasks
 
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
+    CATEGORY_EVENT,
+    CATEGORY_SERVER,
+    CONFIDENCE_CREATE,
     CONFIDENCE_PENDING,
     CONFIDENCE_UPDATE_DELTA,
     STATUS_ACTIVE,
@@ -143,7 +146,7 @@ class MemoryWorker:
         )
         if not actions:
             return
-        for action in actions[:3]:
+        for action in actions[:4]:
             await self._apply_action(guild_id, action)
 
     async def _apply_action(self, guild_id: int, action: dict) -> None:
@@ -168,7 +171,24 @@ class MemoryWorker:
             elif category == "server":
                 user_id = None
             # event : user_id optionnel
-            # Première observation → tampon pending (pas de Chroma / pas de RAG).
+            # Perso : tampon pending. Collectif (server/event) : actif tout de suite
+            # (petit serveur — on veut remplir /all sans attendre 2 hits).
+            if category in (CATEGORY_SERVER, CATEGORY_EVENT):
+                mem = self.store.create(
+                    category=category,
+                    guild_id=guild_id,
+                    content=content,
+                    user_id=user_id,
+                    confidence=CONFIDENCE_CREATE,
+                    status=STATUS_ACTIVE,
+                )
+                self.vectors.upsert(
+                    mem.id, mem.content,
+                    category=mem.category, guild_id=mem.guild_id,
+                    user_id=mem.user_id, confidence=mem.confidence,
+                )
+                logger.info("Mémoire serveur %s: %s", mem.id[:8], mem.content[:60])
+                return
             mem = self.store.create(
                 category=category,
                 guild_id=guild_id,

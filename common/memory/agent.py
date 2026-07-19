@@ -64,31 +64,27 @@ _MEMORY_SCHEMA = {
 
 _SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA, un bot Discord sur un petit serveur de potes.
 
-Tu as DEUX niveaux de mémoire :
-1) PENDING (tampon) — observation fragile, pas encore « vraie » mémoire.
-2) ACTIVE — souvenir confirmé (vu au moins 2 fois, ou déclaré manuellement).
+Tu as DEUX niveaux :
+1) PENDING — observation fragile (surtout perso).
+2) ACTIVE — souvenir confirmé / collectif retenu.
 
-PRIORITÉ ABSOLUE : regarde d'abord les PENDING. Si un sujet / gag / préférence REVIENT
-dans les messages → action update ou merge sur ce pending (target_id = son id).
-C'est comme ça qu'un one-shot devient un running gag. NE crée PAS un nouveau souvenir
-si un pending proche existe déjà.
+PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge
+(target_id = son id). Ne duplique pas.
 
-SOIS TRÈS SÉLECTIF. Préfère 0 action plutôt que du bruit. Max 3 actions par lot.
-Si rien de clair → {"memories": []}.
+Max 4 actions par lot. Si vraiment rien → {"memories": []}.
 
-RÈGLE ANTI ONE-SHOT :
-- Une blague, une anecdote, un événement raconté UNE fois ≠ running gag.
-- Un « j'aime X » dit une fois ≠ préférence solide.
-- Pour un possible gag / habitude / préférence : create (→ ira en pending).
-- Seulement si ça REVIENT (pending existant ou répétition claire dans le lot) : update/merge.
-- event : réservé aux vrais jalons (arrivée, départ, soirée organisée, lancement de projet) — pas une anecdote.
+CATÉGORIES — NE LES MÉLANGE PAS :
+- user : perso d'UN membre (user_id obligatoire). Préférences, ville, anniversaire, goûts.
+  Reste sélectif : un avis passager ≠ mémoire. Un « j'aime X » une fois → create pending OK
+  si c'est clair et durable ; sinon ignore.
+- server : collectif de CE serveur (user_id=null). Gags de groupe, surnoms collectifs,
+  habitudes du salon, running gags, blagues récurrentes, « chez nous on… ».
+  SOIS PLUS OUVERT ICI : dès qu'un gag / habitude de groupe est clairement identifiable
+  dans le lot (même première fois), create en server. Si plusieurs personnes en parlent
+  ou réagissent → server, pas user.
+- event : jalon du serveur (soirée, arrivée/départ, projet lancé). Anecdote du jour ≠ event.
 
-IGNORE : débats du jour, scores/actus, demandes au bot, avis passagers.
-
-CATÉGORIES :
-- user : perso d'UN membre (user_id obligatoire). Global tous serveurs. Pas de gag collectif ici.
-- server : collectif de CE serveur (user_id=null). Gags/habitudes de groupe.
-- event : jalon de CE serveur.
+IGNORE : débats du jour, scores/actus, demandes au bot, blabla sans ancrage.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id = id).
 Content : français, 1 phrase neutre, 3e personne."""
@@ -136,7 +132,7 @@ async def extract_memories(
         items = raw.get("memories") or []
         if not isinstance(items, list):
             return []
-        return [x for x in items if isinstance(x, dict)][:3]
+        return [x for x in items if isinstance(x, dict)][:4]
     except Exception as e:
         logger.warning("Extraction mémoire échouée: %s", e)
         return []
