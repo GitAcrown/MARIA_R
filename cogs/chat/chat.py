@@ -241,8 +241,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Mémoire",
-        "› `/me` — ce que MARIA a retenu de toi ; bouton pour lui forcer une info à 100 %.\n"
-        "› `/all` — mémoire collective du serveur (gags, habitudes, événements).\n"
+        "› `/me` — ce que MARIA a retenu de toi (tous serveurs) ; bouton pour forcer une info à 100 %.\n"
+        "› `/all` — mémoire collective de ce serveur (gags, habitudes, événements).\n"
         "› Elle n'enregistre pas tout : seulement ce qui reste utile sur le long terme.",
     ),
     (
@@ -389,24 +389,24 @@ class MeMemoryView(discord.ui.LayoutView):
         personal = [m for m in memories if m.category == "user" or m.user_id == user_id]
         if personal:
             lines = [
-                f"› {m.content}  ·  conf. {m.confidence:.0%}"
+                f"-# › {m.content} · conf. {m.confidence:.0%}"
                 for m in personal[:12]
             ]
             children += [
                 discord.ui.Separator(),
-                discord.ui.TextDisplay("**Souvenirs**\n" + "\n".join(lines)),
-                discord.ui.TextDisplay(
-                    f"-# {len(personal)} souvenir(s) · confiance basse = encore fragile"
-                ),
+                discord.ui.TextDisplay("\n".join(lines)),
             ]
         else:
             children += [
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucun souvenir perso pour l'instant."),
             ]
-        children.append(discord.ui.ActionRow(
-            _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
-        ))
+        children += [
+            discord.ui.Separator(),
+            discord.ui.ActionRow(
+                _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
+            ),
+        ]
         self.add_item(discord.ui.Container(*children))
 
 
@@ -430,16 +430,14 @@ class AllMemoryView(discord.ui.LayoutView):
                 if not items:
                     continue
                 lines = [
-                    f"› {m.content}  ·  conf. {m.confidence:.0%}"
+                    f"-# › {m.content} · conf. {m.confidence:.0%}"
                     for m in items[:10]
                 ]
                 children += [
                     discord.ui.Separator(),
-                    discord.ui.TextDisplay(f"**{labels.get(cat, cat)}**\n" + "\n".join(lines)),
+                    discord.ui.TextDisplay(f"-# **{labels.get(cat, cat)}**"),
+                    discord.ui.TextDisplay("\n".join(lines)),
                 ]
-            children.append(discord.ui.TextDisplay(
-                f"-# {len(memories)} souvenir(s) serveur · confiance basse = encore fragile"
-            ))
         else:
             children += [
                 discord.ui.Separator(),
@@ -862,7 +860,7 @@ class Chat(commands.Cog):
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,
                 author_id=message.author.id,
-                author_name=message.author.display_name,
+                author_name=message.author.name,
                 content=message.content,
             )
 
@@ -947,10 +945,10 @@ class Chat(commands.Cog):
             model=MODEL_NANO,
             memories=memories,
             scope="user",
-            display_name=interaction.user.display_name,
+            display_name=interaction.user.name,
         )
         view = MeMemoryView(
-            interaction.user.display_name, summary, memories,
+            interaction.user.name, summary, memories,
             store=self.memory_store, vectors=self.memory_vectors,
             guild_id=interaction.guild.id, user_id=interaction.user.id,
         )

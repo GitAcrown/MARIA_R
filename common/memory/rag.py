@@ -22,11 +22,16 @@ def retrieve_memories(
     author_id: int,
     top_k: int = 5,
 ) -> list[Memory]:
-    """Top-k souvenirs actifs via similarité Chroma + boost auteur."""
+    """Top-k : souvenirs perso globaux de l'auteur + souvenirs serveur du guild."""
     if not query.strip():
         return []
 
-    hits = vectors.query(query, guild_id=guild_id, n=max(top_k * 2, 10))
+    hits = vectors.query(
+        query,
+        guild_id=guild_id,
+        user_id=author_id,
+        n=max(top_k * 3, 12),
+    )
     if not hits:
         return []
 
@@ -40,6 +45,12 @@ def retrieve_memories(
         if m is None or m.status != STATUS_ACTIVE:
             continue
         if m.confidence < MIN_CONFIDENCE:
+            continue
+        # Perso : global. Collectif / event : guild courant uniquement.
+        if m.category == "user":
+            if m.user_id != author_id:
+                continue
+        elif m.guild_id != guild_id:
             continue
         candidates.append(m)
 

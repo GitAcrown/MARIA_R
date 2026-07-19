@@ -185,7 +185,10 @@ class MemoryWorker:
         if not target_id:
             return
         existing = self.store.get(target_id)
-        if existing is None or existing.guild_id != guild_id:
+        if existing is None:
+            return
+        # Souvenirs user = globaux ; server/event restent scopés au guild.
+        if existing.category != "user" and existing.guild_id != guild_id:
             return
 
         if kind in ("update", "merge"):

@@ -9,7 +9,7 @@ from common.memory.store import Memory
 
 logger = logging.getLogger("MARIA.Memory.Summary")
 
-_USER_SUMMARY = """Tu résumes ce que MARIA sait d'un membre Discord, à partir de souvenirs PERSONNELS uniquement.
+_USER_SUMMARY = """Tu résumes ce que MARIA sait d'un membre Discord, à partir de souvenirs PERSONNELS uniquement (globaux, tous serveurs confondus).
 Rédige 2 à 5 phrases courtes, naturelles, à la 2e personne (« tu… »).
 Pas de listes, pas d'emojis, pas d'intro du type « Voici ce que je sais ».
 Ignore toute info collective/serveur si elle apparaît par erreur.

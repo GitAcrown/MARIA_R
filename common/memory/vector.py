@@ -83,18 +83,39 @@ class VectorStore:
         self,
         text: str,
         *,
-        guild_id: int,
+        guild_id: Optional[int] = None,
+        user_id: Optional[int] = None,
         n: int = 10,
     ) -> list[dict]:
-        """Recherche sémantique filtrée par guild. Renvoie [{id, distance, metadata}]."""
+        """Recherche sémantique.
+
+        - Si `user_id` est fourni : souvenirs du guild **ou** souvenirs perso globaux de ce user.
+        - Sinon si `guild_id` : filtre guild uniquement.
+        - Sinon : pas de filtre (évité en pratique).
+        """
         if not self.available or not text.strip():
             return []
+        where = None
+        if user_id is not None and guild_id is not None:
+            where = {
+                "$or": [
+                    {"guild_id": int(guild_id)},
+                    {"$and": [{"category": "user"}, {"user_id": int(user_id)}]},
+                ]
+            }
+        elif guild_id is not None:
+            where = {"guild_id": int(guild_id)}
+        elif user_id is not None:
+            where = {"$and": [{"category": "user"}, {"user_id": int(user_id)}]}
+
         try:
-            result = self._collection.query(
-                query_texts=[text.strip()[:2000]],
-                n_results=n,
-                where={"guild_id": guild_id},
-            )
+            kwargs: dict = {
+                "query_texts": [text.strip()[:2000]],
+                "n_results": n,
+            }
+            if where is not None:
+                kwargs["where"] = where
+            result = self._collection.query(**kwargs)
         except Exception as e:
             logger.warning("Chroma query échoué: %s", e)
             return []

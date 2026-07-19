@@ -142,7 +142,7 @@ class MemoryStore:
         *,
         limit: int = 15,
     ) -> list[Memory]:
-        """Souvenirs actifs liés aux users du batch + quelques souvenirs serveur."""
+        """Souvenirs user (globaux) du batch + souvenirs serveur du guild courant."""
         with _db() as conn:
             server_rows = conn.execute(
                 """
@@ -156,14 +156,15 @@ class MemoryStore:
             if not user_ids:
                 return [_row_to_memory(r) for r in server_rows][:limit]
             placeholders = ",".join("?" * len(user_ids))
+            # Mémoire membre = globale (tous serveurs).
             user_rows = conn.execute(
                 f"""
                 SELECT * FROM memories
-                WHERE guild_id = ? AND status = ? AND user_id IN ({placeholders})
+                WHERE status = ? AND category = ? AND user_id IN ({placeholders})
                 ORDER BY confirmed_at DESC
                 LIMIT ?
                 """,
-                (guild_id, STATUS_ACTIVE, *user_ids, limit),
+                (STATUS_ACTIVE, CATEGORY_USER, *user_ids, limit),
             ).fetchall()
         seen: set[str] = set()
         out: list[Memory] = []
@@ -185,16 +186,16 @@ class MemoryStore:
         limit: int = 40,
         include_server: bool = False,
     ) -> list[Memory]:
-        """Souvenirs actifs d'un membre (+ optionnellement souvenirs serveur)."""
+        """Souvenirs perso d'un membre (globaux) (+ optionnellement serveur local)."""
         with _db() as conn:
             user_rows = conn.execute(
                 """
                 SELECT * FROM memories
-                WHERE guild_id = ? AND status = ? AND user_id = ? AND category = ?
+                WHERE status = ? AND user_id = ? AND category = ?
                 ORDER BY confidence DESC, confirmed_at DESC
                 LIMIT ?
                 """,
-                (guild_id, STATUS_ACTIVE, user_id, CATEGORY_USER, limit),
+                (STATUS_ACTIVE, user_id, CATEGORY_USER, limit),
             ).fetchall()
             server_rows = []
             if include_server:
@@ -216,7 +217,6 @@ class MemoryStore:
             seen.add(m.id)
             out.append(m)
         return out
-
     def list_server(
         self,
         guild_id: int,

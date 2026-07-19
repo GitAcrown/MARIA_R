@@ -77,10 +77,11 @@ avis passagers, petits faits sans lendemain, « j'aime bien X » dit une seule f
 CATÉGORIES — ne les confonds JAMAIS :
 - user : info PERSONNELLE sur UN membre précis (goût, projet, habitude, relation).
   Obligatoire : user_id = l'id Discord de CE membre (fourni dans les messages).
+  Ces souvenirs sont GLOBAUX (tous les serveurs) — n'en crée pas un doublon par serveur.
   N'attribue jamais à user une info collective (« on fait souvent… », gag du serveur).
-- server : info COLLECTIVE du serveur (règle implicite, gag partagé, habitude de groupe, rituels).
+- server : info COLLECTIVE de CE serveur (règle implicite, gag partagé, habitude de groupe).
   user_id = null. Ne range JAMAIS ici le goût ou le projet d'une seule personne.
-- event : événement ponctuel mais mémorable (arrivée/départ, lancement de projet, soirée organisée).
+- event : événement ponctuel mais mémorable sur CE serveur (arrivée/départ, soirée…).
   user_id = le membre concerné si pertinent, sinon null.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id = id existant).
