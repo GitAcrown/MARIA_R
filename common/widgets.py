@@ -40,12 +40,6 @@ def _load_builders() -> dict[str, Builder]:
     except ImportError:
         pass
 
-    try:
-        from cogs.pi.pi import build_sensor_view
-        builders["get_sensor_data"] = build_sensor_view
-    except ImportError:
-        pass
-
     return builders
 
 

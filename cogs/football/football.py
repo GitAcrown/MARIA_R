@@ -780,36 +780,23 @@ class Football(commands.Cog):
             Tool(
                 name="get_football",
                 description=(
-                    "Score, buteurs et statistiques d'un match de foot (possession, tirs, cartons…). "
-                    "Renseigne 'team' avec un club ou une sélection (ex: 'PSG', 'USA', 'France'). "
-                    "Si deux équipes sont citées, renseigne aussi 'opponent'. "
-                    "Laisse 'team' ET 'opponent' à null uniquement pour lister tous les matchs en direct "
-                    "(sans stats détaillées). Snapshot : rappelle l'outil pour rafraîchir."
+                    "Score / stats d'un match de foot en cours ou récent. "
+                    "team = club ou sélection (ex: 'PSG', 'France') ; opponent si deux équipes citées. "
+                    "Sans team : liste des matchs en direct (sans stats)."
                 ),
                 properties={
                     "team": {
                         "type":        "string",
-                        "description": (
-                            "Nom d'une équipe. Obligatoire pour score/buteurs/stats d'un match précis. "
-                            "null seulement pour la liste générale des matchs en direct."
-                        ),
+                        "description": "Équipe (obligatoire pour un match précis).",
                     },
                     "opponent": {
                         "type":        "string",
-                        "description": (
-                            "Autre équipe quand les deux adversaires sont cités (ex: team='USA', "
-                            "opponent='Australie'). null si une seule équipe suffit."
-                        ),
+                        "description": "Adversaire si les deux équipes sont citées.",
                     },
                     "when": {
                         "type":        "string",
-                        "enum":        ["auto", "live", "next", "last", "recent"],
-                        "description": (
-                            "Quel match : 'auto' (en direct sinon dernier résultat), 'live' (uniquement "
-                            "si l'équipe joue maintenant), 'next' (prochain match), 'last' (dernier "
-                            "résultat), 'recent' (liste des 5 derniers matchs de l'équipe). "
-                            "null = 'auto'."
-                        ),
+                        "enum":        ["auto", "live", "last"],
+                        "description": "'auto' (live sinon dernier), 'live', ou 'last'. Défaut : auto.",
                     },
                 },
                 optional_props=["team", "opponent", "when"],
