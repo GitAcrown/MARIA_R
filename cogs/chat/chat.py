@@ -40,6 +40,7 @@ from cogs.chat.config import (
 )
 from cogs.chat.tools_reminders import REMINDER_MAX_PENDING, build_reminder_tools
 from cogs.chat.tools_discord import build_discord_tools
+from cogs.chat.tools_memory import build_memory_tools
 
 # Patterns pour la sélection du modèle nano (tâches structurées simples)
 _NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
@@ -106,7 +107,7 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
-    "math_eval", "list_reminders",
+    "math_eval", "list_reminders", "search_memory",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table",
 })
@@ -133,6 +134,7 @@ OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, u
 - Mot d'argot, slang, anglicisme, expression obscure dont tu n'es pas certaine du sens → urban_dictionary. 
 - Titre inconnu d'un jeu, film ou série ("le jeu avec des robots dans l'espace", "ce film des années 90 avec…") → search_web pour identifier avant d'utiliser search_game/search_media.
 - Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, recurrence daily/weekly possible). Modifier, reporter ou annuler → edit_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu). Rédige le contenu du rappel de manière concise de manière impersonnelle sans répéter la demande.
+- Mémoire long terme (anniversaires connus, goûts d'un membre, gags du serveur, « qu'est-ce que tu sais sur… ») → search_memory. Ne pas inventer : s'il n'y a rien, dis-le. Ne sert PAS à écrire en mémoire.
 - Météo → get_weather. Commente la question posée sans jamais répéter les infos du widget.
 - Film ou série cité par son titre → search_media immédiatement, même pour "c'est bien ?". Commente selon note et goûts connus, sans répéter les infos déjà dans le widget attaché au message.
 - Jeu vidéo cité par son titre → search_game immédiatement, même pour "c'est quoi ?". Commente sans répéter les infos déjà dans le widget attaché au message.
@@ -581,6 +583,7 @@ class Chat(commands.Cog):
         # Outils propres au cog Chat.
         tools.extend(build_reminder_tools(self.rappels))
         tools.extend(build_discord_tools())
+        tools.extend(build_memory_tools(self.memory_store))
 
         self.gpt_api.update_tools(tools)
 

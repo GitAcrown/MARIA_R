@@ -255,6 +255,75 @@ class MemoryStore:
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    def search_active(
+        self,
+        guild_id: int,
+        *,
+        query: str = "",
+        category: Optional[str] = None,
+        user_id: Optional[int] = None,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """Recherche textuelle sur les souvenirs actifs (user globaux + serveur local).
+
+        - category=user : perso (tous serveurs), filtre user_id optionnel
+        - category=server|event : ce guild uniquement
+        - category=None : user (globaux) + server/event du guild
+        """
+        q = (query or "").strip().lower()
+        limit = max(1, min(limit, 30))
+        with _db() as conn:
+            rows: list = []
+            if category == CATEGORY_USER or category is None:
+                sql = """
+                    SELECT * FROM memories
+                    WHERE status = ? AND category = ?
+                """
+                params: list = [STATUS_ACTIVE, CATEGORY_USER]
+                if user_id is not None:
+                    sql += " AND user_id = ?"
+                    params.append(user_id)
+                if q:
+                    sql += " AND lower(content) LIKE ?"
+                    params.append(f"%{q}%")
+                sql += " ORDER BY confidence DESC, confirmed_at DESC LIMIT ?"
+                params.append(limit if category == CATEGORY_USER else limit)
+                rows.extend(conn.execute(sql, params).fetchall())
+
+            if category in (CATEGORY_SERVER, CATEGORY_EVENT) or category is None:
+                cats = (
+                    (category,)
+                    if category in (CATEGORY_SERVER, CATEGORY_EVENT)
+                    else (CATEGORY_SERVER, CATEGORY_EVENT)
+                )
+                placeholders = ",".join("?" * len(cats))
+                sql = f"""
+                    SELECT * FROM memories
+                    WHERE guild_id = ? AND status = ? AND category IN ({placeholders})
+                """
+                params = [guild_id, STATUS_ACTIVE, *cats]
+                if q:
+                    sql += " AND lower(content) LIKE ?"
+                    params.append(f"%{q}%")
+                sql += " ORDER BY confidence DESC, confirmed_at DESC LIMIT ?"
+                params.append(limit)
+                rows.extend(conn.execute(sql, params).fetchall())
+
+        seen: set[str] = set()
+        out: list[Memory] = []
+        for r in rows:
+            m = _row_to_memory(r)
+            if m.id in seen:
+                continue
+            # Si query fournie et category None, on a pu doubler les LIMIT — refiltre.
+            if q and q not in m.content.lower():
+                continue
+            seen.add(m.id)
+            out.append(m)
+            if len(out) >= limit:
+                break
+        return out
+
     def create(
         self,
         *,
