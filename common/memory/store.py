@@ -183,18 +183,18 @@ class MemoryStore:
         user_id: int,
         *,
         limit: int = 40,
-        include_server: bool = True,
+        include_server: bool = False,
     ) -> list[Memory]:
         """Souvenirs actifs d'un membre (+ optionnellement souvenirs serveur)."""
         with _db() as conn:
             user_rows = conn.execute(
                 """
                 SELECT * FROM memories
-                WHERE guild_id = ? AND status = ? AND user_id = ?
+                WHERE guild_id = ? AND status = ? AND user_id = ? AND category = ?
                 ORDER BY confidence DESC, confirmed_at DESC
                 LIMIT ?
                 """,
-                (guild_id, STATUS_ACTIVE, user_id, limit),
+                (guild_id, STATUS_ACTIVE, user_id, CATEGORY_USER, limit),
             ).fetchall()
             server_rows = []
             if include_server:
@@ -216,6 +216,25 @@ class MemoryStore:
             seen.add(m.id)
             out.append(m)
         return out
+
+    def list_server(
+        self,
+        guild_id: int,
+        *,
+        limit: int = 40,
+    ) -> list[Memory]:
+        """Souvenirs collectifs du serveur (server + event, sans mémoires user)."""
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE guild_id = ? AND status = ? AND category IN (?, ?)
+                ORDER BY confidence DESC, confirmed_at DESC
+                LIMIT ?
+                """,
+                (guild_id, STATUS_ACTIVE, CATEGORY_SERVER, CATEGORY_EVENT, limit),
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
 
     def create(
         self,
@@ -338,6 +357,9 @@ class MemoryStore:
                 (STATUS_ACTIVE, cutoff.isoformat()),
             ).fetchall()
             for r in rows:
+                if float(r["confidence"]) >= 0.99:
+                    # Souvenirs déclarés manuellement (confiance max) : pas de decay.
+                    continue
                 new_conf = max(0.0, float(r["confidence"]) - CONFIDENCE_DECAY)
                 if new_conf < CONFIDENCE_DECAY_ARCHIVE_BELOW:
                     conn.execute(

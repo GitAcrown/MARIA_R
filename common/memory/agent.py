@@ -63,23 +63,28 @@ _MEMORY_SCHEMA = {
 }
 
 _SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA, un bot Discord sur un petit serveur de potes.
-Tu analyses un lot de messages récents et tu décides quoi RETENIR pour plusieurs semaines/mois.
+Tu analyses un lot de messages et tu décides quoi RETENIR pour plusieurs semaines/mois.
 
-NE RETIENS QUE si la réponse est clairement OUI à :
-- Cette info sera-t-elle encore utile dans un mois ?
-- Est-ce une préférence durable, un projet, une relation, un rôle, un événement important, une habitude ou un running gag récurrent ?
+SOIS TRÈS SÉLECTIF. Préfère 0 souvenir plutôt que du bruit. Max 3 souvenirs par lot.
+Si rien de clairement durable → {"memories": []}.
 
-IGNORE : blagues ponctuelles, débats éphémères, scores/actus du jour, demandes au bot, petites phrases sans substance.
-Si rien à retenir → {"memories": []}. Préfère 0 souvenir plutôt que du bruit. Max 5 souvenirs par lot.
+NE RETIENS QUE si c'est clairement utile dans ≥ 1 mois :
+préférence durable, projet, relation, rôle, habitude, running gag récurrent, événement important.
 
-Actions :
-- create : nouveau souvenir (target_id=null)
-- update : même info re-observée ou précisée (target_id = id existant)
-- merge : fusionner dans un souvenir existant (target_id)
-- contradict : l'info existante est contredite (target_id)
+IGNORE absolument : blagues ponctuelles, débats du jour, scores/actus, demandes au bot,
+avis passagers, petits faits sans lendemain, « j'aime bien X » dit une seule fois sans suite.
 
-Catégories : user (goûts, projets, relations, habitudes d'une personne), server (règles implicites, gags, habitudes communauté), event (événements, arrivées/départs, projets collectifs).
-Rédige content en français, 1 phrase neutre et concise."""
+CATÉGORIES — ne les confonds JAMAIS :
+- user : info PERSONNELLE sur UN membre précis (goût, projet, habitude, relation).
+  Obligatoire : user_id = l'id Discord de CE membre (fourni dans les messages).
+  N'attribue jamais à user une info collective (« on fait souvent… », gag du serveur).
+- server : info COLLECTIVE du serveur (règle implicite, gag partagé, habitude de groupe, rituels).
+  user_id = null. Ne range JAMAIS ici le goût ou le projet d'une seule personne.
+- event : événement ponctuel mais mémorable (arrivée/départ, lancement de projet, soirée organisée).
+  user_id = le membre concerné si pertinent, sinon null.
+
+Actions : create (target_id=null) | update | merge | contradict (target_id = id existant).
+Rédige content en français, 1 phrase neutre et concise, à la 3e personne."""
 
 
 async def extract_memories(
@@ -122,7 +127,7 @@ async def extract_memories(
         items = raw.get("memories") or []
         if not isinstance(items, list):
             return []
-        return [x for x in items if isinstance(x, dict)]
+        return [x for x in items if isinstance(x, dict)][:3]
     except Exception as e:
         logger.warning("Extraction mémoire échouée: %s", e)
         return []

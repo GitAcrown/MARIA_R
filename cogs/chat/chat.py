@@ -18,8 +18,8 @@ from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
 from common.llm import MariaGptApi, Tool
 from common.memory import MemoryStore, MemoryWorker, format_memory_ctx, retrieve_memories
-from common.memory.store import Memory
-from common.memory.summary import summarize_memories_for_user
+from common.memory.store import CATEGORY_USER, Memory
+from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
 from common.rappels import KIND_EVENT, RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore, RappelWorker
 from common.timezones import PARIS_TZ
@@ -241,7 +241,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Mémoire",
-        "› `/memory` — vois ce que MARIA a retenu de toi (préférences, projets, gags…).\n"
+        "› `/me` — ce que MARIA a retenu de toi ; bouton pour lui forcer une info à 100 %.\n"
+        "› `/all` — mémoire collective du serveur (gags, habitudes, événements).\n"
         "› Elle n'enregistre pas tout : seulement ce qui reste utile sur le long terme.",
     ),
     (
@@ -274,13 +275,148 @@ class TipsView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(*children))
 
 
-class MemoryView(discord.ui.LayoutView):
-    """Résumé de ce que MARIA sait d'un membre."""
+class AddPersonalMemoryModal(discord.ui.Modal, title="À retenir sur moi"):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__()
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+        self.fact = discord.ui.TextInput(
+            label="Info à retenir",
+            placeholder="Ex: J'habite à Lyon · Anniversaire le 12 mars · Je déteste le café",
+            style=discord.TextStyle.paragraph,
+            max_length=280,
+            required=True,
+        )
+        self.add_item(self.fact)
 
-    def __init__(self, display_name: str, summary: str, memories: list[Memory]):
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        content = self.fact.value.strip()
+        if not content:
+            return await interaction.response.send_message("Info vide.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        mem = await asyncio.to_thread(
+            self.store.create,
+            category=CATEGORY_USER,
+            guild_id=self.guild_id,
+            content=content,
+            user_id=self.user_id,
+            confidence=1.0,
+        )
+        self.vectors.upsert(
+            mem.id, mem.content,
+            category=mem.category, guild_id=mem.guild_id,
+            user_id=mem.user_id, confidence=mem.confidence,
+        )
+        memories = await asyncio.to_thread(
+            self.store.list_for_user, self.guild_id, self.user_id, limit=40, include_server=False,
+        )
+        summary = f"› {mem.content}"
+        chat_cog = interaction.client.get_cog("Chat")
+        if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
+            summary = await summarize_memories(
+                chat_cog.gpt_api.client,
+                model=MODEL_NANO,
+                memories=memories,
+                scope="user",
+                display_name=self.display_name,
+            )
+        view = MeMemoryView(
+            self.display_name, summary, memories,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _AddPersonalMemoryButton(discord.ui.Button):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(style=discord.ButtonStyle.primary, label="Retenir…")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        await interaction.response.send_modal(
+            AddPersonalMemoryModal(
+                self.store, self.vectors, self.guild_id, self.user_id, self.display_name,
+            )
+        )
+
+
+class MeMemoryView(discord.ui.LayoutView):
+    """Mémoire personnelle — /me."""
+
+    def __init__(
+        self,
+        display_name: str,
+        summary: str,
+        memories: list[Memory],
+        *,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+    ):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## Ce que je sais de {display_name}"),
+            discord.ui.TextDisplay(f"## Mémoire · {display_name}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(summary),
+        ]
+        personal = [m for m in memories if m.category == "user" or m.user_id == user_id]
+        if personal:
+            lines = [
+                f"› {m.content}  ·  conf. {m.confidence:.0%}"
+                for m in personal[:12]
+            ]
+            children += [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("**Souvenirs**\n" + "\n".join(lines)),
+                discord.ui.TextDisplay(
+                    f"-# {len(personal)} souvenir(s) · confiance basse = encore fragile"
+                ),
+            ]
+        else:
+            children += [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("-# Aucun souvenir perso pour l'instant."),
+            ]
+        children.append(discord.ui.ActionRow(
+            _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
+        ))
+        self.add_item(discord.ui.Container(*children))
+
+
+class AllMemoryView(discord.ui.LayoutView):
+    """Mémoire collective — /all."""
+
+    def __init__(self, guild_name: str, summary: str, memories: list[Memory]):
+        super().__init__(timeout=180)
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(f"## Mémoire · {guild_name}"),
             discord.ui.Separator(),
             discord.ui.TextDisplay(summary),
         ]
@@ -288,26 +424,26 @@ class MemoryView(discord.ui.LayoutView):
             by_cat: dict[str, list[Memory]] = {}
             for m in memories:
                 by_cat.setdefault(m.category, []).append(m)
-            labels = {"user": "Sur toi", "server": "Sur le serveur", "event": "Événements"}
-            for cat in ("user", "server", "event"):
+            labels = {"server": "Collectif", "event": "Événements"}
+            for cat in ("server", "event"):
                 items = by_cat.get(cat) or []
                 if not items:
                     continue
                 lines = [
                     f"› {m.content}  ·  conf. {m.confidence:.0%}"
-                    for m in items[:8]
+                    for m in items[:10]
                 ]
                 children += [
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(f"**{labels.get(cat, cat)}**\n" + "\n".join(lines)),
                 ]
             children.append(discord.ui.TextDisplay(
-                f"-# {len(memories)} souvenir(s) · confiance basse = info encore fragile"
+                f"-# {len(memories)} souvenir(s) serveur · confiance basse = encore fragile"
             ))
         else:
             children += [
                 discord.ui.Separator(),
-                discord.ui.TextDisplay("-# Aucun souvenir enregistré pour l'instant."),
+                discord.ui.TextDisplay("-# Aucun souvenir serveur pour l'instant."),
             ]
         self.add_item(discord.ui.Container(*children))
 
@@ -792,8 +928,8 @@ class Chat(commands.Cog):
     async def cmd_tips(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(view=TipsView(), ephemeral=True)
 
-    @app_commands.command(name="memory", description="Ce que MARIA a retenu de toi")
-    async def cmd_memory(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="me", description="Ta mémoire perso chez MARIA")
+    async def cmd_me(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
             return await interaction.response.send_message(
                 "Disponible uniquement sur un serveur.", ephemeral=True,
@@ -804,15 +940,42 @@ class Chat(commands.Cog):
             interaction.guild.id,
             interaction.user.id,
             limit=40,
-            include_server=True,
+            include_server=False,
         )
-        summary = await summarize_memories_for_user(
+        summary = await summarize_memories(
             self.gpt_api.client,
             model=MODEL_NANO,
-            display_name=interaction.user.display_name,
             memories=memories,
+            scope="user",
+            display_name=interaction.user.display_name,
         )
-        view = MemoryView(interaction.user.display_name, summary, memories)
+        view = MeMemoryView(
+            interaction.user.display_name, summary, memories,
+            store=self.memory_store, vectors=self.memory_vectors,
+            guild_id=interaction.guild.id, user_id=interaction.user.id,
+        )
+        await interaction.followup.send(view=view, ephemeral=True)
+
+    @app_commands.command(name="all", description="Mémoire collective du serveur")
+    async def cmd_all(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "Disponible uniquement sur un serveur.", ephemeral=True,
+            )
+        await interaction.response.defer(ephemeral=True)
+        memories = await asyncio.to_thread(
+            self.memory_store.list_server,
+            interaction.guild.id,
+            limit=40,
+        )
+        summary = await summarize_memories(
+            self.gpt_api.client,
+            model=MODEL_NANO,
+            memories=memories,
+            scope="server",
+            display_name=interaction.guild.name,
+        )
+        view = AllMemoryView(interaction.guild.name, summary, memories)
         await interaction.followup.send(view=view, ephemeral=True)
 
     @app_commands.command(name="info", description="Statistiques de la session en cours")

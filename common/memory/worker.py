@@ -142,7 +142,7 @@ class MemoryWorker:
         )
         if not actions:
             return
-        for action in actions[:5]:
+        for action in actions[:3]:
             await self._apply_action(guild_id, action)
 
     async def _apply_action(self, guild_id: int, action: dict) -> None:
@@ -160,6 +160,13 @@ class MemoryWorker:
         if kind == "create":
             if not content:
                 return
+            # Sépare strictement perso / collectif.
+            if category == "user":
+                if user_id is None:
+                    return
+            elif category == "server":
+                user_id = None
+            # event : user_id optionnel
             mem = self.store.create(
                 category=category,
                 guild_id=guild_id,
