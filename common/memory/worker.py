@@ -172,7 +172,7 @@ class MemoryWorker:
                 user_id = None
             # event : user_id optionnel
             # Perso : tampon pending. Collectif (server/event) : actif tout de suite
-            # (petit serveur — on veut remplir /all sans attendre 2 hits).
+            # (petit serveur — on veut remplir /global sans attendre 2 hits).
             if category in (CATEGORY_SERVER, CATEGORY_EVENT):
                 mem = self.store.create(
                     category=category,

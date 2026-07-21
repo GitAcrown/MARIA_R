@@ -258,8 +258,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Mémoire",
-        "› `/me` — ta mémoire perso (tous serveurs) ; Retenir… / Tout oublier.\n"
-        "› `/all` — mémoire collective du serveur ; reset réservé aux admins.\n"
+        "› `/moi` — ta mémoire perso (tous serveurs) ; Retenir… / Tout oublier.\n"
+        "› `/global` — mémoire collective du serveur ; reset réservé aux admins.\n"
         "› Elle n'enregistre pas tout : perso = sélectif, collectif = plus ouvert.",
     ),
     (
@@ -508,7 +508,7 @@ class ConfirmResetMeView(discord.ui.LayoutView):
 
 
 class MeMemoryView(discord.ui.LayoutView):
-    """Mémoire personnelle — /me."""
+    """Mémoire personnelle — /moi."""
 
     def __init__(
         self,
@@ -682,7 +682,7 @@ class ConfirmResetAllView(discord.ui.LayoutView):
 
 
 class AllMemoryView(discord.ui.LayoutView):
-    """Mémoire collective — /all."""
+    """Mémoire collective — /global."""
 
     def __init__(
         self,
@@ -1370,8 +1370,8 @@ class Chat(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="me", description="Ta mémoire perso chez MARIA")
-    async def cmd_me(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="moi", description="Ta mémoire perso chez MARIA")
+    async def cmd_moi(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
             return await interaction.response.send_message(
                 "Disponible uniquement sur un serveur.", ephemeral=True,
@@ -1398,8 +1398,8 @@ class Chat(commands.Cog):
         )
         await interaction.followup.send(view=view, ephemeral=True)
 
-    @app_commands.command(name="all", description="Mémoire collective du serveur")
-    async def cmd_all(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(name="global", description="Mémoire collective du serveur")
+    async def cmd_global(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
             return await interaction.response.send_message(
                 "Disponible uniquement sur un serveur.", ephemeral=True,

@@ -1,4 +1,4 @@
-"""Résumés mémoire pour /me et /all."""
+"""Résumés mémoire pour /moi et /global."""
 
 from __future__ import annotations
 

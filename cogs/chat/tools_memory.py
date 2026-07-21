@@ -68,7 +68,7 @@ def build_memory_tools(store: MemoryStore) -> list[Tool]:
                 "Consulte la mémoire long terme de MARIA (lecture seule). "
                 "À utiliser pour ÉNUMÉRER ou FILTRER : anniversaires connus, goûts d'un membre, "
                 "gags du serveur, événements retenus. "
-                "Pas pour écrire/modifier — la mémoire se remplit seule ou via /me. "
+                "Pas pour écrire/modifier — la mémoire se remplit seule ou via /moi. "
                 "query = mot-clé optionnel (ex: 'anniversaire', 'PSG'). "
                 "category = 'user' (perso), 'server' (collectif), 'event', ou omit pour tout. "
                 "user_id = id Discord si tu cherches un membre précis."
