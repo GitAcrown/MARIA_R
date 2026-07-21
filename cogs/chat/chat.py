@@ -21,7 +21,15 @@ from common.memory import MemoryStore, MemoryWorker, format_memory_ctx, retrieve
 from common.memory.store import CATEGORY_USER, STATUS_ACTIVE, Memory
 from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
-from common.rappels import KIND_EVENT, RECURRENCE_NONE, VALID_RECURRENCES, Rappel, RappelStore, RappelWorker
+from common.rappels import (
+    KIND_EVENT,
+    RECURRENCE_NONE,
+    REPEAT_EMOJI,
+    VALID_RECURRENCES,
+    Rappel,
+    RappelStore,
+    RappelWorker,
+)
 from common.timezones import PARIS_TZ
 from common.widgets import build_widget
 
@@ -38,7 +46,11 @@ from cogs.chat.config import (
     MODEL_MAIN,
     MODEL_NANO,
 )
-from cogs.chat.tools_reminders import REMINDER_MAX_PENDING, build_reminder_tools
+from cogs.chat.tools_reminders import (
+    REMINDER_MAX_PENDING,
+    _validate_horizon,
+    build_reminder_tools,
+)
 from cogs.chat.tools_discord import build_discord_tools
 from cogs.chat.tools_memory import build_memory_tools
 
@@ -107,7 +119,7 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
-    "math_eval", "list_reminders", "search_memory",
+    "math_eval", "list_reminders", "show_reminders", "search_memory",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table",
 })
@@ -133,7 +145,7 @@ OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, u
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. 
 - Mot d'argot, slang, anglicisme, expression obscure dont tu n'es pas certaine du sens → urban_dictionary. 
 - Titre inconnu d'un jeu, film ou série ("le jeu avec des robots dans l'espace", "ce film des années 90 avec…") → search_web pour identifier avant d'utiliser search_game/search_media.
-- Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, recurrence daily/weekly possible). Modifier, reporter ou annuler → edit_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu). Rédige le contenu du rappel de manière concise de manière impersonnelle sans répéter la demande.
+- Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, max 365j ; recurrence daily/weekly limitée à 30j). Modifier / annuler → edit_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu ; un récurrent = un seul ID, l'annuler stoppe la série). Afficher les rappels de quelqu'un dans le salon → show_reminders (widget, sans boutons). Rédige le contenu du rappel de manière concise et impersonnelle sans répéter la demande.
 - Mémoire long terme (anniversaires connus, goûts d'un membre, gags du serveur, « qu'est-ce que tu sais sur… ») → search_memory. Ne pas inventer : s'il n'y a rien, dis-le. Ne sert PAS à écrire en mémoire.
 - Météo → get_weather. Commente la question posée sans jamais répéter les infos du widget.
 - Film ou série cité par son titre → search_media immédiatement, même pour "c'est bien ?". Commente selon note et goûts connus, sans répéter les infos déjà dans le widget attaché au message.
@@ -237,6 +249,7 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     (
         "Rappels",
         "› Demande-lui un rappel en langage naturel (« rappelle-moi demain 18h », « tous les lundis à 8h »).\n"
+        "› `/rappels` — liste tes rappels et annule-les (y compris les séries).\n"
         "› Une date JJ/MM/AAAA ou JJ/MM dans un message ? MARIA réagit avec 📅 — clique pour te créer un "
         "rappel (elle lit le reste du message pour deviner de quoi il s'agit).\n"
         f"› {SETTINGS} `/chatbot datedetect` — active/désactive cette détection sur un salon.",
@@ -720,6 +733,137 @@ class AllMemoryView(discord.ui.LayoutView):
 
 
 # ---------------------------------------------------------------------------
+# Rappels — /rappels
+# ---------------------------------------------------------------------------
+
+_RECURRENCE_LABEL = {
+    "daily": "quotidien",
+    "weekly": "hebdo",
+}
+
+
+def _format_rappel_line(r: Rappel) -> str:
+    ts = int(r.execute_at.timestamp())
+    if r.recurrence != RECURRENCE_NONE:
+        label = _RECURRENCE_LABEL.get(r.recurrence, r.recurrence)
+        until = ""
+        if r.recurrence_until:
+            until = f" · jusqu'au <t:{int(r.recurrence_until.timestamp())}:d>"
+        return f"**#{r.id}** {REPEAT_EMOJI} · <t:{ts}:f> · {label}{until}\n› {r.description}"
+    return f"**#{r.id}** · <t:{ts}:f> (<t:{ts}:R>)\n› {r.description}"
+
+
+class _CancelRappelSelect(discord.ui.Select):
+    def __init__(self, store: RappelStore, user_id: int, rappels: list[Rappel]):
+        options = []
+        for r in rappels[:25]:
+            label = f"#{r.id} · {r.description}"[:100]
+            desc = "récurrent" if r.recurrence != RECURRENCE_NONE else r.execute_at.astimezone(PARIS_TZ).strftime("%d/%m %H:%M")
+            options.append(discord.SelectOption(label=label, value=str(r.id), description=desc[:100]))
+        super().__init__(placeholder="Annuler un rappel…", options=options, min_values=1, max_values=1)
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas tes rappels.", ephemeral=True)
+        rid = int(self.values[0])
+        ok = self.store.cancel(rid, self.user_id)
+        remaining = self.store.get_user_rappels(self.user_id)
+        note = f"Rappel **#{rid}** annulé." if ok else f"Rappel **#{rid}** introuvable."
+        await interaction.response.edit_message(view=RappelsView(self.store, self.user_id, remaining, note=note))
+
+
+class _CancelAllRappelsButton(discord.ui.Button):
+    def __init__(self, store: RappelStore, user_id: int):
+        super().__init__(style=discord.ButtonStyle.danger, label="Tout annuler")
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas tes rappels.", ephemeral=True)
+        await interaction.response.edit_message(
+            view=ConfirmCancelAllRappelsView(self.store, self.user_id),
+        )
+
+
+class _ConfirmCancelAllRappelsButton(discord.ui.Button):
+    def __init__(self, store: RappelStore, user_id: int):
+        super().__init__(style=discord.ButtonStyle.danger, label="Confirmer")
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas tes rappels.", ephemeral=True)
+        n = self.store.cancel_all(self.user_id)
+        await interaction.response.edit_message(
+            view=RappelsView(self.store, self.user_id, [], note=f"{n} rappel(s) annulé(s)."),
+        )
+
+
+class _CancelCancelAllRappelsButton(discord.ui.Button):
+    def __init__(self, store: RappelStore, user_id: int):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Annuler")
+        self.store = store
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas tes rappels.", ephemeral=True)
+        remaining = self.store.get_user_rappels(self.user_id)
+        await interaction.response.edit_message(view=RappelsView(self.store, self.user_id, remaining))
+
+
+class ConfirmCancelAllRappelsView(discord.ui.LayoutView):
+    def __init__(self, store: RappelStore, user_id: int):
+        super().__init__(timeout=60)
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Rappels"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("Annuler **tous** tes rappels en attente (séries incluses) ?"),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(
+                _ConfirmCancelAllRappelsButton(store, user_id),
+                _CancelCancelAllRappelsButton(store, user_id),
+            ),
+        ))
+
+
+class RappelsView(discord.ui.LayoutView):
+    """Gestion des rappels — /rappels."""
+
+    def __init__(
+        self,
+        store: RappelStore,
+        user_id: int,
+        rappels: list[Rappel],
+        *,
+        note: str = "",
+    ):
+        super().__init__(timeout=180)
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## Rappels"),
+            discord.ui.Separator(),
+        ]
+        if note:
+            children.append(discord.ui.TextDisplay(note))
+            children.append(discord.ui.Separator())
+        if not rappels:
+            children.append(discord.ui.TextDisplay("-# Aucun rappel en attente."))
+        else:
+            body = "\n\n".join(_format_rappel_line(r) for r in rappels[:15])
+            if len(rappels) > 15:
+                body += f"\n\n-# … et {len(rappels) - 15} de plus."
+            children.append(discord.ui.TextDisplay(body))
+            children.append(discord.ui.Separator())
+            children.append(discord.ui.ActionRow(_CancelRappelSelect(store, user_id, rappels)))
+            children.append(discord.ui.ActionRow(_CancelAllRappelsButton(store, user_id)))
+        self.add_item(discord.ui.Container(*children))
+
+
+# ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
 
@@ -806,8 +950,13 @@ class Chat(commands.Cog):
 
     async def _exec_rappel(self, r: Rappel) -> None:
         channel = self.bot.get_channel(r.channel_id)
-        if not channel:
-            return
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(r.channel_id)
+            except discord.HTTPException as e:
+                raise RuntimeError(f"Salon {r.channel_id} inaccessible") from e
+        if channel is None:
+            raise RuntimeError(f"Salon {r.channel_id} introuvable")
 
         ts = int(r.execute_at.timestamp())
 
@@ -817,7 +966,7 @@ class Chat(commands.Cog):
             await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
             return
 
-        repeat_str = " <:repeat:1525261027883745342>" if r.recurrence != RECURRENCE_NONE else ""
+        repeat_str = f" {REPEAT_EMOJI}" if r.recurrence != RECURRENCE_NONE else ""
         content = f"{r.description}\n-# Rappel{repeat_str} · <@{r.user_id}> · <t:{ts}:R>"
         mentions = discord.AllowedMentions(users=True)
 
@@ -926,6 +1075,13 @@ class Chat(commands.Cog):
             if execute_at.tzinfo is None:
                 execute_at = execute_at.replace(tzinfo=PARIS_TZ)
             execute_at = execute_at.astimezone(timezone.utc)
+            err = _validate_horizon(execute_at)
+            if err:
+                await message.channel.send(
+                    f"{requester.mention} {err}.", delete_after=10,
+                    allowed_mentions=discord.AllowedMentions(users=True),
+                )
+                return
             recurrence = raw.get("recurrence") or RECURRENCE_NONE
             if recurrence not in VALID_RECURRENCES:
                 recurrence = RECURRENCE_NONE
@@ -942,7 +1098,7 @@ class Chat(commands.Cog):
             message.channel.id, requester.id, description, execute_at, message.id, recurrence=recurrence,
         )
         ts = int(execute_at.timestamp())
-        repeat_str = " <:repeat:1525261027883745342>" if recurrence != RECURRENCE_NONE else ""
+        repeat_str = f" {REPEAT_EMOJI}" if recurrence != RECURRENCE_NONE else ""
         await message.reply(
             f"> **#{rid}**{repeat_str} · <t:{ts}:f> (<t:{ts}:R>)\n> {description}"
             f"\n-# Rappel créé · {requester.mention}",
@@ -1199,6 +1355,15 @@ class Chat(commands.Cog):
     @app_commands.command(name="tips", description="Quelques astuces pour utiliser MARIA")
     async def cmd_tips(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(view=TipsView(), ephemeral=True)
+
+    @app_commands.command(name="rappels", description="Tes rappels en attente — liste et annulation")
+    async def cmd_rappels(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        rappels = await asyncio.to_thread(self.rappels.get_user_rappels, interaction.user.id)
+        await interaction.followup.send(
+            view=RappelsView(self.rappels, interaction.user.id, rappels),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="me", description="Ta mémoire perso chez MARIA")
     async def cmd_me(self, interaction: discord.Interaction) -> None:

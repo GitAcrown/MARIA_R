@@ -40,6 +40,12 @@ def _load_builders() -> dict[str, Builder]:
     except ImportError:
         pass
 
+    try:
+        from cogs.chat.tools_reminders import build_reminders_view
+        builders["show_reminders"] = build_reminders_view
+    except ImportError:
+        pass
+
     return builders
 
 
