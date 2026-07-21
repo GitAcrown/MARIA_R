@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import re
 
 import discord
 
@@ -27,6 +28,37 @@ _RECURRENCE_LABEL = {
     "daily": "quotidien",
     "weekly": "hebdo",
 }
+
+# Préfixes méta que le modèle a tendance à coller (« Rappeler que… »).
+_META_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"rappeler?\s+(?:que|qu'|de|d')|"
+    r"rappelle[-\s]?moi\s+(?:que|qu'|de|d')|"
+    r"n['']?oublie\s+pas\s+(?:de|d'|que|qu')|"
+    r"ne\s+pas\s+oublier\s+(?:de|d'|que|qu')|"
+    r"pense\s+[àa]\s+|"
+    r"rappel\s*[:\-–—]\s*"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def sanitize_reminder_description(text: str) -> str:
+    """Enlève les formulations méta (« Rappeler que… ») → contenu seul."""
+    desc = (text or "").strip()
+    if not desc:
+        return desc
+    # Plusieurs passes si le modèle empile les préfixes.
+    for _ in range(3):
+        cleaned = _META_PREFIX_RE.sub("", desc).strip(" \t-–—:.,")
+        if cleaned == desc:
+            break
+        desc = cleaned
+    # « c'est l'anniversaire de X » → « l'anniversaire de X »
+    desc = re.sub(r"^c['']est\s+", "", desc, flags=re.IGNORECASE).strip()
+    if desc:
+        desc = desc[0].upper() + desc[1:]
+    return desc[:200]
 
 
 def _parse_execute_at(execute_at_str: str) -> datetime:
@@ -135,7 +167,7 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         if not ctx or not ctx.trigger_message:
             return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
         args = tc.arguments
-        desc = (args.get("task_description") or "").strip()
+        desc = sanitize_reminder_description(args.get("task_description") or "")
         if not desc:
             return ToolResponseRecord(tc.id, {"error": "Description manquante"}, datetime.now(timezone.utc))
 
@@ -202,7 +234,10 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
             return ToolResponseRecord(tc.id, {"error": "task_id manquant"}, datetime.now(timezone.utc))
 
         new_desc = args.get("task_description")
-        new_desc = new_desc.strip() if isinstance(new_desc, str) and new_desc.strip() else None
+        if isinstance(new_desc, str) and new_desc.strip():
+            new_desc = sanitize_reminder_description(new_desc) or None
+        else:
+            new_desc = None
 
         execute_at = None
         execute_at_str = (args.get("execute_at") or "").strip()
@@ -339,10 +374,11 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
                 "task_description": {
                     "type": "string",
                     "description": (
-                        "Description de la tâche — rédige à l'impératif, sans référence temporelle "
-                        "relative ('demain', 'ce soir', 'dans 2h'…), car ces termes n'auront plus de "
-                        "sens au moment du déclenchement. Exemples corrects : 'Appeler le médecin', "
-                        "'Ne pas déjeuner', 'Envoyer le rapport à Paul'. Évite : 'Ne pas déjeuner demain'."
+                        "Contenu du rappel tel qu'il s'affichera à l'heure H — le FAIT / l'événement seul. "
+                        "INTERDIT : préfixer par « Rappeler que », « Rappelle-moi de », « N'oublie pas de », "
+                        "« Rappel : ». Pas de référence temporelle relative ('demain', 'ce soir'). "
+                        "Ex. OK : 'Anniversaire de Enzo', 'Appeler le médecin', 'Sortir les poubelles'. "
+                        "Ex. KO : 'Rappeler que c'est l'anniversaire de Enzo', 'Ne pas oublier d'appeler'."
                     ),
                 },
                 "execute_at": {"type": "string", "description": "Date/heure absolue ISO 8601 (prioritaire sur les délais)"},

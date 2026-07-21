@@ -50,6 +50,7 @@ from cogs.chat.tools_reminders import (
     REMINDER_MAX_PENDING,
     _validate_horizon,
     build_reminder_tools,
+    sanitize_reminder_description,
 )
 from cogs.chat.tools_discord import build_discord_tools
 from cogs.chat.tools_memory import build_memory_tools
@@ -76,8 +77,9 @@ _REMINDER_FROM_TEXT_SCHEMA = {
                 "description": {
                     "type": "string",
                     "description": (
-                        "Résumé concis et impersonnel de l'événement/tâche mentionné dans le message "
-                        "(sans répéter la date), rédigé de manière neutre. Max 100 caractères."
+                        "Contenu du rappel à l'heure H : le fait/événement seul "
+                        "(ex. 'Anniversaire de Enzo'). Sans date, sans « Rappeler que… » / "
+                        "« Rappelle-moi… ». Max 100 caractères."
                     ),
                 },
                 "execute_at": {
@@ -145,7 +147,7 @@ OUTILS — RÈGLE D'OR : N'inventes JAMAIS un fait, une définition, une date, u
 - Fait factuel (date, sortie, prix, stat, personne, actu, "c'est quoi/qui…", "ça existe ?") → search_web. 
 - Mot d'argot, slang, anglicisme, expression obscure dont tu n'es pas certaine du sens → urban_dictionary. 
 - Titre inconnu d'un jeu, film ou série ("le jeu avec des robots dans l'espace", "ce film des années 90 avec…") → search_web pour identifier avant d'utiliser search_game/search_media.
-- Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, max 365j ; recurrence daily/weekly limitée à 30j). Modifier / annuler → edit_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu ; un récurrent = un seul ID, l'annuler stoppe la série). Afficher les rappels de quelqu'un dans le salon → show_reminders (widget, sans boutons). Rédige le contenu du rappel de manière concise et impersonnelle sans répéter la demande.
+- Rappels → schedule_reminder (execute_at ISO 8601 ou delay_minutes/delay_hours, max 365j ; recurrence daily/weekly limitée à 30j). Modifier / annuler → edit_reminder / cancel_reminder (list_reminders d'abord si l'ID est inconnu ; un récurrent = un seul ID, l'annuler stoppe la série). Afficher les rappels de quelqu'un dans le salon → show_reminders (widget, sans boutons). task_description = le fait seul (« Anniversaire de Enzo »), JAMAIS « Rappeler que… » / « Rappelle-moi de… ».
 - Mémoire long terme (anniversaires connus, goûts d'un membre, gags du serveur, « qu'est-ce que tu sais sur… ») → search_memory. Ne pas inventer : s'il n'y a rien, dis-le. Ne sert PAS à écrire en mémoire.
 - Météo → get_weather. Commente la question posée sans jamais répéter les infos du widget.
 - Film ou série cité par son titre → search_media immédiatement, même pour "c'est bien ?". Commente selon note et goûts connus, sans répéter les infos déjà dans le widget attaché au message.
@@ -1085,7 +1087,10 @@ class Chat(commands.Cog):
             recurrence = raw.get("recurrence") or RECURRENCE_NONE
             if recurrence not in VALID_RECURRENCES:
                 recurrence = RECURRENCE_NONE
-            description = (raw.get("description") or "Rappel").strip()[:150]
+            description = sanitize_reminder_description(
+                (raw.get("description") or "Rappel").strip()
+            ) or "Rappel"
+            description = description[:150]
         except Exception as e:
             logger.warning(f"Extraction rappel depuis message échouée : {e}")
             await message.channel.send(
