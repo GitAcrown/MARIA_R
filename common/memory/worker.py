@@ -159,7 +159,7 @@ class MemoryWorker:
         for m in batch:
             if m.reply_to_id is not None:
                 user_ids.add(m.reply_to_id)
-        existing = self.store.list_for_users(guild_id, user_ids, limit=15)
+        existing = await asyncio.to_thread(self.store.list_for_users, guild_id, user_ids, limit=15)
         batch_text = "\n".join(m.format_line() for m in batch)
         actions = await extract_memories(
             self.llm_client,
@@ -174,7 +174,7 @@ class MemoryWorker:
 
     async def _apply_action(self, guild_id: int, action: dict) -> None:
         kind = (action.get("action") or "").strip()
-        content = (action.get("content") or "").strip()
+        content = (action.get("content") or "").strip()[:300]
         category = (action.get("category") or "user").strip()
         if category not in VALID_CATEGORIES:
             category = "user"
@@ -197,7 +197,8 @@ class MemoryWorker:
             # Perso : tampon pending. Collectif (server/event) : actif tout de suite
             # (petit serveur — on veut remplir /global sans attendre 2 hits).
             if category in (CATEGORY_SERVER, CATEGORY_EVENT):
-                mem = self.store.create(
+                mem = await asyncio.to_thread(
+                    self.store.create,
                     category=category,
                     guild_id=guild_id,
                     content=content,
@@ -205,14 +206,16 @@ class MemoryWorker:
                     confidence=CONFIDENCE_CREATE,
                     status=STATUS_ACTIVE,
                 )
-                self.vectors.upsert(
+                await asyncio.to_thread(
+                    self.vectors.upsert,
                     mem.id, mem.content,
                     category=mem.category, guild_id=mem.guild_id,
                     user_id=mem.user_id, confidence=mem.confidence,
                 )
                 logger.info("Mémoire serveur %s: %s", mem.id[:8], mem.content[:60])
                 return
-            mem = self.store.create(
+            mem = await asyncio.to_thread(
+                self.store.create,
                 category=category,
                 guild_id=guild_id,
                 content=content,
@@ -225,7 +228,7 @@ class MemoryWorker:
 
         if not target_id:
             return
-        existing = self.store.get(target_id)
+        existing = await asyncio.to_thread(self.store.get, target_id)
         if existing is None:
             return
         # Souvenirs user = globaux ; server/event restent scopés au guild.
@@ -235,14 +238,16 @@ class MemoryWorker:
         if kind in ("update", "merge"):
             was_pending = existing.status == STATUS_PENDING
             new_content = content or existing.content
-            mem = self.store.update_content(
+            mem = await asyncio.to_thread(
+                self.store.update_content,
                 target_id, new_content, confidence_delta=CONFIDENCE_UPDATE_DELTA,
             )
             if mem is None:
                 return
             # Promotion pending → active : indexation Chroma seulement à ce moment.
             if mem.status == STATUS_ACTIVE and (was_pending or mem.chroma_id):
-                self.vectors.upsert(
+                await asyncio.to_thread(
+                    self.vectors.upsert,
                     mem.id, mem.content,
                     category=mem.category, guild_id=mem.guild_id,
                     user_id=mem.user_id, confidence=mem.confidence,
@@ -252,13 +257,14 @@ class MemoryWorker:
             return
 
         if kind == "contradict":
-            mem = self.store.contradict(target_id)
+            mem = await asyncio.to_thread(self.store.contradict, target_id)
             if mem is None:
                 return
             if mem.status != STATUS_ACTIVE:
-                self.vectors.delete(target_id)
+                await asyncio.to_thread(self.vectors.delete, target_id)
             else:
-                self.vectors.upsert(
+                await asyncio.to_thread(
+                    self.vectors.upsert,
                     mem.id, mem.content,
                     category=mem.category, guild_id=mem.guild_id,
                     user_id=mem.user_id, confidence=mem.confidence,
@@ -269,7 +275,7 @@ class MemoryWorker:
         try:
             archived = await asyncio.to_thread(self.store.apply_decay)
             for mid in archived:
-                self.vectors.delete(mid)
+                await asyncio.to_thread(self.vectors.delete, mid)
         except Exception as e:
             logger.warning("Decay mémoire échoué: %s", e)
 

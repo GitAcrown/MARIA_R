@@ -1,5 +1,7 @@
 """Cog Chat — Maria GPT avec contexte complet et rappels."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -1455,9 +1457,22 @@ class Chat(commands.Cog):
                     except (discord.NotFound, discord.HTTPException, discord.Forbidden):
                         resolved = None
                 if isinstance(resolved, discord.Message) and resolved.author:
-                    reply_to_id = resolved.author.id
-                    reply_to_name = resolved.author.name
-                    reply_to_content = (resolved.content or "").strip() or None
+                    if resolved.author.bot:
+                        # Réponse à MARIA : garde le contexte (utile pour comprendre
+                        # à qui s'adresse "moi"/"toi") mais sans id réel — jamais de
+                        # souvenir "user" attribué au bot.
+                        reply_to_id = None
+                        reply_to_name = "MARIA (le bot)"
+                        reply_to_content = (resolved.content or "").strip() or None
+                    else:
+                        reply_to_id = resolved.author.id
+                        reply_to_name = resolved.author.name
+                        reply_to_content = (resolved.content or "").strip() or None
+                        for member in resolved.mentions:
+                            for token in (f"<@{member.id}>", f"<@!{member.id}>"):
+                                reply_to_content = (reply_to_content or "").replace(
+                                    token, f"@{member.name}({member.id})",
+                                )
             # Rend les mentions lisibles : <@id> → @pseudo(id)
             mem_content = message.content
             for member in message.mentions:
