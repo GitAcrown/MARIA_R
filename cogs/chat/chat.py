@@ -356,6 +356,7 @@ class AddPersonalMemoryModal(discord.ui.Modal, title="À retenir sur moi"):
             self.display_name, summary, memories,
             store=self.store, vectors=self.vectors,
             guild_id=self.guild_id, user_id=self.user_id,
+            note="Souvenir retenu.",
         )
         await interaction.edit_original_response(view=view)
 
@@ -436,9 +437,10 @@ class _ConfirmResetMeButton(discord.ui.Button):
         for mid in chroma_ids:
             self.vectors.delete(mid)
         view = MeMemoryView(
-            self.display_name, "Mémoire perso vidée.", [],
+            self.display_name, "Rien de notable pour l'instant.", [],
             store=self.store, vectors=self.vectors,
             guild_id=self.guild_id, user_id=self.user_id,
+            note="Mémoire perso vidée.",
         )
         await interaction.edit_original_response(view=view)
 
@@ -463,26 +465,11 @@ class _CancelResetMeButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
         await interaction.response.defer()
-        memories = await asyncio.to_thread(
-            self.store.list_for_user, self.guild_id, self.user_id, limit=40, include_server=False,
-        )
-        summary = "Aucun souvenir perso pour l'instant."
-        if memories:
-            chat_cog = interaction.client.get_cog("Chat")
-            if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
-                summary = await summarize_memories(
-                    chat_cog.gpt_api.client,
-                    model=MODEL_NANO,
-                    memories=memories,
-                    scope="user",
-                    display_name=self.display_name,
-                )
-            else:
-                summary = "\n".join(f"› {m.content}" for m in memories[:8])
-        view = MeMemoryView(
-            self.display_name, summary, memories,
+        view = await _rebuild_me_view(
+            interaction,
             store=self.store, vectors=self.vectors,
             guild_id=self.guild_id, user_id=self.user_id,
+            display_name=self.display_name,
         )
         await interaction.edit_original_response(view=view)
 
@@ -522,6 +509,7 @@ class MeMemoryView(discord.ui.LayoutView):
         vectors: VectorStore,
         guild_id: int,
         user_id: int,
+        note: str = "",
     ):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
@@ -531,10 +519,10 @@ class MeMemoryView(discord.ui.LayoutView):
         ]
         personal = [m for m in memories if m.category == "user" or m.user_id == user_id]
         if personal:
-            lines = [
-                f"-# › {m.content} · conf. {m.confidence:.0%}"
-                for m in personal[:12]
-            ]
+            shown = personal[:_MEMORY_LIST_LIMIT]
+            lines = [_memory_line(m) for m in shown]
+            if len(personal) > _MEMORY_LIST_LIMIT:
+                lines.append(f"-# … +{len(personal) - _MEMORY_LIST_LIMIT}")
             children += [
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("\n".join(lines)),
@@ -544,18 +532,67 @@ class MeMemoryView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucun souvenir perso pour l'instant."),
             ]
-        children += [
-            discord.ui.Separator(),
-            discord.ui.ActionRow(
+        _append_controls(
+            children,
+            note=note,
+            button_row=discord.ui.ActionRow(
                 _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
                 _ResetPersonalButton(store, vectors, guild_id, user_id, display_name),
             ),
-        ]
-        if personal:
-            children.append(discord.ui.ActionRow(
-                _ForgetPersonalSelect(store, vectors, guild_id, user_id, display_name, personal),
-            ))
+            select_row=(
+                discord.ui.ActionRow(
+                    _ForgetPersonalSelect(store, vectors, guild_id, user_id, display_name, personal),
+                )
+                if personal
+                else None
+            ),
+        )
         self.add_item(discord.ui.Container(*children))
+
+
+def _ui_note_text(note: str) -> str:
+    """Normalise une notification UI en style -#."""
+    text = (note or "").strip()
+    if not text:
+        return ""
+    if text.startswith("-#"):
+        return text
+    return f"-# {text}"
+
+
+def _append_controls(
+    children: list[discord.ui.Item],
+    *,
+    note: str = "",
+    button_row: discord.ui.ActionRow | None = None,
+    select_row: discord.ui.ActionRow | None = None,
+) -> None:
+    """Pied de vue dynamique : notif optionnelle, puis boutons, puis select (rows séparées)."""
+    notif = _ui_note_text(note)
+    if notif:
+        children += [
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(notif),
+        ]
+    if button_row is not None or select_row is not None:
+        children.append(discord.ui.Separator())
+        if button_row is not None:
+            children.append(button_row)
+        if select_row is not None:
+            if button_row is not None:
+                children.append(discord.ui.Separator())
+            children.append(select_row)
+
+
+_MEMORY_LIST_LIMIT = 5
+_MEMORY_LINE_MAX = 72
+
+
+def _memory_line(m: Memory) -> str:
+    content = m.content.strip()
+    if len(content) > _MEMORY_LINE_MAX:
+        content = content[: _MEMORY_LINE_MAX - 1] + "…"
+    return f"-# › {content} · {m.confidence:.0%}"
 
 
 def _is_memory_mod(member: discord.Member | discord.User) -> bool:
@@ -564,6 +601,7 @@ def _is_memory_mod(member: discord.Member | discord.User) -> bool:
         return False
     perms = member.guild_permissions
     return bool(perms.administrator or perms.manage_guild or perms.manage_messages)
+
 
 
 async def _rebuild_me_view(
@@ -579,7 +617,6 @@ async def _rebuild_me_view(
     memories = await asyncio.to_thread(
         store.list_for_user, guild_id, user_id, limit=40, include_server=False,
     )
-    summary = note or "Aucun souvenir perso pour l'instant."
     if memories:
         chat_cog = interaction.client.get_cog("Chat")
         if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
@@ -592,12 +629,12 @@ async def _rebuild_me_view(
             )
         else:
             summary = "\n".join(f"› {m.content}" for m in memories[:8])
-        if note:
-            summary = f"{note}\n\n{summary}"
+    else:
+        summary = "Rien de notable pour l'instant."
     return MeMemoryView(
         display_name, summary, memories,
         store=store, vectors=vectors,
-        guild_id=guild_id, user_id=user_id,
+        guild_id=guild_id, user_id=user_id, note=note,
     )
 
 
@@ -611,7 +648,6 @@ async def _rebuild_global_view(
     note: str = "",
 ) -> AllMemoryView:
     memories = await asyncio.to_thread(store.list_server, guild_id, limit=40)
-    summary = note or "Aucun souvenir serveur pour l'instant."
     if memories:
         chat_cog = interaction.client.get_cog("Chat")
         if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
@@ -624,12 +660,12 @@ async def _rebuild_global_view(
             )
         else:
             summary = "\n".join(f"› {m.content}" for m in memories[:8])
-        if note:
-            summary = f"{note}\n\n{summary}"
+    else:
+        summary = "Rien de notable pour l'instant."
     return AllMemoryView(
         guild_name, summary, memories,
         store=store, vectors=vectors,
-        guild_id=guild_id, can_manage=_is_memory_mod(interaction.user),
+        guild_id=guild_id, can_manage=_is_memory_mod(interaction.user), note=note,
     )
 
 
@@ -777,9 +813,10 @@ class _ConfirmResetAllButton(discord.ui.Button):
         for mid in chroma_ids:
             self.vectors.delete(mid)
         view = AllMemoryView(
-            self.guild_name, "Mémoire collective vidée.", [],
+            self.guild_name, "Rien de notable pour l'instant.", [],
             store=self.store, vectors=self.vectors,
             guild_id=self.guild_id, can_manage=True,
+            note="Mémoire collective vidée.",
         )
         await interaction.edit_original_response(view=view)
 
@@ -848,6 +885,7 @@ class AllMemoryView(discord.ui.LayoutView):
         vectors: VectorStore,
         guild_id: int,
         can_manage: bool = False,
+        note: str = "",
     ):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
@@ -864,10 +902,10 @@ class AllMemoryView(discord.ui.LayoutView):
                 items = by_cat.get(cat) or []
                 if not items:
                     continue
-                lines = [
-                    f"-# › {m.content} · conf. {m.confidence:.0%}"
-                    for m in items[:10]
-                ]
+                shown = items[:_MEMORY_LIST_LIMIT]
+                lines = [_memory_line(m) for m in shown]
+                if len(items) > _MEMORY_LIST_LIMIT:
+                    lines.append(f"-# … +{len(items) - _MEMORY_LIST_LIMIT}")
                 children += [
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(f"-# **{labels.get(cat, cat)}**"),
@@ -878,15 +916,19 @@ class AllMemoryView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucun souvenir serveur pour l'instant."),
             ]
-        if can_manage:
-            children.append(discord.ui.Separator())
-            if memories:
-                children.append(discord.ui.ActionRow(
-                    _ForgetServerSelect(store, vectors, guild_id, guild_name, memories),
-                ))
-            children.append(discord.ui.ActionRow(
-                _ResetServerButton(store, vectors, guild_id, guild_name),
-            ))
+        button_row = (
+            discord.ui.ActionRow(_ResetServerButton(store, vectors, guild_id, guild_name))
+            if can_manage
+            else None
+        )
+        select_row = (
+            discord.ui.ActionRow(
+                _ForgetServerSelect(store, vectors, guild_id, guild_name, memories),
+            )
+            if can_manage and memories
+            else None
+        )
+        _append_controls(children, note=note, button_row=button_row, select_row=select_row)
         self.add_item(discord.ui.Container(*children))
 
 
@@ -928,7 +970,7 @@ class _CancelRappelSelect(discord.ui.Select):
         rid = int(self.values[0])
         ok = self.store.cancel(rid, self.user_id)
         remaining = self.store.get_user_rappels(self.user_id)
-        note = f"Rappel **#{rid}** annulé." if ok else f"Rappel **#{rid}** introuvable."
+        note = f"Rappel #{rid} annulé." if ok else f"Rappel #{rid} introuvable."
         await interaction.response.edit_message(view=RappelsView(self.store, self.user_id, remaining, note=note))
 
 
@@ -1005,19 +1047,20 @@ class RappelsView(discord.ui.LayoutView):
             discord.ui.TextDisplay("## Rappels"),
             discord.ui.Separator(),
         ]
-        if note:
-            children.append(discord.ui.TextDisplay(note))
-            children.append(discord.ui.Separator())
         if not rappels:
             children.append(discord.ui.TextDisplay("-# Aucun rappel en attente."))
+            _append_controls(children, note=note)
         else:
-            body = "\n\n".join(_format_rappel_line(r) for r in rappels[:15])
-            if len(rappels) > 15:
-                body += f"\n\n-# … et {len(rappels) - 15} de plus."
+            body = "\n\n".join(_format_rappel_line(r) for r in rappels[:8])
+            if len(rappels) > 8:
+                body += f"\n\n-# … +{len(rappels) - 8}"
             children.append(discord.ui.TextDisplay(body))
-            children.append(discord.ui.Separator())
-            children.append(discord.ui.ActionRow(_CancelRappelSelect(store, user_id, rappels)))
-            children.append(discord.ui.ActionRow(_CancelAllRappelsButton(store, user_id)))
+            _append_controls(
+                children,
+                note=note,
+                button_row=discord.ui.ActionRow(_CancelAllRappelsButton(store, user_id)),
+                select_row=discord.ui.ActionRow(_CancelRappelSelect(store, user_id, rappels)),
+            )
         self.add_item(discord.ui.Container(*children))
 
 
