@@ -33,6 +33,23 @@ class BufferedMessage:
     author_name: str
     content: str
     ts: datetime
+    reply_to_id: Optional[int] = None
+    reply_to_name: Optional[str] = None
+    reply_to_content: Optional[str] = None
+
+    def format_line(self) -> str:
+        """Ligne lisible pour l'agent nano, avec contexte de reply si présent."""
+        stamp = self.ts.strftime("%H:%M")
+        head = f"[{stamp}] {self.author_name} ({self.author_id})"
+        if self.reply_to_id is not None:
+            snippet = (self.reply_to_content or "").replace("\n", " ").strip()
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "…"
+            head += (
+                f" [répond à {self.reply_to_name or '?'} ({self.reply_to_id})"
+                f": \"{snippet}\"]"
+            )
+        return f"{head}: {self.content}"
 
 
 @dataclass
@@ -83,6 +100,9 @@ class MemoryWorker:
         author_id: int,
         author_name: str,
         content: str,
+        reply_to_id: Optional[int] = None,
+        reply_to_name: Optional[str] = None,
+        reply_to_content: Optional[str] = None,
     ) -> None:
         text = (content or "").strip()
         if not text:
@@ -95,6 +115,9 @@ class MemoryWorker:
                 author_name=author_name,
                 content=text[:500],
                 ts=datetime.now(timezone.utc),
+                reply_to_id=reply_to_id,
+                reply_to_name=reply_to_name,
+                reply_to_content=(reply_to_content or "")[:200] or None,
             )
         )
         if len(buf.messages) > self.buffer_cap:
@@ -133,11 +156,11 @@ class MemoryWorker:
         if not batch:
             return
         user_ids = {m.author_id for m in batch}
+        for m in batch:
+            if m.reply_to_id is not None:
+                user_ids.add(m.reply_to_id)
         existing = self.store.list_for_users(guild_id, user_ids, limit=15)
-        batch_text = "\n".join(
-            f"[{m.ts.strftime('%H:%M')}] {m.author_name} ({m.author_id}): {m.content}"
-            for m in batch
-        )
+        batch_text = "\n".join(m.format_line() for m in batch)
         actions = await extract_memories(
             self.llm_client,
             model=self.model,

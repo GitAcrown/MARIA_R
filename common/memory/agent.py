@@ -37,7 +37,10 @@ _MEMORY_SCHEMA = {
                             },
                             "user_id": {
                                 "type": ["string", "null"],
-                                "description": "Discord user id concerné, ou null (server/event)",
+                                "description": (
+                                    "Discord id de la personne CONCERNÉE par le souvenir "
+                                    "(pas forcément l'auteur du message). null si server/event."
+                                ),
                             },
                             "content": {
                                 "type": "string",
@@ -94,8 +97,9 @@ PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet →
 Max 4 actions par lot. Si vraiment rien → {"memories": []}.
 
 CATÉGORIES — NE LES MÉLANGE PAS :
-- user : perso d'UN membre (user_id obligatoire). Préférences, genre, ville, anniversaire, goûts
-  réellement affirmés (pas du sarcasme, pas une anecdote). Reste sélectif.
+- user : perso d'UN membre (user_id obligatoire = Discord id de la personne CONCERNÉE).
+  Préférences, genre, ville, anniversaire, goûts réellement affirmés (pas du sarcasme,
+  pas une anecdote). Reste sélectif.
 - server : collectif de CE serveur (user_id=null). Inside jokes, surnoms, habitudes du salon,
   running gags, blagues récurrentes, « chez nous on… ». SOIS PLUS OUVERT ICI pour les
   gags de groupe identifiables — pas pour transformer une soirée en « règle du serveur ».
@@ -103,11 +107,24 @@ CATÉGORIES — NE LES MÉLANGE PAS :
 - event : jalon du serveur (soirée, arrivée/départ, projet lancé). Anecdote du jour ≠ event
   sauf vrai jalon nommé / organisé.
 
+ATTRIBUTION user_id (critique — erreurs fréquentes ici) :
+- Format des lignes : `[HH:MM] Pseudo (id): …` parfois avec
+  `[répond à AutrePseudo (autre_id): "extrait du message cité"]`.
+- « je / mon / ma / mes » = l'auteur de CETTE ligne (son id entre parenthèses), pas la
+  personne citée en reply, pas une mention au hasard.
+- Si Alice (111) écrit « c'est mon anniversaire » → user_id=111.
+- Si Bob (222) répond à Alice « joyeux anniv » → l'anniversaire est celui d'Alice (111),
+  pas Bob. Un simple vœu ≠ souvenir « Bob a un anniversaire ».
+- Si le message cité dit « c'est mon anniv » et la reply est un vœu / emoji / « merci »,
+  le fait porte sur l'auteur du message CITÉ.
+- Si tu n'es pas sûr à 100 % de qui est concerné → n'extrais PAS ce souvenir.
+
 IGNORE : débats du jour, scores/actus, demandes au bot, blabla sans ancrage,
 sarcasme one-shot, histoires one-shot sans potentiel de gag récurrent.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id = id).
-Content : français, 1 phrase neutre, 3e personne — sans généraliser au-delà de la preuve."""
+Content : français, 1 phrase neutre, 3e personne — sans généraliser au-delà de la preuve.
+Pour un user : cite le prénom/pseudo dans le content ET mets le bon user_id."""
 
 
 async def extract_memories(

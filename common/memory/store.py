@@ -448,6 +448,34 @@ class MemoryStore:
                 (STATUS_ARCHIVED, memory_id),
             )
 
+    def forget_user_memory(self, memory_id: str, user_id: int) -> tuple[bool, Optional[str]]:
+        """Archive un souvenir perso. Renvoie (ok, chroma_id éventuel)."""
+        mem = self.get(memory_id)
+        if (
+            mem is None
+            or mem.category != CATEGORY_USER
+            or mem.user_id != user_id
+            or mem.status not in (STATUS_ACTIVE, STATUS_PENDING)
+        ):
+            return False, None
+        chroma = mem.id if (mem.status == STATUS_ACTIVE or mem.chroma_id) else None
+        self.archive(memory_id)
+        return True, chroma
+
+    def forget_server_memory(self, memory_id: str, guild_id: int) -> tuple[bool, Optional[str]]:
+        """Archive un souvenir server/event. Renvoie (ok, chroma_id éventuel)."""
+        mem = self.get(memory_id)
+        if (
+            mem is None
+            or mem.guild_id != guild_id
+            or mem.category not in (CATEGORY_SERVER, CATEGORY_EVENT)
+            or mem.status not in (STATUS_ACTIVE, STATUS_PENDING)
+        ):
+            return False, None
+        chroma = mem.id if (mem.status == STATUS_ACTIVE or mem.chroma_id) else None
+        self.archive(memory_id)
+        return True, chroma
+
     def clear_user(self, user_id: int) -> list[str]:
         """Archive toutes les mémoires perso d'un membre. Renvoie les ids à retirer de Chroma."""
         with _db() as conn:

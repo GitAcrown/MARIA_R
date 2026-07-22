@@ -258,8 +258,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
     ),
     (
         "Mémoire",
-        "› `/moi` — ta mémoire perso (tous serveurs) ; Retenir… / Tout oublier.\n"
-        "› `/global` — mémoire collective du serveur ; reset réservé aux admins.\n"
+        "› `/moi` — ta mémoire perso ; Retenir… / oublier une ligne / Tout oublier.\n"
+        "› `/global` — mémoire collective ; oublier une ligne / reset (modos).\n"
         "› Elle n'enregistre pas tout : perso = sélectif, collectif = plus ouvert.",
     ),
     (
@@ -549,14 +549,180 @@ class MeMemoryView(discord.ui.LayoutView):
                 _ResetPersonalButton(store, vectors, guild_id, user_id, display_name),
             ),
         ]
+        if personal:
+            children.append(discord.ui.ActionRow(
+                _ForgetPersonalSelect(store, vectors, guild_id, user_id, display_name, personal),
+            ))
         self.add_item(discord.ui.Container(*children))
 
 
-def _is_memory_admin(member: discord.Member | discord.User) -> bool:
+def _is_memory_mod(member: discord.Member | discord.User) -> bool:
+    """Admins / manage server / manage messages (modos)."""
     if not isinstance(member, discord.Member):
         return False
     perms = member.guild_permissions
-    return bool(perms.administrator or perms.manage_guild)
+    return bool(perms.administrator or perms.manage_guild or perms.manage_messages)
+
+
+async def _rebuild_me_view(
+    interaction: discord.Interaction,
+    *,
+    store: MemoryStore,
+    vectors: VectorStore,
+    guild_id: int,
+    user_id: int,
+    display_name: str,
+    note: str = "",
+) -> MeMemoryView:
+    memories = await asyncio.to_thread(
+        store.list_for_user, guild_id, user_id, limit=40, include_server=False,
+    )
+    summary = note or "Aucun souvenir perso pour l'instant."
+    if memories:
+        chat_cog = interaction.client.get_cog("Chat")
+        if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
+            summary = await summarize_memories(
+                chat_cog.gpt_api.client,
+                model=MODEL_NANO,
+                memories=memories,
+                scope="user",
+                display_name=display_name,
+            )
+        else:
+            summary = "\n".join(f"› {m.content}" for m in memories[:8])
+        if note:
+            summary = f"{note}\n\n{summary}"
+    return MeMemoryView(
+        display_name, summary, memories,
+        store=store, vectors=vectors,
+        guild_id=guild_id, user_id=user_id,
+    )
+
+
+async def _rebuild_global_view(
+    interaction: discord.Interaction,
+    *,
+    store: MemoryStore,
+    vectors: VectorStore,
+    guild_id: int,
+    guild_name: str,
+    note: str = "",
+) -> AllMemoryView:
+    memories = await asyncio.to_thread(store.list_server, guild_id, limit=40)
+    summary = note or "Aucun souvenir serveur pour l'instant."
+    if memories:
+        chat_cog = interaction.client.get_cog("Chat")
+        if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
+            summary = await summarize_memories(
+                chat_cog.gpt_api.client,
+                model=MODEL_NANO,
+                memories=memories,
+                scope="server",
+                display_name=guild_name,
+            )
+        else:
+            summary = "\n".join(f"› {m.content}" for m in memories[:8])
+        if note:
+            summary = f"{note}\n\n{summary}"
+    return AllMemoryView(
+        guild_name, summary, memories,
+        store=store, vectors=vectors,
+        guild_id=guild_id, can_manage=_is_memory_mod(interaction.user),
+    )
+
+
+class _ForgetPersonalSelect(discord.ui.Select):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        memories: list[Memory],
+    ):
+        options = []
+        for m in memories[:25]:
+            options.append(discord.SelectOption(
+                label=m.content[:100],
+                value=m.id,
+                description=f"conf. {m.confidence:.0%}"[:100],
+            ))
+        super().__init__(
+            placeholder="Oublier un souvenir…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        await interaction.response.defer()
+        mid = self.values[0]
+        ok, chroma = await asyncio.to_thread(self.store.forget_user_memory, mid, self.user_id)
+        if chroma:
+            self.vectors.delete(chroma)
+        note = "Souvenir oublié." if ok else "Souvenir introuvable."
+        view = await _rebuild_me_view(
+            interaction,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+            display_name=self.display_name, note=note,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _ForgetServerSelect(discord.ui.Select):
+    def __init__(
+        self,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        guild_name: str,
+        memories: list[Memory],
+    ):
+        options = []
+        for m in memories[:25]:
+            cat = {"server": "collectif", "event": "événement"}.get(m.category, m.category)
+            options.append(discord.SelectOption(
+                label=m.content[:100],
+                value=m.id,
+                description=f"{cat} · conf. {m.confidence:.0%}"[:100],
+            ))
+        super().__init__(
+            placeholder="Oublier un souvenir…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not _is_memory_mod(interaction.user):
+            return await interaction.response.send_message(
+                "Réservé aux modos du serveur.", ephemeral=True,
+            )
+        await interaction.response.defer()
+        mid = self.values[0]
+        ok, chroma = await asyncio.to_thread(self.store.forget_server_memory, mid, self.guild_id)
+        if chroma:
+            self.vectors.delete(chroma)
+        note = "Souvenir oublié." if ok else "Souvenir introuvable."
+        view = await _rebuild_global_view(
+            interaction,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, guild_name=self.guild_name, note=note,
+        )
+        await interaction.edit_original_response(view=view)
 
 
 class _ResetServerButton(discord.ui.Button):
@@ -574,9 +740,9 @@ class _ResetServerButton(discord.ui.Button):
         self.guild_name = guild_name
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not _is_memory_admin(interaction.user):
+        if not _is_memory_mod(interaction.user):
             return await interaction.response.send_message(
-                "Réservé aux admins du serveur.", ephemeral=True,
+                "Réservé aux modos du serveur.", ephemeral=True,
             )
         await interaction.response.edit_message(
             view=ConfirmResetAllView(
@@ -600,9 +766,9 @@ class _ConfirmResetAllButton(discord.ui.Button):
         self.guild_name = guild_name
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not _is_memory_admin(interaction.user):
+        if not _is_memory_mod(interaction.user):
             return await interaction.response.send_message(
-                "Réservé aux admins du serveur.", ephemeral=True,
+                "Réservé aux modos du serveur.", ephemeral=True,
             )
         await interaction.response.defer()
         chroma_ids = await asyncio.to_thread(self.store.clear_server, self.guild_id)
@@ -611,7 +777,7 @@ class _ConfirmResetAllButton(discord.ui.Button):
         view = AllMemoryView(
             self.guild_name, "Mémoire collective vidée.", [],
             store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, can_reset=True,
+            guild_id=self.guild_id, can_manage=True,
         )
         await interaction.edit_original_response(view=view)
 
@@ -631,29 +797,15 @@ class _CancelResetAllButton(discord.ui.Button):
         self.guild_name = guild_name
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not _is_memory_admin(interaction.user):
+        if not _is_memory_mod(interaction.user):
             return await interaction.response.send_message(
-                "Réservé aux admins du serveur.", ephemeral=True,
+                "Réservé aux modos du serveur.", ephemeral=True,
             )
         await interaction.response.defer()
-        memories = await asyncio.to_thread(self.store.list_server, self.guild_id, limit=40)
-        summary = "Aucun souvenir serveur pour l'instant."
-        if memories:
-            chat_cog = interaction.client.get_cog("Chat")
-            if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
-                summary = await summarize_memories(
-                    chat_cog.gpt_api.client,
-                    model=MODEL_NANO,
-                    memories=memories,
-                    scope="server",
-                    display_name=self.guild_name,
-                )
-            else:
-                summary = "\n".join(f"› {m.content}" for m in memories[:8])
-        view = AllMemoryView(
-            self.guild_name, summary, memories,
+        view = await _rebuild_global_view(
+            interaction,
             store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, can_reset=True,
+            guild_id=self.guild_id, guild_name=self.guild_name,
         )
         await interaction.edit_original_response(view=view)
 
@@ -693,7 +845,7 @@ class AllMemoryView(discord.ui.LayoutView):
         store: MemoryStore,
         vectors: VectorStore,
         guild_id: int,
-        can_reset: bool = False,
+        can_manage: bool = False,
     ):
         super().__init__(timeout=180)
         children: list[discord.ui.Item] = [
@@ -724,13 +876,15 @@ class AllMemoryView(discord.ui.LayoutView):
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucun souvenir serveur pour l'instant."),
             ]
-        if can_reset:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.ActionRow(
-                    _ResetServerButton(store, vectors, guild_id, guild_name),
-                ),
-            ]
+        if can_manage:
+            children.append(discord.ui.Separator())
+            if memories:
+                children.append(discord.ui.ActionRow(
+                    _ForgetServerSelect(store, vectors, guild_id, guild_name, memories),
+                ))
+            children.append(discord.ui.ActionRow(
+                _ResetServerButton(store, vectors, guild_id, guild_name),
+            ))
         self.add_item(discord.ui.Container(*children))
 
 
@@ -1291,12 +1445,35 @@ class Chat(commands.Cog):
         await session.ingest_message(message, is_context_only=not should_respond)
 
         if self._memory_worker and message.content:
+            reply_to_id = reply_to_name = reply_to_content = None
+            ref = message.reference
+            if ref is not None:
+                resolved = ref.resolved
+                if not isinstance(resolved, discord.Message) and ref.message_id:
+                    try:
+                        resolved = await message.channel.fetch_message(ref.message_id)
+                    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+                        resolved = None
+                if isinstance(resolved, discord.Message) and resolved.author:
+                    reply_to_id = resolved.author.id
+                    reply_to_name = resolved.author.name
+                    reply_to_content = (resolved.content or "").strip() or None
+            # Rend les mentions lisibles : <@id> → @pseudo(id)
+            mem_content = message.content
+            for member in message.mentions:
+                for token in (f"<@{member.id}>", f"<@!{member.id}>"):
+                    mem_content = mem_content.replace(
+                        token, f"@{member.name}({member.id})",
+                    )
             self._memory_worker.ingest(
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,
                 author_id=message.author.id,
                 author_name=message.author.name,
-                content=message.content,
+                content=mem_content,
+                reply_to_id=reply_to_id,
+                reply_to_name=reply_to_name,
+                reply_to_content=reply_to_content,
             )
 
         if not should_respond:
@@ -1421,7 +1598,7 @@ class Chat(commands.Cog):
             interaction.guild.name, summary, memories,
             store=self.memory_store, vectors=self.memory_vectors,
             guild_id=interaction.guild.id,
-            can_reset=_is_memory_admin(interaction.user),
+            can_manage=_is_memory_mod(interaction.user),
         )
         await interaction.followup.send(view=view, ephemeral=True)
 
