@@ -18,7 +18,10 @@ MAX_TOKENS = 2800
 DEBOUNCE_SECONDS: float = 0.5
 
 # Mémoire long terme — flush hybride + RAG
-MEMORY_FLUSH_MESSAGES = 20
-MEMORY_FLUSH_MINUTES = 15
-MEMORY_BUFFER_CAP = 40
+# Moins d'appels nano, lots plus gros = meilleur contexte (gags, attribution).
+MEMORY_FLUSH_MESSAGES = 40
+MEMORY_FLUSH_MINUTES = 30
+MEMORY_BUFFER_CAP = 80
 MEMORY_TOP_K = 5
+MEMORY_EXTRACT_MAX_ACTIONS = 6
+MEMORY_EXISTING_LIMIT = 25

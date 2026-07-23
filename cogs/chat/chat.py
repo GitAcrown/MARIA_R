@@ -42,6 +42,8 @@ from cogs.chat.config import (
     MAX_MESSAGES,
     MAX_TOKENS,
     MEMORY_BUFFER_CAP,
+    MEMORY_EXISTING_LIMIT,
+    MEMORY_EXTRACT_MAX_ACTIONS,
     MEMORY_FLUSH_MESSAGES,
     MEMORY_FLUSH_MINUTES,
     MEMORY_TOP_K,
@@ -1133,6 +1135,10 @@ class Chat(commands.Cog):
             flush_messages=MEMORY_FLUSH_MESSAGES,
             flush_minutes=MEMORY_FLUSH_MINUTES,
             buffer_cap=MEMORY_BUFFER_CAP,
+            existing_limit=MEMORY_EXISTING_LIMIT,
+            max_actions=MEMORY_EXTRACT_MAX_ACTIONS,
+            bot_user_id=self.bot.user.id if self.bot.user else None,
+            bot_name=getattr(self.bot.user, "name", None) or "MARIA",
         )
         await self._memory_worker.start()
         await self._register_tools_from_cogs()
@@ -1501,11 +1507,14 @@ class Chat(commands.Cog):
                         resolved = None
                 if isinstance(resolved, discord.Message) and resolved.author:
                     if resolved.author.bot:
-                        # Réponse à MARIA : garde le contexte (utile pour comprendre
-                        # à qui s'adresse "moi"/"toi") mais sans id réel — jamais de
-                        # souvenir "user" attribué au bot.
+                        # Réponse au bot : contexte sans id réel (jamais de souvenir user).
+                        bot_label = (
+                            self.bot.user.name
+                            if self.bot.user and resolved.author.id == self.bot.user.id
+                            else resolved.author.name
+                        )
                         reply_to_id = None
-                        reply_to_name = "MARIA (le bot)"
+                        reply_to_name = f"{bot_label} (le bot)"
                         reply_to_content = (resolved.content or "").strip() or None
                     else:
                         reply_to_id = resolved.author.id
@@ -1513,16 +1522,22 @@ class Chat(commands.Cog):
                         reply_to_content = (resolved.content or "").strip() or None
                         for member in resolved.mentions:
                             for token in (f"<@{member.id}>", f"<@!{member.id}>"):
-                                reply_to_content = (reply_to_content or "").replace(
-                                    token, f"@{member.name}({member.id})",
+                                label = (
+                                    f"@{member.name} (le bot)"
+                                    if member.bot
+                                    else f"@{member.name}({member.id})"
                                 )
-            # Rend les mentions lisibles : <@id> → @pseudo(id)
+                                reply_to_content = (reply_to_content or "").replace(token, label)
+            # Rend les mentions lisibles : <@id> → @pseudo(id) ; bot → « (le bot) »
             mem_content = message.content
             for member in message.mentions:
                 for token in (f"<@{member.id}>", f"<@!{member.id}>"):
-                    mem_content = mem_content.replace(
-                        token, f"@{member.name}({member.id})",
+                    label = (
+                        f"@{member.name} (le bot)"
+                        if member.bot or (self.bot.user and member.id == self.bot.user.id)
+                        else f"@{member.name}({member.id})"
                     )
+                    mem_content = mem_content.replace(token, label)
             self._memory_worker.ingest(
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,

@@ -65,7 +65,17 @@ _MEMORY_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA, un bot Discord sur un petit serveur entre potes.
+_SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA.
+
+QUI EST MARIA (critique) :
+- MARIA (ou le nom du bot Discord, ex. « {bot_name} ») = le bot Discord lui-même.
+- Tu travailles POUR elle : tu n'es pas un membre humain du serveur.
+- Dans les messages, « MARIA », « {bot_name} », « le bot », ou
+  `[répond à MARIA (le bot): …]` / `@MARIA (le bot)` = conversation AVEC le bot.
+- NE crée JAMAIS de souvenir category=user sur MARIA / le bot (pas d'anniversaire,
+  goûts, « elle a dit… » comme si c'était une personne).
+- Les demandes au bot, réponses du bot, blagues sur le bot → IGNORE (sauf running gag
+  collectif clairement ancré sur le serveur → category=server, user_id=null).
 
 TON DU SERVEUR (important) :
 - Beaucoup d'ironie, de sarcasme, de second degré et d'inside jokes.
@@ -85,7 +95,7 @@ RÈGLE ANTI-GÉNÉRALISATION (critique) :
   (« a raconté avoir… », « une fois… ») — ou mieux : IGNORE, sauf si ça revient
   clairement (running gag / préférence répétée / fait stable affirmé hors récit).
 - Les faits stables OK : anniversaire, ville, job, préférence affirmée hors histoire,
-  gag de groupe qui revient. Le reste → {"memories": []}.
+  gag de groupe qui revient. Le reste → {{"memories": []}}.
 
 Tu as DEUX niveaux :
 1) PENDING — observation fragile (surtout perso).
@@ -94,12 +104,12 @@ Tu as DEUX niveaux :
 PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge
 (target_id = son id). Ne duplique pas.
 
-Max 4 actions par lot. Si vraiment rien → {"memories": []}.
+Max 6 actions par lot. Si vraiment rien → {{"memories": []}}.
 
 CATÉGORIES — NE LES MÉLANGE PAS :
-- user : perso d'UN membre (user_id obligatoire = Discord id de la personne CONCERNÉE).
+- user : perso d'UN membre HUMAIN (user_id obligatoire = Discord id de la personne CONCERNÉE).
   Préférences, genre, ville, anniversaire, goûts réellement affirmés (pas du sarcasme,
-  pas une anecdote). Reste sélectif.
+  pas une anecdote). Reste sélectif. JAMAIS le bot.
 - server : collectif de CE serveur (user_id=null). Inside jokes, surnoms, habitudes du salon,
   running gags, blagues récurrentes, « chez nous on… ». SOIS PLUS OUVERT ICI pour les
   gags de groupe identifiables — pas pour transformer une soirée en « règle du serveur ».
@@ -111,16 +121,18 @@ ATTRIBUTION user_id (critique — erreurs fréquentes ici) :
 - Format des lignes : `[HH:MM] Pseudo (id): …` parfois avec
   `[répond à AutrePseudo (autre_id): "extrait du message cité"]`.
 - « je / mon / ma / mes » = l'auteur de CETTE ligne (son id entre parenthèses), pas la
-  personne citée en reply, pas une mention au hasard.
+  personne citée en reply, pas une mention au hasard, pas le bot.
 - Si Alice (111) écrit « c'est mon anniversaire » → user_id=111.
 - Si Bob (222) répond à Alice « joyeux anniv » → l'anniversaire est celui d'Alice (111),
   pas Bob. Un simple vœu ≠ souvenir « Bob a un anniversaire ».
 - Si le message cité dit « c'est mon anniv » et la reply est un vœu / emoji / « merci »,
   le fait porte sur l'auteur du message CITÉ.
+- Si quelqu'un répond à MARIA (le bot) en disant « mon anniv c'est… » → le fait porte
+  sur l'auteur humain de la ligne, pas sur le bot.
 - Si tu n'es pas sûr à 100 % de qui est concerné → n'extrais PAS ce souvenir.
 
-IGNORE : débats du jour, scores/actus, demandes au bot, blabla sans ancrage,
-sarcasme one-shot, histoires one-shot sans potentiel de gag récurrent.
+IGNORE : débats du jour, scores/actus, demandes au bot, réponses/blagues sur le bot,
+blabla sans ancrage, sarcasme one-shot, histoires one-shot sans potentiel de gag récurrent.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id = id).
 Content : français, 1 phrase neutre, 3e personne — sans généraliser au-delà de la preuve.
@@ -133,6 +145,8 @@ async def extract_memories(
     model: str,
     batch_text: str,
     existing: list[Memory],
+    bot_name: str = "MARIA",
+    max_actions: int = 6,
 ) -> list[dict]:
     """Appelle le modèle nano et renvoie la liste d'actions mémoire."""
     existing_block = "Aucun souvenir existant lié."
@@ -147,8 +161,12 @@ async def extract_memories(
             )
         existing_block = "\n".join(lines)
 
+    system = _SYSTEM_PROMPT.format(bot_name=bot_name or "MARIA")
+    # Aligne le plafond du prompt sur le paramètre (évite 6 en code / 4 en texte).
+    if max_actions != 6:
+        system = system.replace("Max 6 actions par lot.", f"Max {max_actions} actions par lot.")
     messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": (
@@ -163,13 +181,13 @@ async def extract_memories(
             messages,
             model=model,
             response_format=_MEMORY_SCHEMA,
-            max_tokens=800,
+            max_tokens=max(800, 200 * max_actions),
         )
         raw = json.loads(completion.choices[0].message.content or "{}")
         items = raw.get("memories") or []
         if not isinstance(items, list):
             return []
-        return [x for x in items if isinstance(x, dict)][:4]
+        return [x for x in items if isinstance(x, dict)][:max_actions]
     except Exception as e:
         logger.warning("Extraction mémoire échouée: %s", e)
         return []

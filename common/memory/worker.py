@@ -66,9 +66,13 @@ class MemoryWorker:
         llm_client: Any,
         *,
         model: str,
-        flush_messages: int = 20,
-        flush_minutes: int = 15,
-        buffer_cap: int = 40,
+        flush_messages: int = 40,
+        flush_minutes: int = 30,
+        buffer_cap: int = 80,
+        existing_limit: int = 25,
+        max_actions: int = 6,
+        bot_user_id: Optional[int] = None,
+        bot_name: str = "MARIA",
     ) -> None:
         self.store = store
         self.vectors = vectors
@@ -76,7 +80,11 @@ class MemoryWorker:
         self.model = model
         self.flush_messages = flush_messages
         self.flush_minutes = flush_minutes
-        self.buffer_cap = buffer_cap
+        self.buffer_cap = max(buffer_cap, flush_messages)
+        self.existing_limit = existing_limit
+        self.max_actions = max_actions
+        self.bot_user_id = bot_user_id
+        self.bot_name = bot_name or "MARIA"
         self._buffers: dict[tuple[int, int], ChannelBuffer] = {}
         self._lock = asyncio.Lock()
 
@@ -159,17 +167,21 @@ class MemoryWorker:
         for m in batch:
             if m.reply_to_id is not None:
                 user_ids.add(m.reply_to_id)
-        existing = await asyncio.to_thread(self.store.list_for_users, guild_id, user_ids, limit=15)
+        existing = await asyncio.to_thread(
+            self.store.list_for_users, guild_id, user_ids, limit=self.existing_limit,
+        )
         batch_text = "\n".join(m.format_line() for m in batch)
         actions = await extract_memories(
             self.llm_client,
             model=self.model,
             batch_text=batch_text,
             existing=existing,
+            bot_name=self.bot_name,
+            max_actions=self.max_actions,
         )
         if not actions:
             return
-        for action in actions[:4]:
+        for action in actions[: self.max_actions]:
             await self._apply_action(guild_id, action)
 
     async def _apply_action(self, guild_id: int, action: dict) -> None:
@@ -183,6 +195,9 @@ class MemoryWorker:
             target_id = None
         # `user_id` peut être un membre mentionné mais pas auteur du batch — autorisé.
         user_id = parse_user_id(action.get("user_id"))
+        # Jamais de souvenir perso (ni update) attribué au bot Discord.
+        if self.bot_user_id is not None and user_id == self.bot_user_id:
+            return
 
         if kind == "create":
             if not content:
@@ -230,6 +245,8 @@ class MemoryWorker:
             return
         existing = await asyncio.to_thread(self.store.get, target_id)
         if existing is None:
+            return
+        if self.bot_user_id is not None and existing.user_id == self.bot_user_id:
             return
         # Souvenirs user = globaux ; server/event restent scopés au guild.
         if existing.category != "user" and existing.guild_id != guild_id:
