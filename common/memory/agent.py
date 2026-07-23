@@ -44,7 +44,10 @@ _MEMORY_SCHEMA = {
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Souvenir concis (1 phrase), durable ≥ 1 mois",
+                                "description": (
+                                    "Souvenir ultra-concis (≤12 mots). Pseudo seul, "
+                                    "jamais « le membre X ». Ex: « Alice : anniversaire le 12 mars »."
+                                ),
                             },
                             "confidence_delta": {
                                 "type": "number",
@@ -135,8 +138,15 @@ IGNORE : débats du jour, scores/actus, demandes au bot, réponses/blagues sur l
 blabla sans ancrage, sarcasme one-shot, histoires one-shot sans potentiel de gag récurrent.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id = id).
-Content : français, 1 phrase neutre, 3e personne — sans généraliser au-delà de la preuve.
-Pour un user : cite le prénom/pseudo dans le content ET mets le bon user_id."""
+
+CONTENT (style obligatoire) :
+- Ultra-concis : ≤ 12 mots, une info max. Pas de subordonnées inutiles.
+- Pseudo seul : « Alice », jamais « le membre Alice », « l'utilisateur Bob », « la personne X ».
+- user : commence par le pseudo (« Alice : anniversaire le 12 mars », « Bob : habite à Lyon »).
+- server/event : fait collectif sec (« Running gag du kebab 4h », « Soirée BBQ du 15/06 »).
+- Pas de « a dit que », « semble aimer », « est quelqu'un qui » — va droit au fait.
+Ex. OK : « Alice : anniversaire le 25 juillet »
+Ex. KO : « Le membre Alice a mentionné que c'était son anniversaire le 25 juillet »"""
 
 
 async def extract_memories(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -25,6 +26,27 @@ from common.memory.store import (
 from common.memory.vector import VectorStore
 
 logger = logging.getLogger("MARIA.Memory.Worker")
+
+_META_PERSON_RE = re.compile(
+    r"\b(?:le\s+membre|la\s+membre|l['']utilisateur(?:\s*trice)?|la\s+personne|"
+    r"le\s+user|l['']user)\s+",
+    re.IGNORECASE,
+)
+_MEMORY_CONTENT_MAX = 100
+
+
+def sanitize_memory_content(text: str) -> str:
+    """Raccourcit et enlève les formulations « le membre X »."""
+    content = (text or "").strip()
+    if not content:
+        return content
+    content = _META_PERSON_RE.sub("", content)
+    content = re.sub(r"\s{2,}", " ", content).strip(" .;")
+    if content:
+        content = content[0].upper() + content[1:]
+    if len(content) > _MEMORY_CONTENT_MAX:
+        content = content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
+    return content
 
 
 @dataclass
@@ -186,7 +208,7 @@ class MemoryWorker:
 
     async def _apply_action(self, guild_id: int, action: dict) -> None:
         kind = (action.get("action") or "").strip()
-        content = (action.get("content") or "").strip()[:300]
+        content = sanitize_memory_content(action.get("content") or "")
         category = (action.get("category") or "user").strip()
         if category not in VALID_CATEGORIES:
             category = "user"
