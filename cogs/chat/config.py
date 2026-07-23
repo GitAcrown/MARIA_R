@@ -25,3 +25,5 @@ MEMORY_BUFFER_CAP = 80
 MEMORY_TOP_K = 5
 MEMORY_EXTRACT_MAX_ACTIONS = 6
 MEMORY_EXISTING_LIMIT = 25
+# Chevauchement entre lots : contexte du lot précédent, sans re-create.
+MEMORY_BATCH_OVERLAP = 8

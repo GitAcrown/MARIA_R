@@ -77,6 +77,8 @@ class BufferedMessage:
 @dataclass
 class ChannelBuffer:
     messages: list[BufferedMessage] = field(default_factory=list)
+    # Queue du lot précédent, renvoyée en contexte au prochain flush (sans re-create).
+    overlap: list[BufferedMessage] = field(default_factory=list)
     flushing: bool = False
 
 
@@ -93,6 +95,7 @@ class MemoryWorker:
         buffer_cap: int = 80,
         existing_limit: int = 25,
         max_actions: int = 6,
+        batch_overlap: int = 8,
         bot_user_id: Optional[int] = None,
         bot_name: str = "MARIA",
     ) -> None:
@@ -105,6 +108,7 @@ class MemoryWorker:
         self.buffer_cap = max(buffer_cap, flush_messages)
         self.existing_limit = existing_limit
         self.max_actions = max_actions
+        self.batch_overlap = max(0, min(batch_overlap, max(0, flush_messages // 2)))
         self.bot_user_id = bot_user_id
         self.bot_name = bot_name or "MARIA"
         self._buffers: dict[tuple[int, int], ChannelBuffer] = {}
@@ -169,30 +173,46 @@ class MemoryWorker:
                 return
             buf.flushing = True
             batch = list(buf.messages)
+            prior = list(buf.overlap)
             buf.messages.clear()
 
         guild_id, channel_id = key
         try:
-            await self._process_batch(guild_id, batch)
+            await self._process_batch(guild_id, batch, prior=prior)
         except Exception as e:
             logger.warning("Flush mémoire échoué (guild=%s ch=%s): %s", guild_id, channel_id, e)
         finally:
             async with self._lock:
                 buf = self._buffers.get(key)
                 if buf is not None:
+                    # Garde la fin du lot pour le prochain flush (liaison inter-lots).
+                    if self.batch_overlap > 0 and batch:
+                        buf.overlap = batch[-self.batch_overlap :]
                     buf.flushing = False
 
-    async def _process_batch(self, guild_id: int, batch: list[BufferedMessage]) -> None:
+    async def _process_batch(
+        self,
+        guild_id: int,
+        batch: list[BufferedMessage],
+        *,
+        prior: Optional[list[BufferedMessage]] = None,
+    ) -> None:
         if not batch:
             return
+        prior = prior or []
         user_ids = {m.author_id for m in batch}
         for m in batch:
+            if m.reply_to_id is not None:
+                user_ids.add(m.reply_to_id)
+        for m in prior:
+            user_ids.add(m.author_id)
             if m.reply_to_id is not None:
                 user_ids.add(m.reply_to_id)
         existing = await asyncio.to_thread(
             self.store.list_for_users, guild_id, user_ids, limit=self.existing_limit,
         )
         batch_text = "\n".join(m.format_line() for m in batch)
+        prior_text = "\n".join(m.format_line() for m in prior) if prior else ""
         actions = await extract_memories(
             self.llm_client,
             model=self.model,
@@ -200,6 +220,7 @@ class MemoryWorker:
             existing=existing,
             bot_name=self.bot_name,
             max_actions=self.max_actions,
+            prior_text=prior_text,
         )
         if not actions:
             return

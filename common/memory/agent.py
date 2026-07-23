@@ -107,6 +107,13 @@ Tu as DEUX niveaux :
 PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge
 (target_id = son id). Ne duplique pas.
 
+CHEVAUCHEMENT DE LOTS :
+- Tu peux recevoir un bloc « CONTEXTE PRÉCÉDENT » (fin du lot d'avant) puis « MESSAGES NOUVEAUX ».
+- create : uniquement à partir des MESSAGES NOUVEAUX.
+- Le contexte précédent sert à enchaîner (running gag, « mon » qui renvoie à une réplique d'avant,
+  confirmation d'un pending). update/merge/contradict sur un souvenir existant OK si la suite
+  dans les NOUVEAUX le justifie.
+
 Max 6 actions par lot. Si vraiment rien → {{"memories": []}}.
 
 CATÉGORIES — NE LES MÉLANGE PAS :
@@ -157,6 +164,7 @@ async def extract_memories(
     existing: list[Memory],
     bot_name: str = "MARIA",
     max_actions: int = 6,
+    prior_text: str = "",
 ) -> list[dict]:
     """Appelle le modèle nano et renvoie la liste d'actions mémoire."""
     existing_block = "Aucun souvenir existant lié."
@@ -175,6 +183,18 @@ async def extract_memories(
     # Aligne le plafond du prompt sur le paramètre (évite 6 en code / 4 en texte).
     if max_actions != 6:
         system = system.replace("Max 6 actions par lot.", f"Max {max_actions} actions par lot.")
+
+    if prior_text.strip():
+        messages_block = (
+            "CONTEXTE PRÉCÉDENT (déjà analysé — liaison / confirmation seulement ; "
+            "pas de create basé uniquement sur ce bloc) :\n"
+            f"{prior_text.strip()}\n\n"
+            "MESSAGES NOUVEAUX (seule zone autorisée pour create) :\n"
+            f"{batch_text.strip()}"
+        )
+    else:
+        messages_block = f"MESSAGES RÉCENTS :\n{batch_text.strip()}"
+
     messages = [
         {"role": "system", "content": system},
         {
@@ -182,7 +202,7 @@ async def extract_memories(
             "content": (
                 f"SOUVENIRS (pending = à confirmer si ça revient ; active = déjà retenus) :\n"
                 f"{existing_block}\n\n"
-                f"MESSAGES RÉCENTS :\n{batch_text}"
+                f"{messages_block}"
             ),
         },
     ]

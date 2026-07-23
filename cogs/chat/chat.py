@@ -44,6 +44,7 @@ from cogs.chat.config import (
     MEMORY_BUFFER_CAP,
     MEMORY_EXISTING_LIMIT,
     MEMORY_EXTRACT_MAX_ACTIONS,
+    MEMORY_BATCH_OVERLAP,
     MEMORY_FLUSH_MESSAGES,
     MEMORY_FLUSH_MINUTES,
     MEMORY_TOP_K,
@@ -1137,6 +1138,7 @@ class Chat(commands.Cog):
             buffer_cap=MEMORY_BUFFER_CAP,
             existing_limit=MEMORY_EXISTING_LIMIT,
             max_actions=MEMORY_EXTRACT_MAX_ACTIONS,
+            batch_overlap=MEMORY_BATCH_OVERLAP,
             bot_user_id=self.bot.user.id if self.bot.user else None,
             bot_name=getattr(self.bot.user, "name", None) or "MARIA",
         )
