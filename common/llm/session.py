@@ -28,7 +28,7 @@ from .attachments import AttachmentCache, process_attachment
 
 logger = logging.getLogger("llm.session")
 
-USER_FORMAT = "{message.author.name}"
+USER_FORMAT = "{message.author.name} ({message.author.id})"
 MAX_RECURSION = 8
 # Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
 INGESTED_IDS_MAX = 500
@@ -183,8 +183,14 @@ class ChannelSession:
             ref_author = getattr(ref, "author", None)
             ref_is_bot = getattr(ref_author, "bot", False)
             ref_name = getattr(ref_author, "name", "?") if ref_author else "?"
+            ref_author_id = getattr(ref_author, "id", None) if ref_author else None
             ref_id = getattr(ref, "id", None)
-            label = "ton message" if ref_is_bot else ref_name
+            if ref_is_bot:
+                label = "ton message"
+            elif ref_author_id is not None:
+                label = f"{ref_name} ({ref_author_id})"
+            else:
+                label = ref_name
 
             if ref_id and ref_id in self._ingested_ids:
                 # Message déjà dans le contexte de cette session : pas de doublon
@@ -337,7 +343,7 @@ class ChannelSession:
 
         # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM
         if depth == 0 and trigger:
-            author = trigger.author.name
+            author = f"{trigger.author.name} ({trigger.author.id})"
             content = trigger.clean_content.strip()
             if content:
                 hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"

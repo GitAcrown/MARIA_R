@@ -15,7 +15,6 @@ from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
     CATEGORY_EVENT,
     CATEGORY_SERVER,
-    CONFIDENCE_CREATE,
     CONFIDENCE_PENDING,
     CONFIDENCE_UPDATE_DELTA,
     STATUS_ACTIVE,
@@ -33,6 +32,8 @@ _META_PERSON_RE = re.compile(
     re.IGNORECASE,
 )
 _MEMORY_CONTENT_MAX = 100
+# Discord snowflakes typiques (17–20 chiffres) dans « Name (id) » / content.
+_DISCORD_ID_RE = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
 
 
 def sanitize_memory_content(text: str) -> str:
@@ -47,6 +48,40 @@ def sanitize_memory_content(text: str) -> str:
     if len(content) > _MEMORY_CONTENT_MAX:
         content = content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
     return content
+
+
+def _collect_batch_user_ids(
+    batch: list[BufferedMessage],
+    prior: list[BufferedMessage],
+) -> set[int]:
+    """Auteurs, reply targets, et ids cités dans le texte du lot/prior."""
+    ids: set[int] = set()
+    for m in list(batch) + list(prior):
+        ids.add(m.author_id)
+        if m.reply_to_id is not None:
+            ids.add(m.reply_to_id)
+        for raw in _DISCORD_ID_RE.findall(m.content or ""):
+            try:
+                ids.add(int(raw))
+            except ValueError:
+                pass
+        if m.reply_to_content:
+            for raw in _DISCORD_ID_RE.findall(m.reply_to_content):
+                try:
+                    ids.add(int(raw))
+                except ValueError:
+                    pass
+    return ids
+
+
+def _ids_in_text(text: str) -> set[int]:
+    out: set[int] = set()
+    for raw in _DISCORD_ID_RE.findall(text or ""):
+        try:
+            out.add(int(raw))
+        except ValueError:
+            pass
+    return out
 
 
 @dataclass
@@ -200,16 +235,11 @@ class MemoryWorker:
         if not batch:
             return
         prior = prior or []
-        user_ids = {m.author_id for m in batch}
-        for m in batch:
-            if m.reply_to_id is not None:
-                user_ids.add(m.reply_to_id)
-        for m in prior:
-            user_ids.add(m.author_id)
-            if m.reply_to_id is not None:
-                user_ids.add(m.reply_to_id)
+        allowed_ids = _collect_batch_user_ids(batch, prior)
+        if self.bot_user_id is not None:
+            allowed_ids.discard(self.bot_user_id)
         existing = await asyncio.to_thread(
-            self.store.list_for_users, guild_id, user_ids, limit=self.existing_limit,
+            self.store.list_for_users, guild_id, allowed_ids, limit=self.existing_limit,
         )
         batch_text = "\n".join(m.format_line() for m in batch)
         prior_text = "\n".join(m.format_line() for m in prior) if prior else ""
@@ -225,9 +255,15 @@ class MemoryWorker:
         if not actions:
             return
         for action in actions[: self.max_actions]:
-            await self._apply_action(guild_id, action)
+            await self._apply_action(guild_id, action, allowed_ids=allowed_ids)
 
-    async def _apply_action(self, guild_id: int, action: dict) -> None:
+    async def _apply_action(
+        self,
+        guild_id: int,
+        action: dict,
+        *,
+        allowed_ids: Optional[set[int]] = None,
+    ) -> None:
         kind = (action.get("action") or "").strip()
         content = sanitize_memory_content(action.get("content") or "")
         category = (action.get("category") or "user").strip()
@@ -236,11 +272,24 @@ class MemoryWorker:
         target_id = action.get("target_id") or None
         if isinstance(target_id, str) and target_id.lower() in ("null", ""):
             target_id = None
-        # `user_id` peut être un membre mentionné mais pas auteur du batch — autorisé.
         user_id = parse_user_id(action.get("user_id"))
         # Jamais de souvenir perso (ni update) attribué au bot Discord.
         if self.bot_user_id is not None and user_id == self.bot_user_id:
             return
+
+        # Whitelist : user_id + ids dans content doivent être dans le lot.
+        allowed = allowed_ids if allowed_ids is not None else None
+        if allowed is not None:
+            if user_id is not None and user_id not in allowed:
+                logger.debug("Mémoire rejetée (user_id hors lot): %s", user_id)
+                return
+            content_ids = _ids_in_text(content)
+            if self.bot_user_id is not None:
+                content_ids.discard(self.bot_user_id)
+            unknown = content_ids - allowed
+            if unknown:
+                logger.debug("Mémoire rejetée (ids content hors lot): %s", unknown)
+                return
 
         if kind == "create":
             if not content:
@@ -252,8 +301,7 @@ class MemoryWorker:
             elif category == "server":
                 user_id = None
             # event : user_id optionnel
-            # Perso : tampon pending. Collectif (server/event) : actif tout de suite
-            # (petit serveur — on veut remplir /global sans attendre 2 hits).
+            # Perso + collectif : tampon pending (promotion à 2 hits → Chroma).
             if category in (CATEGORY_SERVER, CATEGORY_EVENT):
                 mem = await asyncio.to_thread(
                     self.store.create,
@@ -261,16 +309,10 @@ class MemoryWorker:
                     guild_id=guild_id,
                     content=content,
                     user_id=user_id,
-                    confidence=CONFIDENCE_CREATE,
-                    status=STATUS_ACTIVE,
+                    confidence=CONFIDENCE_PENDING,
+                    status=STATUS_PENDING,
                 )
-                await asyncio.to_thread(
-                    self.vectors.upsert,
-                    mem.id, mem.content,
-                    category=mem.category, guild_id=mem.guild_id,
-                    user_id=mem.user_id, confidence=mem.confidence,
-                )
-                logger.info("Mémoire serveur %s: %s", mem.id[:8], mem.content[:60])
+                logger.debug("Mémoire serveur pending %s: %s", mem.id[:8], mem.content[:60])
                 return
             mem = await asyncio.to_thread(
                 self.store.create,
@@ -296,8 +338,15 @@ class MemoryWorker:
             return
 
         if kind in ("update", "merge"):
-            was_pending = existing.status == STATUS_PENDING
             new_content = content or existing.content
+            if allowed is not None:
+                content_ids = _ids_in_text(new_content)
+                if self.bot_user_id is not None:
+                    content_ids.discard(self.bot_user_id)
+                if content_ids - allowed:
+                    logger.debug("Update rejeté (ids content hors lot)")
+                    return
+            was_pending = existing.status == STATUS_PENDING
             mem = await asyncio.to_thread(
                 self.store.update_content,
                 target_id, new_content, confidence_delta=CONFIDENCE_UPDATE_DELTA,

@@ -22,8 +22,12 @@ DEBOUNCE_SECONDS: float = 0.5
 MEMORY_FLUSH_MESSAGES = 40
 MEMORY_FLUSH_MINUTES = 30
 MEMORY_BUFFER_CAP = 80
-MEMORY_TOP_K = 5
+# RAG complémentaire (le perso vient surtout des profils injectés).
+MEMORY_TOP_K = 3
 MEMORY_EXTRACT_MAX_ACTIONS = 6
 MEMORY_EXISTING_LIMIT = 25
 # Chevauchement entre lots : contexte du lot précédent, sans re-create.
 MEMORY_BATCH_OVERLAP = 8
+# Mini-profils injectés à chaque réponse (auteur + mentions/reply).
+MEMORY_PROFILE_FACTS = 5
+MEMORY_PROFILE_MAX_OTHERS = 3

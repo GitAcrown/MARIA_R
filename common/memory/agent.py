@@ -46,7 +46,9 @@ _MEMORY_SCHEMA = {
                                 "type": "string",
                                 "description": (
                                     "Souvenir ultra-concis (≤12 mots). Pseudo seul, "
-                                    "jamais « le membre X ». Ex: « Alice : anniversaire le 12 mars »."
+                                    "jamais « le membre X ». "
+                                    "Ex: « Alice : anniversaire le 12 mars » ; "
+                                    "lien: « Alice (111) ↔ Bob (222) : coloc »."
                                 ),
                             },
                             "confidence_delta": {
@@ -98,11 +100,11 @@ RÈGLE ANTI-GÉNÉRALISATION (critique) :
   (« a raconté avoir… », « une fois… ») — ou mieux : IGNORE, sauf si ça revient
   clairement (running gag / préférence répétée / fait stable affirmé hors récit).
 - Les faits stables OK : anniversaire, ville, job, préférence affirmée hors histoire,
-  gag de groupe qui revient. Le reste → {{"memories": []}}.
+  lien social stable, gag de groupe qui revient. Le reste → {{"memories": []}}.
 
 Tu as DEUX niveaux :
-1) PENDING — observation fragile (surtout perso).
-2) ACTIVE — souvenir confirmé / collectif retenu.
+1) PENDING — observation fragile (perso ET collectif à confirmer).
+2) ACTIVE — souvenir confirmé / promu après retour du fait.
 
 PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge
 (target_id = son id). Ne duplique pas.
@@ -119,13 +121,22 @@ Max 6 actions par lot. Si vraiment rien → {{"memories": []}}.
 CATÉGORIES — NE LES MÉLANGE PAS :
 - user : perso d'UN membre HUMAIN (user_id obligatoire = Discord id de la personne CONCERNÉE).
   Préférences, genre, ville, anniversaire, goûts réellement affirmés (pas du sarcasme,
-  pas une anecdote). Reste sélectif. JAMAIS le bot.
+  pas une anecdote). Aussi : liens sociaux stables (voir ci-dessous). JAMAIS le bot.
 - server : collectif de CE serveur (user_id=null). Inside jokes, surnoms, habitudes du salon,
   running gags, blagues récurrentes, « chez nous on… ». SOIS PLUS OUVERT ICI pour les
   gags de groupe identifiables — pas pour transformer une soirée en « règle du serveur ».
   Si plusieurs personnes en parlent ou réagissent → server, pas user.
 - event : jalon du serveur (soirée, arrivée/départ, projet lancé). Anecdote du jour ≠ event
   sauf vrai jalon nommé / organisé.
+
+LIENS ENTRE MEMBRES (important) :
+- Colocation, couple, amitié/rivalité récurrente, duo de jeu, famille, etc. SONT utiles
+  s'ils sont stables / affirmés (pas une vanne one-shot).
+- Format : « Alice (111) ↔ Bob (222) : coloc » (pseudos + ids Discord entre parenthèses).
+- category=user, user_id = l'un des deux (le plus cité / celui qui affirme le fait).
+- Lien fort et utile des deux côtés → DEUX creates (un par user_id), même contenu adapté
+  (compte dans le max d'actions). Sinon un seul create suffit.
+- Les deux ids doivent apparaître dans le lot (auteur, reply, ou mention @Name(id)).
 
 ATTRIBUTION user_id (critique — erreurs fréquentes ici) :
 - Format des lignes : `[HH:MM] Pseudo (id): …` parfois avec
@@ -139,6 +150,7 @@ ATTRIBUTION user_id (critique — erreurs fréquentes ici) :
   le fait porte sur l'auteur du message CITÉ.
 - Si quelqu'un répond à MARIA (le bot) en disant « mon anniv c'est… » → le fait porte
   sur l'auteur humain de la ligne, pas sur le bot.
+- user_id (et tout id dans content) DOIT être un id présent dans le lot. Sinon n'extrais PAS.
 - Si tu n'es pas sûr à 100 % de qui est concerné → n'extrais PAS ce souvenir.
 
 IGNORE : débats du jour, scores/actus, demandes au bot, réponses/blagues sur le bot,
@@ -149,10 +161,12 @@ Actions : create (target_id=null) | update | merge | contradict (target_id = id)
 CONTENT (style obligatoire) :
 - Ultra-concis : ≤ 12 mots, une info max. Pas de subordonnées inutiles.
 - Pseudo seul : « Alice », jamais « le membre Alice », « l'utilisateur Bob », « la personne X ».
-- user : commence par le pseudo (« Alice : anniversaire le 12 mars », « Bob : habite à Lyon »).
+- user : commence par le pseudo (« Alice : anniversaire le 12 mars », « Bob : habite à Lyon »)
+  sauf liens → format ↔ ci-dessus.
 - server/event : fait collectif sec (« Running gag du kebab 4h », « Soirée BBQ du 15/06 »).
 - Pas de « a dit que », « semble aimer », « est quelqu'un qui » — va droit au fait.
 Ex. OK : « Alice : anniversaire le 25 juillet »
+Ex. OK : « Alice (111) ↔ Bob (222) : coloc »
 Ex. KO : « Le membre Alice a mentionné que c'était son anniversaire le 25 juillet »"""
 
 

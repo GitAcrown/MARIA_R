@@ -66,8 +66,11 @@ def build_memory_tools(store: MemoryStore) -> list[Tool]:
             name="search_memory",
             description=(
                 "Consulte la mémoire long terme de MARIA (lecture seule). "
-                "À utiliser pour ÉNUMÉRER ou FILTRER : anniversaires connus, goûts d'un membre, "
-                "gags du serveur, événements retenus. "
+                "Les PROFILS déjà injectés dans le prompt couvrent l'auteur et les mentions "
+                "de cette réplique — ne rappelle PAS search_memory pour ça. "
+                "À utiliser pour : (1) un membre ABSENT des profils, "
+                "(2) énumérer (anniversaires connus, gags serveur, « qu'est-ce que tu sais sur… »), "
+                "(3) filtrer par mot-clé. "
                 "Pas pour écrire/modifier — la mémoire se remplit seule ou via /moi. "
                 "query = mot-clé optionnel (ex: 'anniversaire', 'PSG'). "
                 "category = 'user' (perso), 'server' (collectif), 'event', ou omit pour tout. "
