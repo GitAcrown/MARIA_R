@@ -28,10 +28,26 @@ from .attachments import AttachmentCache, process_attachment
 
 logger = logging.getLogger("llm.session")
 
-USER_FORMAT = "{message.author.name} ({message.author.id})"
+# Champ OpenAI `messages[].name` : pattern ^[^\s<|\\/>]+$ (pas d'espaces ni |<>\/).
+# Le pseudo+id lisible va dans le *contenu* du message, pas dans ce champ.
+USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
 # Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
 INGESTED_IDS_MAX = 500
+
+_API_NAME_BAD_RE = re.compile(r"[\s<|\\/>]+")
+
+
+def _api_message_name(message: discord.Message) -> str:
+    """Identifiant stable et valide pour messages[].name (API OpenAI)."""
+    raw = (message.author.name or "user").strip() or "user"
+    safe = _API_NAME_BAD_RE.sub("_", raw).strip("_") or "user"
+    return f"{safe}_{message.author.id}"
+
+
+def _display_user_label(message: discord.Message) -> str:
+    """Pseudo + id Discord pour le texte vu par le modèle (profils / attribution)."""
+    return f"{message.author.name} ({message.author.id})"
 
 
 def _components_v2_to_parts(
@@ -164,7 +180,8 @@ class ChannelSession:
     def _ingest_locked(self, message: discord.Message, is_context_only: bool) -> MessageRecord:
         """Corps réel de l'ingestion (appelé sous lock)."""
         text = message.content or ""
-        user_name = USER_FORMAT.format(message=message)
+        api_name = _api_message_name(message)
+        display_name = _display_user_label(message)
 
         # Pour les messages contexte-seul sans texte, ignorer (évite le bruit)
         if is_context_only and not text.strip():
@@ -172,7 +189,7 @@ class ChannelSession:
                 role="user",
                 components=[],
                 created_at=datetime.now(timezone.utc),
-                name=user_name,
+                name=api_name,
             )
 
         parts: list = []
@@ -236,9 +253,9 @@ class ChannelSession:
         # --- Texte principal ---
         msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
         if text.strip():
-            parts.append(TextComponent(f"[{msg_time}] {user_name}: {message.clean_content}"))
+            parts.append(TextComponent(f"[{msg_time}] {display_name}: {message.clean_content}"))
         elif not is_context_only and (message.embeds or message.stickers or message.attachments):
-            parts.append(TextComponent(f"[{msg_time}] {user_name}:"))
+            parts.append(TextComponent(f"[{msg_time}] {display_name}:"))
 
         # --- Média (uniquement pour les messages adressés au bot) ---
         if not is_context_only:
@@ -299,9 +316,9 @@ class ChannelSession:
 
         if not parts:
             msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
-            parts.append(TextComponent(f"[{msg_time}] {user_name}: (message vide)"))
+            parts.append(TextComponent(f"[{msg_time}] {display_name}: (message vide)"))
 
-        record = self.context.add_user_message(components=parts, name=user_name)
+        record = self.context.add_user_message(components=parts, name=api_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
         self._remember_ingested(message.id)
