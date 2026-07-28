@@ -25,7 +25,6 @@ STATUS_ACTIVE = "active"
 STATUS_PENDING = "pending"
 STATUS_ARCHIVED = "archived"
 
-CONFIDENCE_CREATE = 0.35
 CONFIDENCE_PENDING = 0.2
 CONFIDENCE_UPDATE_DELTA = 0.15
 CONFIDENCE_CONTRADICT_DELTA = 0.25
@@ -35,7 +34,9 @@ CONFIDENCE_DECAY_ARCHIVE_BELOW = 0.15
 DECAY_AFTER_DAYS = 30
 # 2e observation → promotion pending → active (évite les one-shots type « running gag »)
 HITS_TO_PROMOTE = 2
-PENDING_EXPIRE_DAYS = 14
+# 21j : laisse le temps à un signal qui revient (ex. météo d'une ville) de se confirmer
+# une 2e fois sans traîner indéfiniment en base.
+PENDING_EXPIRE_DAYS = 21
 
 
 @dataclass
@@ -236,6 +237,7 @@ class MemoryStore:
             seen.add(m.id)
             out.append(m)
         return out
+
     def list_server(
         self,
         guild_id: int,

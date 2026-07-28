@@ -56,13 +56,13 @@ def build_profile_ctx(
                     stripped = stripped[len(prefix) :].strip()
                     break
             else:
-                m = re.match(
+                prefix_match = re.match(
                     rf"^{re.escape(label)}\s*\(\d{{17,20}}\)\s*:\s*(.+)$",
                     stripped,
                     re.IGNORECASE,
                 )
-                if m:
-                    stripped = m.group(1).strip()
+                if prefix_match:
+                    stripped = prefix_match.group(1).strip()
             if "↔" not in stripped:
                 stripped = re.sub(r"\s*\(\d{17,20}\)", "", stripped).strip()
             facts.append(stripped or content)

@@ -7,14 +7,13 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any, Optional
 
 from discord.ext import tasks
 
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
-    CATEGORY_EVENT,
-    CATEGORY_SERVER,
     CONFIDENCE_PENDING,
     CONFIDENCE_UPDATE_DELTA,
     STATUS_ACTIVE,
@@ -126,6 +125,30 @@ def _ids_in_text(text: str) -> set[int]:
         except ValueError:
             pass
     return out
+
+
+def _fact_part(content: str) -> str:
+    """Retire le préfixe pseudo pour comparer uniquement le fait."""
+    if ":" in content:
+        return content.split(":", 1)[1].strip().lower()
+    return content.strip().lower()
+
+
+def is_near_duplicate(new_content: str, existing_contents: list[str]) -> bool:
+    """Détecte un fait quasi identique déjà stocké (même sujet), évite les doublons."""
+    new_fact = _fact_part(new_content)
+    if not new_fact:
+        return False
+    for other in existing_contents:
+        other_fact = _fact_part(other)
+        if not other_fact:
+            continue
+        if new_fact == other_fact:
+            return True
+        ratio = SequenceMatcher(None, new_fact, other_fact).ratio()
+        if ratio >= 0.82:
+            return True
+    return False
 
 
 def _split_name_id(part: str) -> tuple[str, Optional[int]]:
@@ -389,9 +412,14 @@ class MemoryWorker:
         )
         if not actions:
             return
+        existing_by_user: dict[Optional[int], list[str]] = {}
+        for m in existing:
+            existing_by_user.setdefault(m.user_id, []).append(m.content)
         for action in actions[: self.max_actions]:
             await self._apply_action(
-                guild_id, action, allowed_ids=allowed_ids, name_by_id=name_by_id,
+                guild_id, action,
+                allowed_ids=allowed_ids, name_by_id=name_by_id,
+                existing_by_user=existing_by_user,
             )
 
     async def _apply_action(
@@ -401,6 +429,7 @@ class MemoryWorker:
         *,
         allowed_ids: Optional[set[int]] = None,
         name_by_id: Optional[dict[int, str]] = None,
+        existing_by_user: Optional[dict[Optional[int], list[str]]] = None,
     ) -> None:
         kind = (action.get("action") or "").strip()
         category = (action.get("category") or "user").strip()
@@ -449,19 +478,14 @@ class MemoryWorker:
         if kind == "create":
             if category == "user" and user_id is None:
                 return
-            # Perso + collectif : tampon pending (promotion à 2 hits → Chroma).
-            if category in (CATEGORY_SERVER, CATEGORY_EVENT):
-                mem = await asyncio.to_thread(
-                    self.store.create,
-                    category=category,
-                    guild_id=guild_id,
-                    content=content,
-                    user_id=user_id,
-                    confidence=CONFIDENCE_PENDING,
-                    status=STATUS_PENDING,
-                )
-                logger.debug("Mémoire serveur pending %s: %s", mem.id[:8], mem.content[:60])
+            # Dédup : fait quasi identique déjà en base pour cette personne/ce serveur.
+            existing_contents = (existing_by_user or {}).get(
+                user_id if category == "user" else None, [],
+            )
+            if is_near_duplicate(content, existing_contents):
+                logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
+            # Toujours pending au départ (perso ET collectif) : promotion à 2 hits.
             mem = await asyncio.to_thread(
                 self.store.create,
                 category=category,

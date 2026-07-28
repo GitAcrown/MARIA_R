@@ -100,7 +100,22 @@ RÈGLE ANTI-GÉNÉRALISATION (critique) :
   (« a raconté avoir… », « une fois… ») — ou mieux : IGNORE, sauf si ça revient
   clairement (running gag / préférence répétée / fait stable affirmé hors récit).
 - Les faits stables OK : anniversaire, ville, job, préférence affirmée hors histoire,
-  lien social stable, gag de groupe qui revient. Le reste → {{"memories": []}}.
+  lien social stable, gag de groupe qui revient, déduction prudente d'un pattern qui se
+  répète (voir SIGNAUX RÉPÉTÉS ci-dessous — toujours hedgée, jamais absolue). Le reste →
+  {{"memories": []}}.
+
+QUALITÉ — ignore le vague / subjectif / non réutilisable (critique) :
+- IGNORE compliments, insultes, comparaisons physiques ou de personnalité
+  (« a du charisme », « ressemble à Jude Law », « elle est classe », « quel boloss »)
+  — c'est du banter, ça ne veut rien dire relu plus tard sans contexte.
+  Exception : surnom / comparaison qui revient tout le temps et fait gag reconnu du
+  groupe → category=server (le running gag lui-même, pas le compliment en soi).
+  Sinon aucun impact sur la personnalité → n'extrais pas.
+- Un fait doit être compréhensible SEUL, sans avoir lu la conversation. Si la phrase
+  ne veut rien dire hors contexte (trop vague, référence à « ça », « cette fois »,
+  jugement sans sujet concret) → IGNORE plutôt que de la simplifier à l'excès.
+- Une préférence de type « fan de X » n'est retenue que si elle est affirmée
+  clairement comme un vrai goût (pas une blague, pas une seule mention en passant).
 
 Tu as DEUX niveaux :
 1) PENDING — observation fragile (perso ET collectif à confirmer).
@@ -108,6 +123,20 @@ Tu as DEUX niveaux :
 
 PRIORITÉ : si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge
 (target_id = son id). Ne duplique pas.
+
+SIGNAUX RÉPÉTÉS → DÉDUCTIONS (utile, à ne pas négliger) :
+- Une action qui revient trahit parfois un fait jamais dit explicitement : demander
+  toujours la météo de la même ville → habite peut-être là-bas ; demander tout le temps
+  l'heure d'un match de la même équipe → supporter de cette équipe ; parler souvent d'un
+  trajet / d'un décalage horaire précis → indice de localisation. Ce sont des indices utiles.
+- 1re occurrence : crée un PENDING qui décrit l'observation CONCRÈTE, pas la conclusion
+  (« Alice : a demandé la météo de Lyon », PAS « Alice : habite à Lyon »).
+- Si un PENDING existant (bloc SOUVENIRS) montre déjà le même schéma pour cette personne
+  (même ville / même équipe / même sujet) et que les MESSAGES NOUVEAUX le confirment une
+  2e fois → update/merge ce PENDING en formulant la déduction avec prudence, TOUJOURS
+  couverte par « probablement » / « sans doute » (« Alice : vit probablement à Lyon »).
+  Ne l'affirme jamais comme un fait certain — ce n'est qu'une déduction.
+- Ne fais jamais cette déduction sur une seule occurrence.
 
 CHEVAUCHEMENT DE LOTS :
 - Tu peux recevoir un bloc « CONTEXTE PRÉCÉDENT » (fin du lot d'avant) puis « MESSAGES NOUVEAUX ».
@@ -170,8 +199,11 @@ CONTENT (style obligatoire) :
 - Pas de « a dit que », « semble aimer », « est quelqu'un qui » — va droit au fait.
 Ex. OK : « Alice : anniversaire le 25 juillet »
 Ex. OK : « Alice (111) ↔ Bob (222) : coloc »
+Ex. OK : « Alice : vit probablement à Lyon » (déduction hedgée, après 2e signal confirmé)
 Ex. KO : « Alice (111) : anniversaire le 25 juillet » (id interdit hors lien ↔)
-Ex. KO : « Le membre Alice a mentionné que c'était son anniversaire le 25 juillet »"""
+Ex. KO : « Le membre Alice a mentionné que c'était son anniversaire le 25 juillet »
+Ex. KO : « Bob : a du charisme » (compliment subjectif, pas un fait)
+Ex. KO : « Bob : ressemble à Jude Law » (comparaison one-shot, pas réutilisable)"""
 
 
 async def extract_memories(
