@@ -255,6 +255,41 @@ class MemoryStore:
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    def list_recent(
+        self,
+        guild_id: int,
+        *,
+        category: Optional[str] = None,
+        limit: int = 25,
+        include_pending: bool = True,
+    ) -> list[Memory]:
+        """Derniers souvenirs créés sur ce guild (user + server + event), created_at DESC."""
+        limit = max(1, min(limit, 40))
+        statuses = (STATUS_ACTIVE, STATUS_PENDING) if include_pending else (STATUS_ACTIVE,)
+        status_ph = ",".join("?" * len(statuses))
+        with _db() as conn:
+            if category and category in VALID_CATEGORIES:
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM memories
+                    WHERE guild_id = ? AND status IN ({status_ph}) AND category = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (guild_id, *statuses, category, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM memories
+                    WHERE guild_id = ? AND status IN ({status_ph})
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (guild_id, *statuses, limit),
+                ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
     def search_active(
         self,
         guild_id: int,

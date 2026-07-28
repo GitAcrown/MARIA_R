@@ -277,6 +277,7 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "Mémoire",
         "› `/moi` — ta mémoire perso ; Retenir… / oublier une ligne / Tout oublier.\n"
         "› `/global` — mémoire collective ; oublier une ligne / reset (modos).\n"
+        "› `/souvenirs` — derniers créés sur le serveur, pending inclus (modos).\n"
         "› Elle n'enregistre pas tout : perso = sélectif, collectif = plus ouvert.",
     ),
     (
@@ -944,6 +945,64 @@ class AllMemoryView(discord.ui.LayoutView):
             else None
         )
         _append_controls(children, note=note, button_row=button_row, select_row=select_row)
+        self.add_item(discord.ui.Container(*children))
+
+
+class RecentMemoriesView(discord.ui.LayoutView):
+    """Derniers souvenirs créés — /souvenirs (modos)."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        memories: list[Memory],
+        *,
+        category_label: str = "toutes",
+    ):
+        super().__init__(timeout=180)
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay(f"## Souvenirs récents · {guild.name}"),
+            discord.ui.TextDisplay(f"-# Filtre : {category_label} · {len(memories)} ligne(s)"),
+        ]
+        if not memories:
+            children += [
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("-# Aucun souvenir pour ce filtre."),
+            ]
+        else:
+            lines: list[str] = []
+            for m in memories:
+                ts = int(m.created_at.timestamp())
+                who = ""
+                if m.user_id:
+                    member = guild.get_member(m.user_id)
+                    label = member.display_name if member else "?"
+                    who = f" · {label} (`{m.user_id}`)"
+                content = m.content.strip()
+                if len(content) > _MEMORY_LINE_MAX:
+                    content = content[: _MEMORY_LINE_MAX - 1] + "…"
+                lines.append(
+                    f"-# [`{m.status}`/{m.category}]{who}\n"
+                    f"› {content} · <t:{ts}:R> · {m.confidence:.0%}"
+                )
+            # Discord TextDisplay ~4000 ; on coupe proprement.
+            chunk: list[str] = []
+            size = 0
+            for line in lines:
+                add = len(line) + 1
+                if chunk and size + add > 3500:
+                    children += [
+                        discord.ui.Separator(),
+                        discord.ui.TextDisplay("\n".join(chunk)),
+                    ]
+                    chunk = []
+                    size = 0
+                chunk.append(line)
+                size += add
+            if chunk:
+                children += [
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay("\n".join(chunk)),
+                ]
         self.add_item(discord.ui.Container(*children))
 
 
@@ -1739,6 +1798,58 @@ class Chat(commands.Cog):
             store=self.memory_store, vectors=self.memory_vectors,
             guild_id=interaction.guild.id,
             can_manage=_is_memory_mod(interaction.user),
+        )
+        await interaction.followup.send(view=view, ephemeral=True)
+
+    @app_commands.command(
+        name="souvenirs",
+        description="Derniers souvenirs créés sur ce serveur (modos)",
+    )
+    @app_commands.describe(
+        categorie="Filtrer par catégorie (défaut : toutes)",
+        limite="Nombre de lignes (1–40, défaut 20)",
+    )
+    @app_commands.choices(categorie=[
+        app_commands.Choice(name="Toutes", value="all"),
+        app_commands.Choice(name="Perso (user)", value="user"),
+        app_commands.Choice(name="Collectif (server)", value="server"),
+        app_commands.Choice(name="Événements (event)", value="event"),
+    ])
+    async def cmd_souvenirs(
+        self,
+        interaction: discord.Interaction,
+        categorie: app_commands.Choice[str] | None = None,
+        limite: app_commands.Range[int, 1, 40] = 20,
+    ) -> None:
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "Disponible uniquement sur un serveur.", ephemeral=True,
+            )
+        if not _is_memory_mod(interaction.user):
+            return await interaction.response.send_message(
+                "Réservé aux modos (admin / gérer le serveur / gérer les messages).",
+                ephemeral=True,
+            )
+        await interaction.response.defer(ephemeral=True)
+        cat_value = categorie.value if categorie else "all"
+        cat_filter = None if cat_value == "all" else cat_value
+        labels = {
+            "all": "toutes",
+            "user": "perso",
+            "server": "collectif",
+            "event": "événements",
+        }
+        memories = await asyncio.to_thread(
+            self.memory_store.list_recent,
+            interaction.guild.id,
+            category=cat_filter,
+            limit=int(limite),
+            include_pending=True,
+        )
+        view = RecentMemoriesView(
+            interaction.guild,
+            memories,
+            category_label=labels.get(cat_value, cat_value),
         )
         await interaction.followup.send(view=view, ephemeral=True)
 
