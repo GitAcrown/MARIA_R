@@ -49,13 +49,23 @@ def build_profile_ctx(
             if not content:
                 continue
             seen_contents.add(_norm_content(content))
-            # Évite de répéter « Alice : … » si on a déjà le label.
-            prefix = f"{label} :"
-            if content.lower().startswith(prefix.lower()):
-                content = content[len(prefix) :].strip()
-            elif content.lower().startswith(f"{label}:".lower()):
-                content = content[len(label) + 1 :].strip()
-            facts.append(content)
+            # Évite de répéter « Alice : … » / « Alice (id) : … » si on a déjà le label.
+            stripped = content
+            for prefix in (f"{label} :", f"{label}:"):
+                if stripped.lower().startswith(prefix.lower()):
+                    stripped = stripped[len(prefix) :].strip()
+                    break
+            else:
+                m = re.match(
+                    rf"^{re.escape(label)}\s*\(\d{{17,20}}\)\s*:\s*(.+)$",
+                    stripped,
+                    re.IGNORECASE,
+                )
+                if m:
+                    stripped = m.group(1).strip()
+            if "↔" not in stripped:
+                stripped = re.sub(r"\s*\(\d{17,20}\)", "", stripped).strip()
+            facts.append(stripped or content)
         if facts:
             lines.append(f"- {label} ({uid}): " + " · ".join(facts))
 

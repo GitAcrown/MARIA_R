@@ -45,10 +45,10 @@ _MEMORY_SCHEMA = {
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "Souvenir ultra-concis (≤12 mots). Pseudo seul, "
-                                    "jamais « le membre X ». "
-                                    "Ex: « Alice : anniversaire le 12 mars » ; "
-                                    "lien: « Alice (111) ↔ Bob (222) : coloc »."
+                                    "Souvenir ultra-concis (≤12 mots). "
+                                    "Fait perso : « Pseudo : fait » SANS id. "
+                                    "Lien : « Alice (111) ↔ Bob (222) : coloc ». "
+                                    "Jamais « le membre X »."
                                 ),
                             },
                             "confidence_delta": {
@@ -160,13 +160,17 @@ Actions : create (target_id=null) | update | merge | contradict (target_id = id)
 
 CONTENT (style obligatoire) :
 - Ultra-concis : ≤ 12 mots, une info max. Pas de subordonnées inutiles.
-- Pseudo seul : « Alice », jamais « le membre Alice », « l'utilisateur Bob », « la personne X ».
-- user : commence par le pseudo (« Alice : anniversaire le 12 mars », « Bob : habite à Lyon »)
-  sauf liens → format ↔ ci-dessus.
-- server/event : fait collectif sec (« Running gag du kebab 4h », « Soirée BBQ du 15/06 »).
+- Pseudo = EXACTEMENT celui de la ligne du lot pour cet id (« Alice (111) » → « Alice »).
+  Jamais un autre surnom / ancien pseudo / confondre avec un autre membre.
+- user (fait simple) : « Alice : anniversaire le 12 mars » — PSEUDO SEUL, JAMAIS d'id
+  entre parenthèses dans le content (l'id va uniquement dans le champ user_id).
+- user (lien) : « Alice (111) ↔ Bob (222) : coloc » — ids obligatoires des deux côtés.
+- server/event : fait collectif sec (« Running gag du kebab 4h », « Soirée BBQ du 15/06 »),
+  sans ids Discord.
 - Pas de « a dit que », « semble aimer », « est quelqu'un qui » — va droit au fait.
 Ex. OK : « Alice : anniversaire le 25 juillet »
 Ex. OK : « Alice (111) ↔ Bob (222) : coloc »
+Ex. KO : « Alice (111) : anniversaire le 25 juillet » (id interdit hors lien ↔)
 Ex. KO : « Le membre Alice a mentionné que c'était son anniversaire le 25 juillet »"""
 
 

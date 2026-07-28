@@ -978,6 +978,10 @@ class RecentMemoriesView(discord.ui.LayoutView):
                     label = member.display_name if member else "?"
                     who = f" · {label} (`{m.user_id}`)"
                 content = m.content.strip()
+                # Affichage : ids seulement utiles pour les liens ↔ ; sinon bruit.
+                if "↔" not in content:
+                    content = re.sub(r"\s*\((\d{17,20})\)", "", content).strip()
+                    content = re.sub(r"\s{2,}", " ", content)
                 if len(content) > _MEMORY_LINE_MAX:
                     content = content[: _MEMORY_LINE_MAX - 1] + "…"
                 lines.append(

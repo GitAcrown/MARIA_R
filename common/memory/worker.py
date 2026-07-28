@@ -34,6 +34,9 @@ _META_PERSON_RE = re.compile(
 _MEMORY_CONTENT_MAX = 100
 # Discord snowflakes typiques (17–20 chiffres) dans « Name (id) » / content.
 _DISCORD_ID_RE = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
+_SNOWFLAKE_PARENS_RE = re.compile(r"\s*\((\d{17,20})\)")
+_MENTION_NAME_ID_RE = re.compile(r"@?([^\s@<>()]+)\((\d{17,20})\)")
+_NAME_ID_TAIL_RE = re.compile(r"^(.*?)\s*\((\d{17,20})\)\s*$")
 
 
 def sanitize_memory_content(text: str) -> str:
@@ -47,6 +50,12 @@ def sanitize_memory_content(text: str) -> str:
         content = content[0].upper() + content[1:]
     if len(content) > _MEMORY_CONTENT_MAX:
         content = content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
+    return content
+
+
+def _clip(content: str) -> str:
+    if len(content) > _MEMORY_CONTENT_MAX:
+        return content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
     return content
 
 
@@ -74,6 +83,41 @@ def _collect_batch_user_ids(
     return ids
 
 
+def _collect_name_by_id(
+    batch: list[BufferedMessage],
+    prior: list[BufferedMessage],
+) -> dict[int, str]:
+    """Pseudo vu dans le lot pour chaque id (le lot récent écrase le prior)."""
+    names: dict[int, str] = {}
+    for m in list(prior) + list(batch):
+        if m.author_name:
+            names[m.author_id] = m.author_name
+        if m.reply_to_id is not None and m.reply_to_name:
+            names[m.reply_to_id] = m.reply_to_name
+        for match in _MENTION_NAME_ID_RE.finditer(m.content or ""):
+            try:
+                names[int(match.group(2))] = match.group(1)
+            except ValueError:
+                pass
+    return names
+
+
+def _id_by_name_lower(name_by_id: dict[int, str]) -> dict[str, int]:
+    """Inverse pseudo → id ; ignore les pseudos ambigus (plusieurs ids)."""
+    out: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for uid, name in name_by_id.items():
+        key = (name or "").casefold().strip()
+        if not key or key in ambiguous:
+            continue
+        if key in out and out[key] != uid:
+            ambiguous.add(key)
+            out.pop(key, None)
+            continue
+        out[key] = uid
+    return out
+
+
 def _ids_in_text(text: str) -> set[int]:
     out: set[int] = set()
     for raw in _DISCORD_ID_RE.findall(text or ""):
@@ -82,6 +126,95 @@ def _ids_in_text(text: str) -> set[int]:
         except ValueError:
             pass
     return out
+
+
+def _split_name_id(part: str) -> tuple[str, Optional[int]]:
+    """« Alice (123) » → (Alice, 123) ; « Alice » → (Alice, None)."""
+    part = (part or "").strip()
+    m = _NAME_ID_TAIL_RE.match(part)
+    if m:
+        return (m.group(1) or "").strip(), int(m.group(2))
+    return part, None
+
+
+def normalize_user_memory(
+    content: str,
+    *,
+    user_id: Optional[int],
+    name_by_id: dict[int, str],
+    lock_user_id: bool = False,
+) -> tuple[Optional[int], str]:
+    """Aligne user_id + content : pseudo canonique, ids seulement pour les liens ↔.
+
+    - Fait simple → « Pseudo : fait » (jamais d'id dans le texte).
+    - Lien → « A (id) ↔ B (id) : fait » avec pseudos du lot.
+    - Si le préfixe nomme clairement un autre membre du lot → corrige user_id
+      (sauf si lock_user_id, ex. update d'un souvenir déjà ancré).
+    """
+    content = sanitize_memory_content(content)
+    if not content:
+        return user_id, ""
+
+    id_by_name = _id_by_name_lower(name_by_id)
+
+    if "↔" in content:
+        left, _, right = content.partition("↔")
+        if ":" not in right:
+            return None, ""
+        right_who, _, fact = right.partition(":")
+        fact = _SNOWFLAKE_PARENS_RE.sub("", fact.strip()).strip()
+        if not fact:
+            return None, ""
+        name_a, id_a = _split_name_id(left)
+        name_b, id_b = _split_name_id(right_who)
+
+        def _resolve_side(name: str, sid: Optional[int]) -> Optional[int]:
+            if sid is not None and sid in name_by_id:
+                return sid
+            return id_by_name.get(name.casefold()) if name else None
+
+        id_a = _resolve_side(name_a, id_a)
+        id_b = _resolve_side(name_b, id_b)
+        if id_a is None or id_b is None:
+            return None, ""
+        label_a = name_by_id.get(id_a) or name_a
+        label_b = name_by_id.get(id_b) or name_b
+        if lock_user_id and user_id is not None:
+            if user_id not in (id_a, id_b):
+                return None, ""
+            primary = user_id
+        else:
+            primary = user_id if user_id in (id_a, id_b) else id_a
+        return primary, _clip(f"{label_a} ({id_a}) ↔ {label_b} ({id_b}) : {fact}")
+
+    # Fait perso simple.
+    if ":" in content:
+        left, _, fact = content.partition(":")
+        raw_name, prefix_id = _split_name_id(left)
+    else:
+        raw_name = ""
+        prefix_id = None
+        fact = content
+
+    fact = _SNOWFLAKE_PARENS_RE.sub("", fact.strip()).strip()
+    if not fact:
+        return None, ""
+
+    resolved = user_id
+    if not lock_user_id:
+        if prefix_id is not None and prefix_id in name_by_id:
+            resolved = prefix_id
+        if raw_name:
+            named = id_by_name.get(raw_name.casefold())
+            if named is not None:
+                # Le pseudo du content prime s'il désigne un membre du lot.
+                resolved = named
+
+    if resolved is None:
+        return None, ""
+
+    canonical = name_by_id.get(resolved) or raw_name or "?"
+    return resolved, _clip(f"{canonical} : {fact}")
 
 
 @dataclass
@@ -236,8 +369,10 @@ class MemoryWorker:
             return
         prior = prior or []
         allowed_ids = _collect_batch_user_ids(batch, prior)
+        name_by_id = _collect_name_by_id(batch, prior)
         if self.bot_user_id is not None:
             allowed_ids.discard(self.bot_user_id)
+            name_by_id.pop(self.bot_user_id, None)
         existing = await asyncio.to_thread(
             self.store.list_for_users, guild_id, allowed_ids, limit=self.existing_limit,
         )
@@ -255,7 +390,9 @@ class MemoryWorker:
         if not actions:
             return
         for action in actions[: self.max_actions]:
-            await self._apply_action(guild_id, action, allowed_ids=allowed_ids)
+            await self._apply_action(
+                guild_id, action, allowed_ids=allowed_ids, name_by_id=name_by_id,
+            )
 
     async def _apply_action(
         self,
@@ -263,9 +400,9 @@ class MemoryWorker:
         action: dict,
         *,
         allowed_ids: Optional[set[int]] = None,
+        name_by_id: Optional[dict[int, str]] = None,
     ) -> None:
         kind = (action.get("action") or "").strip()
-        content = sanitize_memory_content(action.get("content") or "")
         category = (action.get("category") or "user").strip()
         if category not in VALID_CATEGORIES:
             category = "user"
@@ -273,8 +410,26 @@ class MemoryWorker:
         if isinstance(target_id, str) and target_id.lower() in ("null", ""):
             target_id = None
         user_id = parse_user_id(action.get("user_id"))
+        raw_content = action.get("content") or ""
+        names = name_by_id or {}
+
         # Jamais de souvenir perso (ni update) attribué au bot Discord.
         if self.bot_user_id is not None and user_id == self.bot_user_id:
+            return
+
+        if category == "user":
+            user_id, content = normalize_user_memory(
+                raw_content, user_id=user_id, name_by_id=names,
+            )
+        else:
+            content = sanitize_memory_content(raw_content)
+            # Collectif : pas d'ids Discord dans le texte.
+            content = _SNOWFLAKE_PARENS_RE.sub("", content).strip()
+            content = re.sub(r"\s{2,}", " ", content).strip(" .;")
+            if category == "server":
+                user_id = None
+
+        if not content:
             return
 
         # Whitelist : user_id + ids dans content doivent être dans le lot.
@@ -292,15 +447,8 @@ class MemoryWorker:
                 return
 
         if kind == "create":
-            if not content:
+            if category == "user" and user_id is None:
                 return
-            # Sépare strictement perso / collectif.
-            if category == "user":
-                if user_id is None:
-                    return
-            elif category == "server":
-                user_id = None
-            # event : user_id optionnel
             # Perso + collectif : tampon pending (promotion à 2 hits → Chroma).
             if category in (CATEGORY_SERVER, CATEGORY_EVENT):
                 mem = await asyncio.to_thread(
@@ -339,6 +487,21 @@ class MemoryWorker:
 
         if kind in ("update", "merge"):
             new_content = content or existing.content
+            if existing.category == "user" and existing.user_id is not None:
+                merge_names = dict(names)
+                if existing.user_id not in merge_names:
+                    hint = (existing.content or "").split(":", 1)[0]
+                    hint = _SNOWFLAKE_PARENS_RE.sub("", hint).strip()
+                    if hint:
+                        merge_names[existing.user_id] = hint
+                _, new_content = normalize_user_memory(
+                    new_content,
+                    user_id=existing.user_id,
+                    name_by_id=merge_names,
+                    lock_user_id=True,
+                )
+                if not new_content:
+                    return
             if allowed is not None:
                 content_ids = _ids_in_text(new_content)
                 if self.bot_user_id is not None:
