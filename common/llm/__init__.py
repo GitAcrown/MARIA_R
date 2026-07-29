@@ -12,6 +12,7 @@ from .context import (
     ToolCallRecord,
     ToolResponseRecord,
 )
+from .session import resolve_message_reference
 from .tools import Tool, ToolRegistry
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "ToolResponseRecord",
     "Tool",
     "ToolRegistry",
+    "resolve_message_reference",
 ]

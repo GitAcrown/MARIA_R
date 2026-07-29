@@ -50,6 +50,27 @@ def _display_user_label(message: discord.Message) -> str:
     return f"{message.author.name} ({message.author.id})"
 
 
+async def resolve_message_reference(message: discord.Message) -> Optional[discord.Message]:
+    """Résout le message cité (reply), avec fetch API en secours.
+
+    `message.reference.resolved` n'est peuplé par le gateway que si Discord l'a inclus
+    dans le payload ; sinon il vaut None ou DeletedReferencedMessage, et le contenu cité
+    disparaît silencieusement du contexte sans ce fallback.
+    """
+    ref = message.reference
+    if ref is None:
+        return None
+    resolved = ref.resolved
+    if isinstance(resolved, discord.Message):
+        return resolved
+    if not ref.message_id:
+        return None
+    try:
+        return await message.channel.fetch_message(ref.message_id)
+    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+        return None
+
+
 def _components_v2_to_parts(
     components: list,
     *,
@@ -174,10 +195,17 @@ class ChannelSession:
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
         """Ingère un message dans le contexte GPT. Acquiert le lock pour éviter les
         interleaving entre ingestion et tool_call/tool_response pendant run_completion."""
+        resolved_ref = await resolve_message_reference(message)
         async with self._lock:
-            return self._ingest_locked(message, is_context_only)
+            return self._ingest_locked(message, is_context_only, resolved_ref=resolved_ref)
 
-    def _ingest_locked(self, message: discord.Message, is_context_only: bool) -> MessageRecord:
+    def _ingest_locked(
+        self,
+        message: discord.Message,
+        is_context_only: bool,
+        *,
+        resolved_ref: Optional[discord.Message] = None,
+    ) -> MessageRecord:
         """Corps réel de l'ingestion (appelé sous lock)."""
         text = message.content or ""
         api_name = _api_message_name(message)
@@ -195,8 +223,10 @@ class ChannelSession:
         parts: list = []
 
         # --- Référence (reply) ---
-        if message.reference and message.reference.resolved:
-            ref = message.reference.resolved
+        # message.reference.resolved n'est pas toujours peuplé par le gateway (message
+        # trop ancien, reconnexion…) : resolved_ref vient d'un fetch API en secours.
+        if message.reference and resolved_ref is not None:
+            ref = resolved_ref
             ref_author = getattr(ref, "author", None)
             ref_is_bot = getattr(ref_author, "bot", False)
             ref_name = getattr(ref_author, "name", "?") if ref_author else "?"

@@ -18,7 +18,7 @@ from discord.ext import commands
 
 from common.dataio import CogData, DictTableBuilder
 from common.emojis import SETTINGS
-from common.llm import MariaGptApi, Tool
+from common.llm import MariaGptApi, Tool, resolve_message_reference
 from common.memory import (
     MemoryStore,
     MemoryWorker,
@@ -1627,15 +1627,9 @@ class Chat(commands.Cog):
 
         if self._memory_worker and message.content:
             reply_to_id = reply_to_name = reply_to_content = None
-            ref = message.reference
-            if ref is not None:
-                resolved = ref.resolved
-                if not isinstance(resolved, discord.Message) and ref.message_id:
-                    try:
-                        resolved = await message.channel.fetch_message(ref.message_id)
-                    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
-                        resolved = None
-                if isinstance(resolved, discord.Message) and resolved.author:
+            if message.reference is not None:
+                resolved = await resolve_message_reference(message)
+                if resolved is not None and resolved.author:
                     if resolved.author.bot:
                         # Réponse au bot : contexte sans id réel (jamais de souvenir user).
                         bot_label = (
