@@ -1,4 +1,4 @@
-"""Agent mémoire — extraction via modèle nano + JSON schema."""
+"""Agent mémoire — extraction via LLM + JSON schema."""
 
 from __future__ import annotations
 
@@ -216,7 +216,7 @@ async def extract_memories(
     max_actions: int = 6,
     prior_text: str = "",
 ) -> list[dict]:
-    """Appelle le modèle nano et renvoie la liste d'actions mémoire."""
+    """Appelle le LLM d'extraction et renvoie la liste d'actions mémoire."""
     existing_block = "Aucun souvenir existant lié."
     if existing:
         lines = []

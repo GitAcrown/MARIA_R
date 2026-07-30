@@ -1,4 +1,4 @@
-"""Worker mémoire — buffer hybride, flush nano, decay quotidien."""
+"""Worker mémoire — buffer hybride, flush d'extraction, decay quotidien."""
 
 from __future__ import annotations
 
@@ -251,7 +251,7 @@ class BufferedMessage:
     reply_to_content: Optional[str] = None
 
     def format_line(self) -> str:
-        """Ligne lisible pour l'agent nano, avec contexte de reply si présent."""
+        """Ligne lisible pour l'agent d'extraction, avec contexte de reply si présent."""
         stamp = self.ts.strftime("%H:%M")
         head = f"[{stamp}] {self.author_name} ({self.author_id})"
         if self.reply_to_id is not None:

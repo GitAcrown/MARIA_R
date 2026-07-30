@@ -1,4 +1,4 @@
-"""Mémoire long terme — SQLite + Chroma, agent nano, RAG."""
+"""Mémoire long terme — SQLite + Chroma, agent d'extraction, RAG."""
 
 from common.memory.rag import build_profile_ctx, format_memory_ctx, retrieve_memories
 from common.memory.store import Memory, MemoryStore

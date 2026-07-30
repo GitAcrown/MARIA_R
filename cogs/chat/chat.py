@@ -57,7 +57,6 @@ from cogs.chat.config import (
     MEMORY_PROFILE_MAX_OTHERS,
     MEMORY_TOP_K,
     MODEL_MAIN,
-    MODEL_NANO,
 )
 from cogs.chat.tools_reminders import (
     REMINDER_MAX_PENDING,
@@ -67,10 +66,6 @@ from cogs.chat.tools_reminders import (
 )
 from cogs.chat.tools_discord import build_discord_tools
 from cogs.chat.tools_memory import build_memory_tools
-
-# Patterns pour la sélection du modèle nano (tâches structurées simples)
-_NANO_REMINDER_RE = re.compile(r'\b(rappel|rappelle|dans\s+\d+)\b', re.I)
-_NANO_MATH_RE = re.compile(r'\d+\s*[+\-*/]\s*\d+')
 
 # Détection d'une date JJ/MM/AAAA ou JJ/MM (année en cours) dans un message —
 # réaction pour créer un rappel en un clic.
@@ -363,7 +358,7 @@ class AddPersonalMemoryModal(discord.ui.Modal, title="À retenir sur moi"):
         if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
             summary = await summarize_memories(
                 chat_cog.gpt_api.client,
-                model=MODEL_NANO,
+                model=MODEL_MAIN,
                 memories=memories,
                 scope="user",
                 display_name=self.display_name,
@@ -638,7 +633,7 @@ async def _rebuild_me_view(
         if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
             summary = await summarize_memories(
                 chat_cog.gpt_api.client,
-                model=MODEL_NANO,
+                model=MODEL_MAIN,
                 memories=memories,
                 scope="user",
                 display_name=display_name,
@@ -669,7 +664,7 @@ async def _rebuild_global_view(
         if chat_cog is not None and hasattr(chat_cog, "gpt_api"):
             summary = await summarize_memories(
                 chat_cog.gpt_api.client,
-                model=MODEL_NANO,
+                model=MODEL_MAIN,
                 memories=memories,
                 scope="server",
                 display_name=guild_name,
@@ -1209,7 +1204,7 @@ class Chat(commands.Cog):
             self.memory_store,
             self.memory_vectors,
             self.gpt_api.client,
-            model=MODEL_NANO,
+            model=MODEL_MAIN,
             flush_messages=MEMORY_FLUSH_MESSAGES,
             flush_minutes=MEMORY_FLUSH_MINUTES,
             buffer_cap=MEMORY_BUFFER_CAP,
@@ -1351,7 +1346,7 @@ class Chat(commands.Cog):
         ]
         try:
             completion = await self.gpt_api.client.chat(
-                messages, model=MODEL_NANO, response_format=_REMINDER_FROM_TEXT_SCHEMA,
+                messages, model=MODEL_MAIN, response_format=_REMINDER_FROM_TEXT_SCHEMA,
             )
             raw = json.loads(completion.choices[0].message.content or "{}")
             execute_at_str = raw.get("execute_at")
@@ -1434,15 +1429,8 @@ class Chat(commands.Cog):
         return " · ".join(parts)
 
     # ------------------------------------------------------------------
-    # Sélection du modèle et envoi de réponse
+    # Envoi de réponse
     # ------------------------------------------------------------------
-
-    def _pick_model(self, message: discord.Message) -> str:
-        """Nano pour rappels et calculs simples, mini pour tout le reste."""
-        text = message.content
-        if _NANO_REMINDER_RE.search(text) or _NANO_MATH_RE.search(text):
-            return MODEL_NANO
-        return MODEL_MAIN
 
     def _memory_people_for_message(
         self, message: discord.Message,
@@ -1518,13 +1506,11 @@ class Chat(commands.Cog):
             "memory_ctx": memory_ctx,
         }
 
-        model = self._pick_model(message)
-
         async with message.channel.typing():
             resp = await self.gpt_api.run_completion(
                 message.channel,
                 trigger_message=message,
-                model=model,
+                model=MODEL_MAIN,
                 prompt_context=prompt_context,
             )
 
@@ -1760,7 +1746,7 @@ class Chat(commands.Cog):
         )
         summary = await summarize_memories(
             self.gpt_api.client,
-            model=MODEL_NANO,
+            model=MODEL_MAIN,
             memories=memories,
             scope="user",
             display_name=interaction.user.name,
@@ -1786,7 +1772,7 @@ class Chat(commands.Cog):
         )
         summary = await summarize_memories(
             self.gpt_api.client,
-            model=MODEL_NANO,
+            model=MODEL_MAIN,
             memories=memories,
             scope="server",
             display_name=interaction.guild.name,

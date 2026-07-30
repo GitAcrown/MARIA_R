@@ -5,8 +5,7 @@ Centralise les valeurs qui étaient auparavant éparpillées et incohérentes en
 """
 
 # Modèles OpenAI
-MODEL_MAIN = "gpt-5.6-luna"   # réponses conversationnelles
-MODEL_NANO = "gpt-5.4-nano"   # tâches structurées simples (rappels, calculs)
+MODEL_MAIN = "gpt-5.6-luna"
 
 # Fenêtre de contexte / budget de la session de chat
 CONTEXT_WINDOW = 8000
@@ -17,8 +16,8 @@ MAX_TOKENS = 2800
 # Debounce des réponses (regroupe les messages rapprochés en un seul appel)
 DEBOUNCE_SECONDS: float = 0.5
 
-# Mémoire long terme — flush hybride + RAG
-# Moins d'appels nano, lots plus gros = meilleur contexte (gags, attribution).
+# Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
+# Lots plus gros = meilleur contexte (gags, attribution).
 MEMORY_FLUSH_MESSAGES = 40
 MEMORY_FLUSH_MINUTES = 30
 MEMORY_BUFFER_CAP = 80

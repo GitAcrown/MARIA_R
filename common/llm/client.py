@@ -1,4 +1,4 @@
-"""Client OpenAI — wrapper minimal gpt-5.6-luna / nano."""
+"""Client OpenAI — wrapper minimal gpt-5.6-luna."""
 
 import logging
 from typing import Any, Optional
@@ -89,7 +89,21 @@ class MariaLLMClient:
             # accessible sur le compte/projet — on retente une fois avec un modèle de repli.
             if kwargs["model"] == MODEL_FALLBACK:
                 raise MariaOpenAIError(str(e)) from e
-            logger.warning(f"Modèle {kwargs['model']!r} refusé (401), repli sur {MODEL_FALLBACK!r}: {e}")
+            refused = kwargs["model"]
+            logger.error(
+                "\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                "!!  REPLI MODÈLE — INFO ESSENTIELLE                       !!\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                "!!  Modèle demandé refusé (401 permissions)               !!\n"
+                "!!  demandé : %-44s !!\n"
+                "!!  repli   : %-44s !!\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                "Détail API : %s",
+                refused,
+                MODEL_FALLBACK,
+                e,
+            )
             kwargs["model"] = MODEL_FALLBACK
             try:
                 return await self._client.chat.completions.create(**kwargs)
