@@ -461,6 +461,28 @@ class MemoryStore:
             )
         return self.get(memory_id)
 
+    def promote_stable(self, memory_id: str, content: Optional[str] = None) -> Optional[Memory]:
+        """Force un souvenir en ACTIVE à confiance stable (faits immuables confirmés)."""
+        mem = self.get(memory_id)
+        if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
+            return None
+        now = datetime.now(timezone.utc)
+        new_content = (content if content is not None else mem.content).strip()
+        with _db() as conn:
+            conn.execute(
+                """
+                UPDATE memories
+                SET content = ?, status = ?, confidence = ?, chroma_id = ?,
+                    confirmed_at = ?, hits = CASE WHEN hits < 2 THEN 2 ELSE hits END
+                WHERE id = ?
+                """,
+                (
+                    new_content, STATUS_ACTIVE, CONFIDENCE_STABLE, memory_id,
+                    now.isoformat(), memory_id,
+                ),
+            )
+        return self.get(memory_id)
+
     def contradict(self, memory_id: str) -> Optional[Memory]:
         mem = self.get(memory_id)
         if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):

@@ -130,6 +130,7 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "math_eval", "list_reminders", "show_reminders", "search_memory",
+    "remember_fact",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table",
 })
@@ -156,7 +157,16 @@ Réponses très courtes style tchat. Listes seulement si utiles. Markdown si str
 MÉMOIRE (ordre) :
 1) PROFILS — faits retenus sur les membres de cette réplique ; personnalise, croise les liens (coloc, duo…), ne confonds jamais les ids.
 2) MEMOIRE PERTINENTE — complément (souvent gags / events serveur).
-3) search_memory — énumérer, ou membre/sujet ABSENT des profils. S'il n'y a rien, dis-le. Ne sert PAS à écrire en mémoire.
+3) search_memory — énumérer, ou membre/sujet ABSENT des profils.
+4) Déduction → confirmation (si le fil s'y prête) → remember_fact :
+   - Tu peux déduire (ex. « 99 » après un 22 juillet → 1999) et, si ça colle au ton du tchat,
+     demander une conf light (« 1999 ? ») — une phrase max, jamais insister, jamais relancer
+     si la personne ignore ou change de sujet.
+   - Dès qu'elle confirme (oui / exact / ouais / le fait reformulé) → remember_fact tout de suite
+     (stable=true pour anniv/date de naissance). Un fait = un appel.
+   - Fait affirmé clairement sans ambiguïté → remember_fact directement, sans question inutile.
+   - Ne dis jamais « noté » / « j'ai retenu » sans avoir appelé remember_fact avec succès.
+   - Ne force jamais l'échange mémoire : le tchat prime.
 
 OUTILS — n'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute ou trop récent → appelle l'outil, sinon dis que tu ne sais pas. Défaut : utilisateurs en France.
 - Fait / actu / « c'est quoi/qui… » / « ça existe ? » → search_web
@@ -1388,7 +1398,7 @@ class Chat(commands.Cog):
         # Outils propres au cog Chat.
         tools.extend(build_reminder_tools(self.rappels))
         tools.extend(build_discord_tools())
-        tools.extend(build_memory_tools(self.memory_store))
+        tools.extend(build_memory_tools(self.memory_store, self.memory_vectors))
 
         self.gpt_api.update_tools(tools)
 
