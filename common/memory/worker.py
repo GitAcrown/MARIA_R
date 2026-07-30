@@ -15,6 +15,7 @@ from discord.ext import tasks
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
     CONFIDENCE_PENDING,
+    CONFIDENCE_STABLE,
     CONFIDENCE_UPDATE_DELTA,
     STATUS_ACTIVE,
     STATUS_PENDING,
@@ -485,7 +486,28 @@ class MemoryWorker:
             if is_near_duplicate(content, existing_contents):
                 logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
-            # Toujours pending au départ (perso ET collectif) : promotion à 2 hits.
+            # Fait immuable (anniv…) : actif + indexé tout de suite. Sinon pending (2 hits).
+            stable = bool(action.get("stable")) and category == "user"
+            if stable:
+                mem = await asyncio.to_thread(
+                    self.store.create,
+                    category=category,
+                    guild_id=guild_id,
+                    content=content,
+                    user_id=user_id,
+                    confidence=CONFIDENCE_STABLE,
+                    status=STATUS_ACTIVE,
+                )
+                await asyncio.to_thread(
+                    self.vectors.upsert,
+                    mem.id, mem.content,
+                    category=mem.category, guild_id=mem.guild_id,
+                    user_id=mem.user_id, confidence=mem.confidence,
+                )
+                if existing_by_user is not None:
+                    existing_by_user.setdefault(user_id, []).append(content)
+                logger.info("Mémoire stable %s: %s", mem.id[:8], mem.content[:60])
+                return
             mem = await asyncio.to_thread(
                 self.store.create,
                 category=category,
@@ -495,6 +517,10 @@ class MemoryWorker:
                 confidence=CONFIDENCE_PENDING,
                 status=STATUS_PENDING,
             )
+            if existing_by_user is not None:
+                existing_by_user.setdefault(
+                    user_id if category == "user" else None, [],
+                ).append(content)
             logger.debug("Mémoire pending %s: %s", mem.id[:8], mem.content[:60])
             return
 

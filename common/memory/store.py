@@ -26,6 +26,8 @@ STATUS_PENDING = "pending"
 STATUS_ARCHIVED = "archived"
 
 CONFIDENCE_PENDING = 0.2
+# Faits immuables affirmés clairement (anniv…) — actifs tout de suite, hors decay.
+CONFIDENCE_STABLE = 0.99
 CONFIDENCE_UPDATE_DELTA = 0.15
 CONFIDENCE_CONTRADICT_DELTA = 0.25
 CONFIDENCE_ARCHIVE_BELOW = 0.2

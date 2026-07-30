@@ -51,14 +51,18 @@ _MEMORY_SCHEMA = {
                                     "Jamais « le membre X »."
                                 ),
                             },
-                            "confidence_delta": {
-                                "type": "number",
-                                "description": "Suggestion optionnelle ; ignorée côté serveur",
+                            "stable": {
+                                "type": "boolean",
+                                "description": (
+                                    "true uniquement pour un fait immuable clairement affirmé "
+                                    "(anniversaire, date de naissance…) → actif immédiatement. "
+                                    "false pour le reste (goûts, liens, déductions, gags…)."
+                                ),
                             },
                         },
                         "required": [
                             "action", "target_id", "category",
-                            "user_id", "content", "confidence_delta",
+                            "user_id", "content", "stable",
                         ],
                         "additionalProperties": False,
                     },
@@ -87,8 +91,12 @@ QUOI RETENIR :
 - Un fait doit se comprendre SEUL, hors conversation. Sinon IGNORE → {{"memories": []}}.
 - « fan de X » seulement si goût clair, pas une mention en passant.
 
-NIVEAUX : PENDING = fragile (à confirmer) · ACTIVE = confirmé.
-Si un souvenir existant (surtout PENDING) couvre déjà le sujet → update/merge (target_id), pas de doublon.
+NIVEAUX / champ « stable » :
+- stable=true (create user seulement) : fait IMMUABLE clairement affirmé par la personne
+  concernée — anniversaire, date de naissance. → retenu tout de suite (ACTIVE).
+  PAS pour ville/job/goûts/liens/déductions (« probablement ») : ça peut changer ou se tromper.
+- stable=false : PENDING fragile (à confirmer si ça revient) sauf si déjà ACTIVE via update.
+- Souvenir existant (surtout PENDING) sur le même sujet → update/merge (target_id), pas de doublon.
 
 SIGNAUX RÉPÉTÉS → DÉDUCTIONS :
 - Pattern utile : météo toujours de la même ville, matchs d'une même équipe, trajets/décalage récurrents.
@@ -169,7 +177,8 @@ async def extract_memories(
         {
             "role": "user",
             "content": (
-                f"SOUVENIRS (pending = à confirmer si ça revient ; active = déjà retenus) :\n"
+                f"SOUVENIRS (pending = à confirmer ; active = retenus ; "
+                f"stable=true seulement pour anniv/date de naissance affirmée) :\n"
                 f"{existing_block}\n\n"
                 f"{messages_block}"
             ),
