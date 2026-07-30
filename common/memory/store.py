@@ -558,6 +558,54 @@ class MemoryStore:
                 )
         return chroma_ids
 
+    def count_below_confidence(self, threshold: float) -> dict[str, int]:
+        """Compte les souvenirs actifs/pending avec confidence < threshold (global)."""
+        threshold = max(0.0, min(1.0, float(threshold)))
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT status, category, COUNT(*) AS n FROM memories
+                WHERE status IN (?, ?) AND confidence < ?
+                GROUP BY status, category
+                """,
+                (STATUS_ACTIVE, STATUS_PENDING, threshold),
+            ).fetchall()
+        out = {"total": 0, "pending": 0, "active": 0, "user": 0, "server": 0, "event": 0}
+        for r in rows:
+            n = int(r["n"])
+            out["total"] += n
+            st = r["status"]
+            cat = r["category"]
+            if st in out:
+                out[st] += n
+            if cat in out:
+                out[cat] += n
+        return out
+
+    def clear_below_confidence(self, threshold: float) -> list[str]:
+        """Archive tous les souvenirs (user+server+event, tous guilds) sous le seuil.
+
+        Renvoie les ids à retirer de Chroma.
+        """
+        threshold = max(0.0, min(1.0, float(threshold)))
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, status, chroma_id FROM memories
+                WHERE status IN (?, ?) AND confidence < ?
+                """,
+                (STATUS_ACTIVE, STATUS_PENDING, threshold),
+            ).fetchall()
+            chroma_ids: list[str] = []
+            for r in rows:
+                if r["status"] == STATUS_ACTIVE or r["chroma_id"]:
+                    chroma_ids.append(r["id"])
+                conn.execute(
+                    "UPDATE memories SET status = ? WHERE id = ?",
+                    (STATUS_ARCHIVED, r["id"]),
+                )
+        return chroma_ids
+
     def apply_decay(self) -> list[str]:
         """Expire les pending trop vieux + decay des actifs non confirmés.
 

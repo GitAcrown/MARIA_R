@@ -31,7 +31,7 @@ _META_PERSON_RE = re.compile(
     r"le\s+user|l['']user)\s+",
     re.IGNORECASE,
 )
-_MEMORY_CONTENT_MAX = 100
+_MEMORY_CONTENT_MAX = 120
 # Discord snowflakes typiques (17–20 chiffres) dans « Name (id) » / content.
 _DISCORD_ID_RE = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
 _SNOWFLAKE_PARENS_RE = re.compile(r"\s*\((\d{17,20})\)")

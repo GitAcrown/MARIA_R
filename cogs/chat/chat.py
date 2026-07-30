@@ -1840,6 +1840,45 @@ class Chat(commands.Cog):
         )
         await interaction.followup.send(view=view, ephemeral=True)
 
+    @commands.command(name="mempurge", hidden=True)
+    @commands.is_owner()
+    async def cmd_mempurge(self, ctx: commands.Context, threshold: float, confirm: Optional[str] = None) -> None:
+        """Archive toute la mémoire (membres + serveur) sous un seuil de confiance.
+
+        Usage :
+          mempurge 0.5          → aperçu (rien n'est effacé)
+          mempurge 0.5 confirm  → archive vraiment + retire de Chroma
+        """
+        if not 0.0 < threshold <= 1.0:
+            await ctx.send("Seuil invalide : fournis un float entre 0 et 1 (ex. `0.5`).")
+            return
+        stats = await asyncio.to_thread(self.memory_store.count_below_confidence, threshold)
+        if stats["total"] == 0:
+            await ctx.send(f"Aucun souvenir avec confiance < **{threshold:.0%}**.")
+            return
+        summary = (
+            f"**{stats['total']}** souvenir(s) < **{threshold:.0%}** "
+            f"(pending={stats['pending']}, active={stats['active']} · "
+            f"user={stats['user']}, server={stats['server']}, event={stats['event']})"
+        )
+        if (confirm or "").lower() != "confirm":
+            await ctx.send(
+                f"{summary}\n"
+                f"Aperçu seulement — pour purger : `mempurge {threshold} confirm`"
+            )
+            return
+        chroma_ids = await asyncio.to_thread(self.memory_store.clear_below_confidence, threshold)
+        for mid in chroma_ids:
+            await asyncio.to_thread(self.memory_vectors.delete, mid)
+        logger.warning(
+            "mempurge par %s : seuil=%s archivés=%s chroma=%s",
+            ctx.author, threshold, stats["total"], len(chroma_ids),
+        )
+        await ctx.send(
+            f"Purge OK — {summary}\n"
+            f"Archivés · {len(chroma_ids)} retiré(s) de Chroma."
+        )
+
     @app_commands.command(name="info", description="Statistiques de la session en cours")
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         session = self.gpt_api.session_manager.get(interaction.channel_id)

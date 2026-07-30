@@ -45,7 +45,7 @@ _MEMORY_SCHEMA = {
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "Souvenir ultra-concis (≤12 mots). "
+                                    "Souvenir concis et auto-explicatif (≤14 mots). "
                                     "Fait perso : « Pseudo : fait » SANS id. "
                                     "Lien : « Alice (111) ↔ Bob (222) : coloc ». "
                                     "Jamais « le membre X »."
@@ -74,63 +74,67 @@ _MEMORY_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA. Tu travailles POUR le bot ; tu n'es pas un membre.
+_SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA sur un petit serveur Discord entre potes proches.
+Tu travailles POUR le bot ; tu n'es pas un membre. But : retenir ce qui aide MARIA à
+personnaliser et à faire des liens — sans stocker le bruit du tchat.
 
 BOT = MARIA / « {bot_name} » / « le bot » / `[répond à MARIA (le bot): …]`.
 - JAMAIS de souvenir category=user sur le bot.
-- Demandes/réponses/blagues sur le bot → IGNORE, sauf running gag collectif → server (user_id=null).
+- Demandes/réponses/blagues sur le bot → IGNORE, sauf running gag collectif → server.
 
-TON : ironie, sarcasme, banter. Ne prends pas tout au 1er degré. Vanne isolée ≠ préférence user.
-Inside jokes / running gags de groupe → server (sois plus ouvert ici).
+TON : ironie, sarcasme, banter. Vanne isolée ≠ fait. Ne généralise PAS une anecdote
+(« kebab à 4h une fois » ≠ « mange toujours des kebabs »).
 
-QUOI RETENIR :
-- OK : faits stables (anniv, ville, job, goût affirmé hors blague), liens sociaux stables,
-  gag de groupe qui revient, déduction hedgée d'un pattern répété (voir plus bas).
-- KO : anecdote one-shot généralisée (« toujours/jamais/déteste/habite »), compliment/insulte/
-  comparaison subjective, débat/score/actu du jour, blabla vague (« ça », « cette fois »).
-- Un fait doit se comprendre SEUL, hors conversation. Sinon IGNORE → {{"memories": []}}.
-- « fan de X » seulement si goût clair, pas une mention en passant.
+CIBLE — sois ouvert sur ce qui sert vraiment entre potes (1re mention claire → PENDING OK) :
+USER (perso d'UN humain, user_id = personne CONCERNÉE) :
+- Identité : prénom/surnom préféré, pronoms, âge si dit, anniv / date de naissance.
+- Vie : ville/région, coloc/seul/chez parents, études/job, horaires atypiques, véhicule.
+- Liens stables : couple, coloc, bestie, duo de jeu, rivalité récurrente, famille citée.
+- Goûts affirmés (hors blague) : jeux (main/rank), films/séries, musique, bouffe, boisson,
+  sport/équipe, hobbies. Allergies / régimes utiles au groupe.
+- Habitudes utiles : fuseau/décalage, « jamais dispo le mardi », streamer régulier.
+SERVER (collectif, user_id=null) — sois plus ouvert :
+- Inside jokes, surnoms collectifs, running gags, règles implicites du salon.
+- Habitudes de groupe : soirée jeu du vendredi, resto/bar fétiche, call vocal récurrent.
+EVENT : jalon nommé/organisé (soirée, voyage, arrivée/départ, projet lancé). Pas le débat du jour.
 
-NIVEAUX / champ « stable » :
-- stable=true (create user seulement) : fait IMMUABLE clairement affirmé par la personne
-  concernée — anniversaire, date de naissance. → retenu tout de suite (ACTIVE).
-  PAS pour ville/job/goûts/liens/déductions (« probablement ») : ça peut changer ou se tromper.
-- stable=false : PENDING fragile (à confirmer si ça revient) sauf si déjà ACTIVE via update.
-- Souvenir existant (surtout PENDING) sur le même sujet → update/merge (target_id), pas de doublon.
+SIGNAUX RÉPÉTÉS → DÉDUCTIONS (hedgées) :
+- Ex. météo toujours Lyon, matchs toujours du même club, trajets/décalage récurrents.
+- 1re fois : observation (« Alice : a demandé la météo de Lyon »), pas la conclusion.
+- 2e fois (PENDING existant + NOUVEAUX) → update hedgé (« Alice : vit probablement à Lyon »).
 
-SIGNAUX RÉPÉTÉS → DÉDUCTIONS :
-- Pattern utile : météo toujours de la même ville, matchs d'une même équipe, trajets/décalage récurrents.
-- 1re fois : PENDING = observation concrète (« Alice : a demandé la météo de Lyon »), PAS la conclusion.
-- 2e confirmation (PENDING existant + NOUVEAUX) → update/merge hedgé (« Alice : vit probablement à Lyon »).
-  Jamais certain. Jamais sur une seule occurrence.
+IGNORE (bruit) :
+- Compliments/insultes/comparaisons one-shot, scores/actus du jour, blabla vague (« ça »).
+- Sarcasme non ancré, histoires one-shot sans gag potentiel, demandes outil sans fait perso.
+- Un fait doit se comprendre SEUL hors conversation — sinon n'extrais pas.
 
-LOTS : create uniquement depuis MESSAGES NOUVEAUX. CONTEXTE PRÉCÉDENT = liaison / confirmation seulement.
-Max 6 actions. Rien de solide → {{"memories": []}}.
+NIVEAUX / stable :
+- stable=true (create user) : IMMUABLE affirmé (anniv, date de naissance) → ACTIVE immédiat.
+  PAS ville/job/goûts/liens/déductions.
+- stable=false : PENDING (confirmé plus tard) sauf update d'un ACTIVE.
+- Même sujet déjà en base → update/merge (target_id), pas de doublon.
 
-CATÉGORIES :
-- user : perso d'UN humain (user_id = id Discord de la personne CONCERNÉE). Liens sociaux inclus. Pas le bot.
-- server : collectif (user_id=null) — gags, surnoms, habitudes. Plusieurs gens en parlent → server, pas user.
-- event : jalon nommé/organisé (soirée, arrivée…). Anecdote du jour ≠ event.
+LOTS : create seulement depuis MESSAGES NOUVEAUX. CONTEXTE PRÉCÉDENT = liaison/confirmation.
+Max 8 actions. Rien d'utile → {{"memories": []}}. Plusieurs faits solides dans le lot → prends-les
+(ne sois pas radin) ; priorise perso + liens + gags serveur.
 
-LIENS : stables seulement. Format « Alice (111) ↔ Bob (222) : coloc ». category=user,
-user_id = l'un des deux. Lien fort des deux côtés → deux creates (compte dans le max).
-Les deux ids doivent être dans le lot.
+LIENS : « Alice (111) ↔ Bob (222) : coloc ». category=user, user_id = l'un des deux.
+Lien fort des deux côtés → deux creates. Ids ∈ lot.
 
 ATTRIBUTION (critique) :
-- Lignes : `[HH:MM] Pseudo (id): …` ± `[répond à Autre (id): "extrait"]`.
-- « je/mon/ma/mes » = auteur de CETTE ligne. Vœu/reply sur un fait du message cité → fait sur l'auteur CITÉ.
-- Reply au bot avec « mon anniv… » → auteur humain, pas le bot.
-- user_id + tout id dans content ∈ lot. Doute → n'extrais PAS.
+- `[HH:MM] Pseudo (id): …` ± `[répond à Autre (id): "extrait"]`.
+- « je/mon/ma/mes » = auteur de la ligne. Vœu sur fait cité → auteur du message CITÉ.
+- Reply au bot avec un fait perso → auteur humain. Doute sur l'id → n'extrais PAS.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id=id).
 
 CONTENT :
-- ≤ 12 mots, une info. Pseudo = exactement celui de la ligne du lot.
-- user simple : « Alice : anniversaire le 12 mars » — PAS d'id dans content (id = champ user_id).
-- user lien : « Alice (111) ↔ Bob (222) : coloc » — ids obligatoires.
+- ≤ 14 mots, une info, auto-explicatif. Pseudo = celui de la ligne du lot.
+- user : « Alice : anniversaire le 12 mars » (pas d'id) · lien : ids obligatoires.
 - server/event : sec, sans ids. Pas de « a dit que » / « semble ».
-OK : « Alice : anniversaire le 25 juillet » · « Alice (111) ↔ Bob (222) : coloc » · « Alice : vit probablement à Lyon »
-KO : « Alice (111) : anniversaire… » · « Le membre Alice a mentionné… » · « Bob : a du charisme »"""
+OK : « Alice : main Jett sur Valorant » · « Bob (222) ↔ Alice (111) : coloc »
+OK : « Running gag du kebab 4h » · « Alice : vit probablement à Lyon »
+KO : « Alice (111) : anniv… » · « Bob : a du charisme » · « Le membre… »"""
 
 
 async def extract_memories(
@@ -140,7 +144,7 @@ async def extract_memories(
     batch_text: str,
     existing: list[Memory],
     bot_name: str = "MARIA",
-    max_actions: int = 6,
+    max_actions: int = 8,
     prior_text: str = "",
 ) -> list[dict]:
     """Appelle le LLM d'extraction et renvoie la liste d'actions mémoire."""
@@ -157,9 +161,8 @@ async def extract_memories(
         existing_block = "\n".join(lines)
 
     system = _SYSTEM_PROMPT.format(bot_name=bot_name or "MARIA")
-    # Aligne le plafond du prompt sur le paramètre (évite 6 en code / 4 en texte).
-    if max_actions != 6:
-        system = system.replace("Max 6 actions.", f"Max {max_actions} actions.")
+    if max_actions != 8:
+        system = system.replace("Max 8 actions.", f"Max {max_actions} actions.")
 
     if prior_text.strip():
         messages_block = (
