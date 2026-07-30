@@ -384,7 +384,11 @@ class ChannelSession:
                 if recent and recent[0].role == "user":
                     recent[0].components.extend(out)
 
-        self.context.developer_prompt = self.developer_prompt_template(self._prompt_context)
+        # Le modèle réellement demandé pour cet appel (visible dans le developer prompt).
+        effective_model = model or getattr(self.client, "completion_model", "") or ""
+        prompt_ctx = dict(self._prompt_context or {})
+        prompt_ctx["model"] = effective_model
+        self.context.developer_prompt = self.developer_prompt_template(prompt_ctx)
 
         messages = self.context.prepare_payload()
 

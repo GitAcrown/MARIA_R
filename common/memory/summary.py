@@ -9,19 +9,13 @@ from common.memory.store import Memory
 
 logger = logging.getLogger("MARIA.Memory.Summary")
 
-_USER_SUMMARY = """Tu résumes ce que MARIA sait d'un membre Discord, à partir de souvenirs PERSONNELS uniquement (globaux, tous serveurs confondus).
-Rédige 2 à 5 phrases courtes, naturelles, à la 2e personne (« tu… »).
-Pas de listes, pas d'emojis, pas d'intro du type « Voici ce que je sais ».
-Ignore toute info collective/serveur si elle apparaît par erreur.
-Si les souvenirs sont vides ou trop flous, dis clairement que tu ne sais encore presque rien sur cette personne.
-N'invente rien au-delà des souvenirs fournis."""
+_USER_SUMMARY = """Résume ce que MARIA sait d'un membre, à partir de souvenirs PERSONNELS uniquement (globaux).
+2–5 phrases courtes, naturelles, à la 2e personne (« tu… »). Pas de listes, d'emojis, ni d'intro.
+Ignore toute info collective. Vide/flou → dis que tu ne sais presque rien. N'invente rien."""
 
-_SERVER_SUMMARY = """Tu résumes la mémoire collective d'un serveur Discord (gags, habitudes, règles implicites, événements).
-Rédige 2 à 5 phrases courtes, naturelles, à la 3e personne (« le serveur… », « on… »).
-Pas de listes, pas d'emojis, pas d'intro.
-Ne parle PAS des goûts ou projets d'un membre en particulier — uniquement le collectif.
-Si vide ou flou, dis clairement que peu de choses sont encore retenues sur le serveur.
-N'invente rien au-delà des souvenirs fournis."""
+_SERVER_SUMMARY = """Résume la mémoire collective d'un serveur (gags, habitudes, événements).
+2–5 phrases courtes, naturelles, à la 3e (« le serveur… », « on… »). Pas de listes, d'emojis, ni d'intro.
+Pas de goûts/projets d'un membre précis. Vide/flou → dis que peu est retenu. N'invente rien."""
 
 
 async def summarize_memories(

@@ -65,16 +65,11 @@ def build_memory_tools(store: MemoryStore) -> list[Tool]:
         Tool(
             name="search_memory",
             description=(
-                "Consulte la mémoire long terme de MARIA (lecture seule). "
-                "Les PROFILS déjà injectés dans le prompt couvrent l'auteur et les mentions "
-                "de cette réplique — ne rappelle PAS search_memory pour ça. "
-                "À utiliser pour : (1) un membre ABSENT des profils, "
-                "(2) énumérer (anniversaires connus, gags serveur, « qu'est-ce que tu sais sur… »), "
-                "(3) filtrer par mot-clé. "
-                "Pas pour écrire/modifier — la mémoire se remplit seule ou via /moi. "
-                "query = mot-clé optionnel (ex: 'anniversaire', 'PSG'). "
-                "category = 'user' (perso), 'server' (collectif), 'event', ou omit pour tout. "
-                "user_id = id Discord si tu cherches un membre précis."
+                "Mémoire long terme (lecture seule). Les PROFILS du prompt couvrent déjà "
+                "auteur + mentions — ne pas rappeler pour ça. "
+                "Pour : membre/sujet ABSENT des profils, énumérer, filtrer par mot-clé. "
+                "Pas d'écriture (mémoire auto ou /moi). "
+                "query optionnel ; category user|server|event ou omit ; user_id pour un membre."
             ),
             properties={
                 "query": {

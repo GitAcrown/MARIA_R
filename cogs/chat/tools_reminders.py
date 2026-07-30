@@ -363,34 +363,26 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="schedule_reminder",
             description=(
-                "Programme un rappel. Utilise execute_at (ISO 8601) pour une date absolue "
-                "(ex. '2026-12-24T17:00:00' — fuseau Europe/Paris si naïf), "
-                "ou delay_minutes/delay_hours pour un délai relatif. execute_at est prioritaire. "
-                f"Horizon max : {REMINDER_MAX_DAYS} jours. "
-                f"recurrence='daily' ou 'weekly' : répète pendant max {RECURRENCE_MAX_DAYS} jours "
-                "puis s'arrête (par défaut 'none')."
+                "Programme un rappel. execute_at ISO 8601 (Paris si naïf) prioritaire, "
+                f"sinon delay_minutes/delay_hours. Max {REMINDER_MAX_DAYS}j. "
+                f"recurrence daily/weekly : série ≤ {RECURRENCE_MAX_DAYS}j (défaut none)."
             ),
             properties={
                 "task_description": {
                     "type": "string",
                     "description": (
-                        "Contenu du rappel tel qu'il s'affichera à l'heure H — le FAIT / l'événement seul. "
-                        "INTERDIT : préfixer par « Rappeler que », « Rappelle-moi de », « N'oublie pas de », "
-                        "« Rappel : ». Pas de référence temporelle relative ('demain', 'ce soir'). "
-                        "Ex. OK : 'Anniversaire de Enzo', 'Appeler le médecin', 'Sortir les poubelles'. "
-                        "Ex. KO : 'Rappeler que c'est l'anniversaire de Enzo', 'Ne pas oublier d'appeler'."
+                        "Fait/événement seul tel qu'affiché à l'heure H. "
+                        "INTERDIT : « Rappeler que… », « Rappelle-moi de… », « N'oublie pas… », "
+                        "« demain/ce soir ». OK : « Anniversaire de Enzo ». KO : « Rappeler que… »."
                     ),
                 },
-                "execute_at": {"type": "string", "description": "Date/heure absolue ISO 8601 (prioritaire sur les délais)"},
-                "delay_minutes": {"type": "integer", "description": "Délai en minutes (si pas de execute_at)"},
-                "delay_hours": {"type": "integer", "description": "Délai en heures (si pas de execute_at)"},
+                "execute_at": {"type": "string", "description": "Date/heure ISO 8601 (prioritaire)"},
+                "delay_minutes": {"type": "integer", "description": "Délai en minutes"},
+                "delay_hours": {"type": "integer", "description": "Délai en heures"},
                 "recurrence": {
                     "type": "string",
                     "enum": list(VALID_RECURRENCES),
-                    "description": (
-                        f"Répétition : none (défaut), daily ou weekly "
-                        f"(série limitée à {RECURRENCE_MAX_DAYS} jours)"
-                    ),
+                    "description": f"none|daily|weekly (série ≤ {RECURRENCE_MAX_DAYS}j)",
                 },
             },
             function=_tool_schedule,
@@ -398,9 +390,8 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="list_reminders",
             description=(
-                "Liste JSON des rappels en attente de l'utilisateur qui parle "
-                "(pour edit/cancel — pas d'affichage salon). "
-                "Pour montrer les rappels dans le salon → show_reminders."
+                "JSON des rappels en attente de l'auteur (pour edit/cancel). "
+                "Affichage salon → show_reminders."
             ),
             properties={},
             function=_tool_list_reminders,
@@ -408,19 +399,17 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="show_reminders",
             description=(
-                "Affiche un widget lecture seule des rappels en attente d'une personne dans le salon. "
-                "Sans user_id/username → ceux de l'auteur. "
-                "À utiliser pour « montre mes rappels », « les rappels de Bob », etc. "
-                "Ne gère pas (pas d'annulation) — pour ça : /rappels ou cancel_reminder."
+                "Widget lecture seule des rappels d'une personne dans le salon "
+                "(défaut = auteur). Pas d'annulation — /rappels ou cancel_reminder."
             ),
             properties={
                 "user_id": {
                     "type": "string",
-                    "description": "Id Discord du membre (optionnel, défaut = auteur)",
+                    "description": "Id Discord (optionnel, défaut = auteur)",
                 },
                 "username": {
                     "type": "string",
-                    "description": "Nom / pseudo Discord du membre (optionnel)",
+                    "description": "Pseudo Discord (optionnel)",
                 },
             },
             optional_props=["user_id", "username"],
@@ -429,20 +418,19 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="edit_reminder",
             description=(
-                "Modifie un rappel existant : description, date (execute_at ISO 8601), "
-                "récurrence, ou report (snooze_minutes/hours). "
-                "Ne renseigne que les champs à changer. list_reminders d'abord si l'ID est inconnu."
+                "Modifie un rappel (description, execute_at, récurrence, snooze). "
+                "Champs à changer seulement. list_reminders si ID inconnu."
             ),
             properties={
-                "task_id": {"type": "integer", "description": "ID du rappel à modifier"},
-                "task_description": {"type": "string", "description": "Nouvelle description (optionnel)"},
-                "execute_at": {"type": "string", "description": "Nouvelle date/heure ISO 8601, fuseau Paris par défaut (optionnel)"},
-                "snooze_minutes": {"type": "integer", "description": "Reporter de N minutes à partir de maintenant (optionnel)"},
-                "snooze_hours": {"type": "integer", "description": "Reporter de N heures à partir de maintenant (optionnel)"},
+                "task_id": {"type": "integer", "description": "ID du rappel"},
+                "task_description": {"type": "string", "description": "Nouvelle description"},
+                "execute_at": {"type": "string", "description": "Nouvelle date ISO 8601 (Paris)"},
+                "snooze_minutes": {"type": "integer", "description": "Reporter de N minutes"},
+                "snooze_hours": {"type": "integer", "description": "Reporter de N heures"},
                 "recurrence": {
                     "type": "string",
                     "enum": list(VALID_RECURRENCES),
-                    "description": "Nouvelle récurrence : none, daily ou weekly (optionnel)",
+                    "description": "none|daily|weekly",
                 },
             },
             function=_tool_edit,
@@ -450,8 +438,8 @@ def build_reminder_tools(rappels: RappelStore) -> list[Tool]:
         Tool(
             name="cancel_reminder",
             description=(
-                "Annule un rappel par son ID (y compris récurrent : stoppe toute la série). "
-                "list_reminders d'abord si l'ID est inconnu. Ne recrée pas un rappel pour 'annuler'."
+                "Annule un rappel par ID (récurrent = stoppe la série). "
+                "list_reminders si ID inconnu."
             ),
             properties={"task_id": {"type": "integer", "description": "ID du rappel"}},
             function=_tool_cancel,
