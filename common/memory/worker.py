@@ -250,19 +250,25 @@ class BufferedMessage:
     reply_to_id: Optional[int] = None
     reply_to_name: Optional[str] = None
     reply_to_content: Optional[str] = None
+    reply_is_bot: bool = False
 
     def format_line(self) -> str:
         """Ligne lisible pour l'agent d'extraction, avec contexte de reply si présent."""
         stamp = self.ts.strftime("%H:%M")
         head = f"[{stamp}] {self.author_name} ({self.author_id})"
-        if self.reply_to_id is not None:
+        # reply_to_id peut être None quand on répond au bot — il faut quand même le marquer.
+        if self.reply_to_name or self.reply_to_id is not None:
+            if self.reply_is_bot or self.reply_to_id is None:
+                target = self.reply_to_name or "le bot"
+            else:
+                target = f"{self.reply_to_name or '?'} ({self.reply_to_id})"
             snippet = (self.reply_to_content or "").replace("\n", " ").strip()
             if len(snippet) > 180:
                 snippet = snippet[:180] + "…"
-            head += (
-                f" [répond à {self.reply_to_name or '?'} ({self.reply_to_id})"
-                f": \"{snippet}\"]"
-            )
+            if snippet:
+                head += f' [répond à {target}: "{snippet}"]'
+            else:
+                head += f" [répond à {target}]"
         return f"{head}: {self.content}"
 
 
@@ -329,6 +335,7 @@ class MemoryWorker:
         reply_to_id: Optional[int] = None,
         reply_to_name: Optional[str] = None,
         reply_to_content: Optional[str] = None,
+        reply_is_bot: bool = False,
     ) -> None:
         text = (content or "").strip()
         if not text:
@@ -339,11 +346,12 @@ class MemoryWorker:
             BufferedMessage(
                 author_id=author_id,
                 author_name=author_name,
-                content=text[:500],
+                content=text[:700],
                 ts=datetime.now(timezone.utc),
                 reply_to_id=reply_to_id,
                 reply_to_name=reply_to_name,
-                reply_to_content=(reply_to_content or "")[:200] or None,
+                reply_to_content=(reply_to_content or "")[:240] or None,
+                reply_is_bot=reply_is_bot,
             )
         )
         if len(buf.messages) > self.buffer_cap:

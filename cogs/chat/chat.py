@@ -616,6 +616,107 @@ def _is_memory_mod(member: discord.Member | discord.User) -> bool:
     return bool(perms.administrator or perms.manage_guild or perms.manage_messages)
 
 
+def _memory_resolve_mentions(
+    text: str,
+    mentions: list,
+    *,
+    bot_user: Optional[discord.ClientUser],
+) -> str:
+    """Remplace <@id> par @pseudo(id) lisible pour l'agent mémoire."""
+    out = text or ""
+    for member in mentions:
+        for token in (f"<@{member.id}>", f"<@!{member.id}>"):
+            is_bot = bool(
+                member.bot or (bot_user is not None and member.id == bot_user.id)
+            )
+            label = (
+                f"@{member.name} (le bot)"
+                if is_bot
+                else f"@{member.name}({member.id})"
+            )
+            out = out.replace(token, label)
+    return out
+
+
+def _memory_plain_from_components(components: list, *, depth: int = 0) -> str:
+    """Extrait le texte des composants v2 (réponses widget du bot, etc.)."""
+    if depth > 5 or not components:
+        return ""
+    parts: list[str] = []
+    for comp in components:
+        name = type(comp).__name__
+        if name == "TextDisplay":
+            content = getattr(comp, "content", None) or getattr(comp, "value", None)
+            if content:
+                parts.append(str(content).strip())
+        elif name in ("Container", "Section", "ActionRow"):
+            children = (
+                getattr(comp, "children", None)
+                or getattr(comp, "components", None)
+                or []
+            )
+            sub = _memory_plain_from_components(list(children), depth=depth + 1)
+            if sub:
+                parts.append(sub)
+    return " ".join(p for p in parts if p)
+
+
+def _memory_source_text(message: discord.Message) -> str:
+    """Texte utile d'un message Discord (content, sinon composants v2)."""
+    text = (message.content or "").strip()
+    if text:
+        return text
+    if message.components:
+        return _memory_plain_from_components(list(message.components)).strip()
+    return ""
+
+
+def _memory_media_tags(message: discord.Message) -> list[str]:
+    """Tags médias / transferts pour que l'agent ne confonde pas avec un fait affirmé."""
+    tags: list[str] = []
+    for att in message.attachments[:4]:
+        fn = (att.filename or "fichier").replace("\n", " ")[:80]
+        ct = (att.content_type or "").lower()
+        kind = "image" if ct.startswith("image/") or fn.lower().endswith(
+            (".png", ".jpg", ".jpeg", ".webp", ".gif")
+        ) else "fichier"
+        tags.append(f"[{kind}: {fn}]")
+    for sticker in message.stickers[:3]:
+        name = getattr(sticker, "name", None) or "sticker"
+        tags.append(f"[sticker: {name}]")
+    for emb in message.embeds[:2]:
+        bit = (emb.title or emb.description or "").replace("\n", " ").strip()
+        if bit:
+            tags.append(f"[embed: {bit[:100]}]")
+    for snap in getattr(message, "message_snapshots", None) or []:
+        snap_text = (getattr(snap, "content", None) or "").replace("\n", " ").strip()
+        if snap_text:
+            tags.append(f'[transfère: "{snap_text[:200]}"]')
+            continue
+        # Forward média sans texte
+        for att in getattr(snap, "attachments", None) or []:
+            fn = (getattr(att, "filename", None) or "fichier")[:60]
+            tags.append(f"[transfère: fichier {fn}]")
+            break
+    return tags
+
+
+def _build_memory_ingest_text(
+    message: discord.Message,
+    *,
+    bot_user: Optional[discord.ClientUser],
+) -> str:
+    """Contenu ingéré par la mémoire : texte + tags médias/transferts."""
+    text = _memory_resolve_mentions(
+        _memory_source_text(message), message.mentions, bot_user=bot_user,
+    )
+    tags = _memory_media_tags(message)
+    if text and tags:
+        return f"{text} {' '.join(tags)}"
+    if text:
+        return text
+    return " ".join(tags)
+
 
 async def _rebuild_me_view(
     interaction: discord.Interaction,
@@ -1614,13 +1715,26 @@ class Chat(commands.Cog):
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
 
-        if self._memory_worker and message.content:
+        mem_content = _build_memory_ingest_text(message, bot_user=self.bot.user)
+        if self._memory_worker and mem_content:
             reply_to_id = reply_to_name = reply_to_content = None
+            reply_is_bot = False
             if message.reference is not None:
                 resolved = await resolve_message_reference(message)
                 if resolved is not None and resolved.author:
+                    reply_text = _memory_source_text(resolved)
+                    reply_text = _memory_resolve_mentions(
+                        reply_text, resolved.mentions, bot_user=self.bot.user,
+                    )
+                    # Médias du message cité — utile pour le contexte, pas comme fait.
+                    reply_tags = _memory_media_tags(resolved)
+                    if reply_tags:
+                        reply_text = (
+                            f"{reply_text} {' '.join(reply_tags)}".strip()
+                            if reply_text else " ".join(reply_tags)
+                        )
                     if resolved.author.bot:
-                        # Réponse au bot : contexte sans id réel (jamais de souvenir user).
+                        # Réponse au bot : pas d'id membre (jamais de souvenir user sur le bot).
                         bot_label = (
                             self.bot.user.name
                             if self.bot.user and resolved.author.id == self.bot.user.id
@@ -1628,29 +1742,12 @@ class Chat(commands.Cog):
                         )
                         reply_to_id = None
                         reply_to_name = f"{bot_label} (le bot)"
-                        reply_to_content = (resolved.content or "").strip() or None
+                        reply_to_content = reply_text or None
+                        reply_is_bot = True
                     else:
                         reply_to_id = resolved.author.id
                         reply_to_name = resolved.author.name
-                        reply_to_content = (resolved.content or "").strip() or None
-                        for member in resolved.mentions:
-                            for token in (f"<@{member.id}>", f"<@!{member.id}>"):
-                                label = (
-                                    f"@{member.name} (le bot)"
-                                    if member.bot
-                                    else f"@{member.name}({member.id})"
-                                )
-                                reply_to_content = (reply_to_content or "").replace(token, label)
-            # Rend les mentions lisibles : <@id> → @pseudo(id) ; bot → « (le bot) »
-            mem_content = message.content
-            for member in message.mentions:
-                for token in (f"<@{member.id}>", f"<@!{member.id}>"):
-                    label = (
-                        f"@{member.name} (le bot)"
-                        if member.bot or (self.bot.user and member.id == self.bot.user.id)
-                        else f"@{member.name}({member.id})"
-                    )
-                    mem_content = mem_content.replace(token, label)
+                        reply_to_content = reply_text or None
             self._memory_worker.ingest(
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,
@@ -1660,6 +1757,7 @@ class Chat(commands.Cog):
                 reply_to_id=reply_to_id,
                 reply_to_name=reply_to_name,
                 reply_to_content=reply_to_content,
+                reply_is_bot=reply_is_bot,
             )
 
         if not should_respond:

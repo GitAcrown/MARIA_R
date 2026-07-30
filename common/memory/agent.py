@@ -121,10 +121,23 @@ Max 8 actions. Rien d'utile → {{"memories": []}}. Plusieurs faits solides dans
 LIENS : « Alice (111) ↔ Bob (222) : coloc ». category=user, user_id = l'un des deux.
 Lien fort des deux côtés → deux creates. Ids ∈ lot.
 
-ATTRIBUTION (critique) :
-- `[HH:MM] Pseudo (id): …` ± `[répond à Autre (id): "extrait"]`.
-- « je/mon/ma/mes » = auteur de la ligne. Vœu sur fait cité → auteur du message CITÉ.
-- Reply au bot avec un fait perso → auteur humain. Doute sur l'id → n'extrais PAS.
+LECTURE DU TCHAT (critique — faux souvenirs fréquents ici) :
+- Ligne : `[HH:MM] Pseudo (id) [répond à Cible…]: texte` (+ tags `[transfère]` / `[image]`…).
+- Reply membre→membre `[répond à Bob (222): "…"]` : le fait DANS l'extrait cité = Bob.
+  L'auteur de la reply ne « possède » ce fait que s'il l'affirme pour lui (« moi aussi »,
+  « pareil », « mon anniv aussi c'est… »). Un « mdr » / « +1 » / emoji ≠ appropriation.
+- Reply → bot `[répond à MARIA (le bot): "…"]` : conversation AVEC le bot.
+  « je/mon » dans la reply = auteur humain. JAMAIS de souvenir user sur le bot.
+  Une info dite PAR le bot dans l'extrait n'est pas un fait membre (sauf si un humain
+  la confirme clairement ensuite).
+- `[transfère: "…"]` = message forwardé d'ailleurs : PAS une affirmation de l'auteur,
+  sauf s'il le reprend explicitement (« oui c'est mon anniv », « c'est bien moi »).
+- `[image:…]` / `[sticker:…]` / `[embed:…]` / `[fichier:…]` = média joint. N'invente
+  JAMAIS le contenu d'une image ; retiens un fait seulement s'il est écrit dans le texte.
+- Bloc citation `>` dans le texte = propos rapportés, pas forcément ceux de l'auteur.
+- Quelqu'un qui parle D'un autre (« Alice habite à Lyon ») → user_id = la personne
+  concernée SEULEMENT si c'est affirmé clairement et non sarcastique ; sinon IGNORE.
+- Doute sur qui est concerné → n'extrais PAS.
 
 Actions : create (target_id=null) | update | merge | contradict (target_id=id).
 
