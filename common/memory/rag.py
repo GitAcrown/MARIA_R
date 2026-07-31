@@ -73,8 +73,8 @@ def build_profile_ctx(
         return "", seen_contents
 
     header = (
-        "PROFILS (détails retenus sur ces membres — personnalise naturellement, "
-        "ne récite pas la liste, ne confonds pas les ids ; croise s'il y a un lien) :"
+        "PROFILS (détails retenus — personnalise / allusion naturelle si ça colle au fil, "
+        "ne récite pas, ne force aucun callback, ne confonds pas les ids) :"
     )
     return header + "\n" + "\n".join(lines), seen_contents
 
@@ -149,8 +149,8 @@ def format_memory_ctx(
         return ""
     names = name_by_user_id or {}
     lines = [
-        "MEMOIRE PERTINENTE (complément précis — personnalise avec, "
-        "ne récite pas, n'invente aucun détail manquant) :"
+        "MEMOIRE PERTINENTE (complément — allusion OK si pertinent au fil, "
+        "sinon ignore ; ne récite pas, n'invente aucun détail) :"
     ]
     for m in memories:
         if m.user_id:

@@ -160,7 +160,12 @@ MÉMOIRE (ordre) :
    croise les liens, ne confonds jamais les ids. N'invente aucun détail absent des profils.
 2) MEMOIRE PERTINENTE — complément (gags / events serveur précis).
 3) search_memory — énumérer, ou membre/sujet ABSENT des profils.
-4) Déduction → confirmation (si le fil s'y prête) → remember_fact :
+4) Callbacks (optionnels, jamais forcés) — si un fait des profils/mémoire colle vraiment au fil
+   (sujet, lieu, jeu, gag, anniv du jour, lien entre deux gens…) tu peux le glisser en une
+   demi-phrase naturelle, comme un pote qui a suivi. Ex. OK : une allusion au passage.
+   Interdit : réciter la fiche, « je me souviens que… », digression, relancer juste pour
+   montrer que tu as de la mémoire, ou callback hors sujet. En doute → tais-toi sur le souvenir.
+5) Déduction → confirmation (si le fil s'y prête) → remember_fact :
    - Déduction possible (ex. « 99 » après un 22 juillet → 1999) ; conf light (« 1999 ? »)
      seulement si ça colle au ton — une phrase max, jamais insister ni relancer.
    - Confirmé → remember_fact avec le fait COMPLET et précis
@@ -286,7 +291,8 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "› `/moi` — ta mémoire perso ; Retenir… / oublier une ligne / Tout oublier.\n"
         "› `/global` — mémoire collective ; oublier une ligne / reset (modos).\n"
         "› `/souvenirs` — derniers créés sur le serveur, pending inclus (modos).\n"
-        "› Elle n'enregistre que des faits précis ; perso = prudent, collectif = plus ouvert.",
+        "› Elle n'enregistre que des faits précis ; perso = prudent, collectif = plus ouvert.\n"
+        "› Elle peut y faire allusion naturellement si ça colle au fil — jamais forcé.",
     ),
     (
         "Recherche & infos",
