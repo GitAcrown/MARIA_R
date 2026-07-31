@@ -14,6 +14,9 @@ from discord.ext import tasks
 
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
+    CATEGORY_EVENT,
+    CATEGORY_SERVER,
+    CONFIDENCE_COLLECTIVE,
     CONFIDENCE_PENDING,
     CONFIDENCE_STABLE,
     CONFIDENCE_UPDATE_DELTA,
@@ -502,16 +505,19 @@ class MemoryWorker:
             if is_near_duplicate(content, existing_contents):
                 logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
-            # Fait immuable (anniv…) : actif + indexé tout de suite. Sinon pending (2 hits).
+            # user immuable → actif immédiat ; collectif → actif souple ;
+            # user ordinaire → pending (2 hits).
             stable = bool(action.get("stable")) and category == "user"
-            if stable:
+            collective = category in (CATEGORY_SERVER, CATEGORY_EVENT)
+            if stable or collective:
+                conf = CONFIDENCE_STABLE if stable else CONFIDENCE_COLLECTIVE
                 mem = await asyncio.to_thread(
                     self.store.create,
                     category=category,
                     guild_id=guild_id,
                     content=content,
                     user_id=user_id,
-                    confidence=CONFIDENCE_STABLE,
+                    confidence=conf,
                     status=STATUS_ACTIVE,
                 )
                 await asyncio.to_thread(
@@ -521,8 +527,14 @@ class MemoryWorker:
                     user_id=mem.user_id, confidence=mem.confidence,
                 )
                 if existing_by_user is not None:
-                    existing_by_user.setdefault(user_id, []).append(content)
-                logger.info("Mémoire stable %s: %s", mem.id[:8], mem.content[:60])
+                    existing_by_user.setdefault(
+                        user_id if category == "user" else None, [],
+                    ).append(content)
+                logger.info(
+                    "Mémoire %s %s: %s",
+                    "stable" if stable else "collectif",
+                    mem.id[:8], mem.content[:60],
+                )
                 return
             mem = await asyncio.to_thread(
                 self.store.create,
@@ -534,9 +546,7 @@ class MemoryWorker:
                 status=STATUS_PENDING,
             )
             if existing_by_user is not None:
-                existing_by_user.setdefault(
-                    user_id if category == "user" else None, [],
-                ).append(content)
+                existing_by_user.setdefault(user_id, []).append(content)
             logger.debug("Mémoire pending %s: %s", mem.id[:8], mem.content[:60])
             return
 

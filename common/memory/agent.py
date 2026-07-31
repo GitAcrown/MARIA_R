@@ -72,36 +72,36 @@ _MEMORY_SCHEMA = {
     },
 }
 
-# Prompt volontairement court et biaisé extraction : trop de garde-fous → modèle → []
-_SYSTEM_PROMPT = """Tu extrais des souvenirs utiles pour MARIA (petit Discord entre potes).
-Préfère RETENIR trop que trop peu. En cas de doute léger sur l'utilité → create PENDING.
-En cas de doute sur QUI est concerné → n'extrais PAS ce souvenir-là seulement.
+# Deux barres : collectif souple · perso prudent (évite faux profils).
+_SYSTEM_PROMPT = """Tu extrais des souvenirs pour MARIA (petit Discord entre potes).
 
-BOT = « {bot_name} » / MARIA / « le bot ». JAMAIS de souvenir user sur le bot.
-Réponses/blagues au bot → ignore, sauf gag collectif récurrent → server.
+DEUX BARRES — ne les mélange pas :
+1) COLLECTIF (server / event) — SOUPLE : en cas de doute léger → RETIENS.
+   Gags, surnoms, habitudes de salon, « chez nous… », soirées, voyages, projets de groupe,
+   blagues récurrentes, restos/bars, calls réguliers. 1re occurrence identifiable OK.
+   Plusieurs gens en parlent ou réagissent → server, pas user.
+2) PERSO (user) — PRUDENT : seulement si clairement affirmé / répété / non sarcastique.
+   En cas de doute sur le FAIT ou sur QUI → n'extrais PAS.
+   OK : anniv, âge, prénom, ville, coloc, études/job, couple/bestie/duo, goûts nets,
+   allergies, dispo récurrente. Liens : « Alice (111) ↔ Bob (222) : coloc » (ids ∈ lot).
+   Pattern répété (2e fois) → déduction hedgée ; 1re → observation concrète seulement.
 
-RETIENS (1re mention claire OK, en PENDING) :
-- user : anniv, âge, prénom/surnom, ville, coloc/seul, études/job, couple/bestie/duo jeu,
-  goûts affirmés (jeux, séries, bouffe, sport…), allergies, dispo récurrente, véhicule.
-- server : inside jokes, running gags, habitudes de groupe (soirée jeu, resto fétiche…).
-- event : soirée/voyage/jalon nommé. Pas le débat du jour.
-- Liens : « Alice (111) ↔ Bob (222) : coloc » (ids du lot). Deux creates si utile des 2 côtés.
-- Pattern répété (2e fois) : déduction hedgée (« vit probablement à Lyon »).
-  1re fois : observation (« a demandé la météo de Lyon »).
+BOT = « {bot_name} » / MARIA. JAMAIS de souvenir user sur le bot.
+Blagues sur le bot → ignore, sauf gag collectif → server (user_id=null).
 
-IGNORE seulement : vanne one-shot pure, compliment/insulte vague, actu/score du jour,
-blabla sans ancrage, contenu d'image non décrit, transfert non repris par l'auteur.
+IGNORE (les deux) : actu/score du jour, blabla vague, image non décrite,
+transfert non repris. Banter one-shot → ignore en user ; en server OK si ça devient un gag.
 
-ATTRIBUTION :
-- Ligne `[HH:MM] Pseudo (id) [répond à …]: texte`. « je/mon » = auteur de la ligne.
-- Fait dans l'extrait cité = la cible de la reply, pas l'auteur (sauf « moi aussi/pareil »).
-- Reply au bot + fait perso → auteur humain.
-- user_id et ids du content ∈ lot.
+ATTRIBUTION (surtout user) :
+- `[HH:MM] Pseudo (id) [répond à …]: texte`. « je/mon » = auteur de la ligne.
+- Fait dans l'extrait cité = la cible (sauf « moi aussi/pareil »).
+- Reply au bot + fait perso → auteur humain. user_id / ids content ∈ lot.
 
-stable=true : uniquement anniv / date de naissance affirmés. Sinon false.
-Même sujet déjà en SOUVENIRS → update/merge (target_id), pas de doublon.
-create seulement depuis MESSAGES NOUVEAUX. Max 8 actions.
-CONTENT : « Alice : anniversaire le 25 juillet » (pas d'id hors liens ↔)."""
+stable=true : uniquement anniv / date de naissance affirmés (user). Sinon false.
+server/event : user_id=null, stable=false, content sans ids Discord.
+Même sujet en SOUVENIRS → update/merge (target_id). create = MESSAGES NOUVEAUX seulement.
+Max 8 actions. Priorise le collectif s'il y a de la matière ; perso seulement si solide.
+CONTENT user : « Alice : anniversaire le 25 juillet ». server : « Running gag du kebab 4h »."""
 
 
 async def extract_memories(
@@ -148,7 +148,7 @@ async def extract_memories(
             "content": (
                 f"SOUVENIRS existants :\n{existing_block}\n\n"
                 f"{messages_block}\n\n"
-                "Extrais tous les faits utiles du lot (pending OK). "
+                "Collectif : sois ouvert. Perso : seulement les faits solides. "
                 "Si vraiment rien → {\"memories\": []}."
             ),
         },

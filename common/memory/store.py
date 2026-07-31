@@ -26,6 +26,8 @@ STATUS_PENDING = "pending"
 STATUS_ARCHIVED = "archived"
 
 CONFIDENCE_PENDING = 0.2
+# Collectif (server/event) : actif dès la 1re capture, seuil RAG = 0.3.
+CONFIDENCE_COLLECTIVE = 0.5
 # Faits immuables affirmés clairement (anniv…) — actifs tout de suite, hors decay.
 CONFIDENCE_STABLE = 0.99
 CONFIDENCE_UPDATE_DELTA = 0.15
