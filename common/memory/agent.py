@@ -38,25 +38,23 @@ _MEMORY_SCHEMA = {
                             "user_id": {
                                 "type": ["string", "null"],
                                 "description": (
-                                    "Discord id de la personne CONCERNÉE par le souvenir "
-                                    "(pas forcément l'auteur du message). null si server/event."
+                                    "Discord id de la personne CONCERNÉE "
+                                    "(pas forcément l'auteur). null si server/event."
                                 ),
                             },
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "Souvenir concis et auto-explicatif (≤14 mots). "
-                                    "Fait perso : « Pseudo : fait » SANS id. "
-                                    "Lien : « Alice (111) ↔ Bob (222) : coloc ». "
-                                    "Jamais « le membre X »."
+                                    "≤14 mots, auto-explicatif. "
+                                    "Perso : « Pseudo : fait » SANS id. "
+                                    "Lien : « Alice (111) ↔ Bob (222) : coloc »."
                                 ),
                             },
                             "stable": {
                                 "type": "boolean",
                                 "description": (
-                                    "true uniquement pour un fait immuable clairement affirmé "
-                                    "(anniversaire, date de naissance…) → actif immédiatement. "
-                                    "false pour le reste (goûts, liens, déductions, gags…)."
+                                    "true seulement pour anniversaire / date de naissance "
+                                    "clairement affirmés. false sinon."
                                 ),
                             },
                         },
@@ -74,80 +72,36 @@ _MEMORY_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu es l'agent mémoire de MARIA sur un petit serveur Discord entre potes proches.
-Tu travailles POUR le bot ; tu n'es pas un membre. But : retenir ce qui aide MARIA à
-personnaliser et à faire des liens — sans stocker le bruit du tchat.
+# Prompt volontairement court et biaisé extraction : trop de garde-fous → modèle → []
+_SYSTEM_PROMPT = """Tu extrais des souvenirs utiles pour MARIA (petit Discord entre potes).
+Préfère RETENIR trop que trop peu. En cas de doute léger sur l'utilité → create PENDING.
+En cas de doute sur QUI est concerné → n'extrais PAS ce souvenir-là seulement.
 
-BOT = MARIA / « {bot_name} » / « le bot » / `[répond à MARIA (le bot): …]`.
-- JAMAIS de souvenir category=user sur le bot.
-- Demandes/réponses/blagues sur le bot → IGNORE, sauf running gag collectif → server.
+BOT = « {bot_name} » / MARIA / « le bot ». JAMAIS de souvenir user sur le bot.
+Réponses/blagues au bot → ignore, sauf gag collectif récurrent → server.
 
-TON : ironie, sarcasme, banter. Vanne isolée ≠ fait. Ne généralise PAS une anecdote
-(« kebab à 4h une fois » ≠ « mange toujours des kebabs »).
+RETIENS (1re mention claire OK, en PENDING) :
+- user : anniv, âge, prénom/surnom, ville, coloc/seul, études/job, couple/bestie/duo jeu,
+  goûts affirmés (jeux, séries, bouffe, sport…), allergies, dispo récurrente, véhicule.
+- server : inside jokes, running gags, habitudes de groupe (soirée jeu, resto fétiche…).
+- event : soirée/voyage/jalon nommé. Pas le débat du jour.
+- Liens : « Alice (111) ↔ Bob (222) : coloc » (ids du lot). Deux creates si utile des 2 côtés.
+- Pattern répété (2e fois) : déduction hedgée (« vit probablement à Lyon »).
+  1re fois : observation (« a demandé la météo de Lyon »).
 
-CIBLE — sois ouvert sur ce qui sert vraiment entre potes (1re mention claire → PENDING OK) :
-USER (perso d'UN humain, user_id = personne CONCERNÉE) :
-- Identité : prénom/surnom préféré, pronoms, âge si dit, anniv / date de naissance.
-- Vie : ville/région, coloc/seul/chez parents, études/job, horaires atypiques, véhicule.
-- Liens stables : couple, coloc, bestie, duo de jeu, rivalité récurrente, famille citée.
-- Goûts affirmés (hors blague) : jeux (main/rank), films/séries, musique, bouffe, boisson,
-  sport/équipe, hobbies. Allergies / régimes utiles au groupe.
-- Habitudes utiles : fuseau/décalage, « jamais dispo le mardi », streamer régulier.
-SERVER (collectif, user_id=null) — sois plus ouvert :
-- Inside jokes, surnoms collectifs, running gags, règles implicites du salon.
-- Habitudes de groupe : soirée jeu du vendredi, resto/bar fétiche, call vocal récurrent.
-EVENT : jalon nommé/organisé (soirée, voyage, arrivée/départ, projet lancé). Pas le débat du jour.
+IGNORE seulement : vanne one-shot pure, compliment/insulte vague, actu/score du jour,
+blabla sans ancrage, contenu d'image non décrit, transfert non repris par l'auteur.
 
-SIGNAUX RÉPÉTÉS → DÉDUCTIONS (hedgées) :
-- Ex. météo toujours Lyon, matchs toujours du même club, trajets/décalage récurrents.
-- 1re fois : observation (« Alice : a demandé la météo de Lyon »), pas la conclusion.
-- 2e fois (PENDING existant + NOUVEAUX) → update hedgé (« Alice : vit probablement à Lyon »).
+ATTRIBUTION :
+- Ligne `[HH:MM] Pseudo (id) [répond à …]: texte`. « je/mon » = auteur de la ligne.
+- Fait dans l'extrait cité = la cible de la reply, pas l'auteur (sauf « moi aussi/pareil »).
+- Reply au bot + fait perso → auteur humain.
+- user_id et ids du content ∈ lot.
 
-IGNORE (bruit) :
-- Compliments/insultes/comparaisons one-shot, scores/actus du jour, blabla vague (« ça »).
-- Sarcasme non ancré, histoires one-shot sans gag potentiel, demandes outil sans fait perso.
-- Un fait doit se comprendre SEUL hors conversation — sinon n'extrais pas.
-
-NIVEAUX / stable :
-- stable=true (create user) : IMMUABLE affirmé (anniv, date de naissance) → ACTIVE immédiat.
-  PAS ville/job/goûts/liens/déductions.
-- stable=false : PENDING (confirmé plus tard) sauf update d'un ACTIVE.
-- Même sujet déjà en base → update/merge (target_id), pas de doublon.
-
-LOTS : create seulement depuis MESSAGES NOUVEAUX. CONTEXTE PRÉCÉDENT = liaison/confirmation.
-Max 8 actions. Rien d'utile → {{"memories": []}}. Plusieurs faits solides dans le lot → prends-les
-(ne sois pas radin) ; priorise perso + liens + gags serveur.
-
-LIENS : « Alice (111) ↔ Bob (222) : coloc ». category=user, user_id = l'un des deux.
-Lien fort des deux côtés → deux creates. Ids ∈ lot.
-
-LECTURE DU TCHAT (critique — faux souvenirs fréquents ici) :
-- Ligne : `[HH:MM] Pseudo (id) [répond à Cible…]: texte` (+ tags `[transfère]` / `[image]`…).
-- Reply membre→membre `[répond à Bob (222): "…"]` : le fait DANS l'extrait cité = Bob.
-  L'auteur de la reply ne « possède » ce fait que s'il l'affirme pour lui (« moi aussi »,
-  « pareil », « mon anniv aussi c'est… »). Un « mdr » / « +1 » / emoji ≠ appropriation.
-- Reply → bot `[répond à MARIA (le bot): "…"]` : conversation AVEC le bot.
-  « je/mon » dans la reply = auteur humain. JAMAIS de souvenir user sur le bot.
-  Une info dite PAR le bot dans l'extrait n'est pas un fait membre (sauf si un humain
-  la confirme clairement ensuite).
-- `[transfère: "…"]` = message forwardé d'ailleurs : PAS une affirmation de l'auteur,
-  sauf s'il le reprend explicitement (« oui c'est mon anniv », « c'est bien moi »).
-- `[image:…]` / `[sticker:…]` / `[embed:…]` / `[fichier:…]` = média joint. N'invente
-  JAMAIS le contenu d'une image ; retiens un fait seulement s'il est écrit dans le texte.
-- Bloc citation `>` dans le texte = propos rapportés, pas forcément ceux de l'auteur.
-- Quelqu'un qui parle D'un autre (« Alice habite à Lyon ») → user_id = la personne
-  concernée SEULEMENT si c'est affirmé clairement et non sarcastique ; sinon IGNORE.
-- Doute sur qui est concerné → n'extrais PAS.
-
-Actions : create (target_id=null) | update | merge | contradict (target_id=id).
-
-CONTENT :
-- ≤ 14 mots, une info, auto-explicatif. Pseudo = celui de la ligne du lot.
-- user : « Alice : anniversaire le 12 mars » (pas d'id) · lien : ids obligatoires.
-- server/event : sec, sans ids. Pas de « a dit que » / « semble ».
-OK : « Alice : main Jett sur Valorant » · « Bob (222) ↔ Alice (111) : coloc »
-OK : « Running gag du kebab 4h » · « Alice : vit probablement à Lyon »
-KO : « Alice (111) : anniv… » · « Bob : a du charisme » · « Le membre… »"""
+stable=true : uniquement anniv / date de naissance affirmés. Sinon false.
+Même sujet déjà en SOUVENIRS → update/merge (target_id), pas de doublon.
+create seulement depuis MESSAGES NOUVEAUX. Max 8 actions.
+CONTENT : « Alice : anniversaire le 25 juillet » (pas d'id hors liens ↔)."""
 
 
 async def extract_memories(
@@ -179,10 +133,9 @@ async def extract_memories(
 
     if prior_text.strip():
         messages_block = (
-            "CONTEXTE PRÉCÉDENT (déjà analysé — liaison / confirmation seulement ; "
-            "pas de create basé uniquement sur ce bloc) :\n"
+            "CONTEXTE PRÉCÉDENT (liaison / confirmation seulement — pas de create seul) :\n"
             f"{prior_text.strip()}\n\n"
-            "MESSAGES NOUVEAUX (seule zone autorisée pour create) :\n"
+            "MESSAGES NOUVEAUX (zone create) :\n"
             f"{batch_text.strip()}"
         )
     else:
@@ -193,25 +146,40 @@ async def extract_memories(
         {
             "role": "user",
             "content": (
-                f"SOUVENIRS (pending = à confirmer ; active = retenus ; "
-                f"stable=true seulement pour anniv/date de naissance affirmée) :\n"
-                f"{existing_block}\n\n"
-                f"{messages_block}"
+                f"SOUVENIRS existants :\n{existing_block}\n\n"
+                f"{messages_block}\n\n"
+                "Extrais tous les faits utiles du lot (pending OK). "
+                "Si vraiment rien → {\"memories\": []}."
             ),
         },
     ]
+    # Budget large : même avec reasoning_effort=none côté client, laisser de la marge JSON.
+    max_tokens = max(2500, 350 * max_actions)
     try:
         completion = await llm_client.chat(
             messages,
             model=model,
             response_format=_MEMORY_SCHEMA,
-            max_tokens=max(800, 200 * max_actions),
+            max_tokens=max_tokens,
         )
-        raw = json.loads(completion.choices[0].message.content or "{}")
+        choice = completion.choices[0] if completion.choices else None
+        raw_text = (choice.message.content if choice else None) or ""
+        if not raw_text.strip():
+            usage = getattr(completion, "usage", None)
+            logger.warning(
+                "Extraction mémoire : content vide (finish=%s usage=%s) — "
+                "souvent budget tokens / raisonnement",
+                getattr(choice, "finish_reason", None),
+                usage,
+            )
+            return []
+        raw = json.loads(raw_text)
         items = raw.get("memories") or []
         if not isinstance(items, list):
             return []
-        return [x for x in items if isinstance(x, dict)][:max_actions]
+        out = [x for x in items if isinstance(x, dict)][:max_actions]
+        logger.info("Extraction mémoire : %d action(s)", len(out))
+        return out
     except Exception as e:
         logger.warning("Extraction mémoire échouée: %s", e)
         return []

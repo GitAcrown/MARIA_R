@@ -18,8 +18,9 @@ DEBOUNCE_SECONDS: float = 0.5
 
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).
-MEMORY_FLUSH_MESSAGES = 40
-MEMORY_FLUSH_MINUTES = 30
+# Flush un peu plus fréquent : lots trop gros + prompt sévère = peu d'extractions visibles.
+MEMORY_FLUSH_MESSAGES = 25
+MEMORY_FLUSH_MINUTES = 20
 MEMORY_BUFFER_CAP = 80
 # RAG complémentaire (le perso vient surtout des profils injectés).
 MEMORY_TOP_K = 3

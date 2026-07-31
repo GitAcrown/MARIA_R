@@ -76,11 +76,12 @@ class MariaLLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["parallel_tool_calls"] = True
-            # Les modèles gpt-5.x à raisonnement natif refusent les function tools
-            # sur /v1/chat/completions sauf si reasoning_effort='none' est explicite.
-            kwargs["reasoning_effort"] = "none"
         if response_format:
             kwargs["response_format"] = response_format
+        # gpt-5.x : sans ça, le raisonnement peut manger tout max_completion_tokens
+        # (sortie content vide) — et les function tools exigent reasoning_effort='none'.
+        if tools or response_format:
+            kwargs["reasoning_effort"] = "none"
 
         try:
             return await self._client.chat.completions.create(**kwargs)

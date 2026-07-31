@@ -420,6 +420,10 @@ class MemoryWorker:
             prior_text=prior_text,
         )
         if not actions:
+            logger.info(
+                "Flush mémoire : 0 action (guild=%s, msgs=%d)",
+                guild_id, len(batch),
+            )
             return
         existing_by_user: dict[Optional[int], list[str]] = {}
         for m in existing:
@@ -430,6 +434,10 @@ class MemoryWorker:
                 allowed_ids=allowed_ids, name_by_id=name_by_id,
                 existing_by_user=existing_by_user,
             )
+        logger.info(
+            "Flush mémoire : %d action(s) LLM (guild=%s, msgs=%d)",
+            len(actions), guild_id, len(batch),
+        )
 
     async def _apply_action(
         self,
