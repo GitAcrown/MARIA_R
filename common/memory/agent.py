@@ -45,16 +45,17 @@ _MEMORY_SCHEMA = {
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "≤14 mots, auto-explicatif. "
+                                    "Fait précis et naturel (≤22 mots), avec le détail utile "
+                                    "(date, lieu, titre, nom…). "
                                     "Perso : « Pseudo : fait » SANS id. "
-                                    "Lien : « Alice (111) ↔ Bob (222) : coloc »."
+                                    "Lien : « Alice (111) ↔ Bob (222) : coloc depuis 2023 »."
                                 ),
                             },
                             "stable": {
                                 "type": "boolean",
                                 "description": (
                                     "true seulement pour anniversaire / date de naissance "
-                                    "clairement affirmés. false sinon."
+                                    "clairement affirmés avec assez de détail. false sinon."
                                 ),
                             },
                         },
@@ -72,36 +73,52 @@ _MEMORY_SCHEMA = {
     },
 }
 
-# Deux barres : collectif souple · perso prudent (évite faux profils).
 _SYSTEM_PROMPT = """Tu extrais des souvenirs pour MARIA (petit Discord entre potes).
 
-DEUX BARRES — ne les mélange pas :
-1) COLLECTIF (server / event) — SOUPLE : en cas de doute léger → RETIENS.
-   Gags, surnoms, habitudes de salon, « chez nous… », soirées, voyages, projets de groupe,
-   blagues récurrentes, restos/bars, calls réguliers. 1re occurrence identifiable OK.
-   Plusieurs gens en parlent ou réagissent → server, pas user.
-2) PERSO (user) — PRUDENT : seulement si clairement affirmé / répété / non sarcastique.
-   En cas de doute sur le FAIT ou sur QUI → n'extrais PAS.
-   OK : anniv, âge, prénom, ville, coloc, études/job, couple/bestie/duo, goûts nets,
-   allergies, dispo récurrente. Liens : « Alice (111) ↔ Bob (222) : coloc » (ids ∈ lot).
-   Pattern répété (2e fois) → déduction hedgée ; 1re → observation concrète seulement.
+RÈGLE D'OR — PRÉCISION OU RIEN :
+- Un souvenir doit contenir le détail concret utile (quoi / qui / où / quand assez pour
+  le réutiliser plus tard sans le fil). Pas de détail → n'extrais PAS.
+- KO : « aime les jeux », « habite quelque part », « anniversaire le… », « gag du serveur »,
+  « joue souvent », formulations coupées ou vagues.
+- OK : « anniversaire le 22 juillet 1999 », « habite à Saint-Ouen (95) »,
+  « main Jett en ranked Valorant », « Running gag : kebab commandé à 4h du mat ».
+- N'invente aucun détail absent du lot. Mieux vaut [] qu'un fait flou.
+
+DIRECT vs PASSIF (critique pour le perso) :
+- Lignes marquées `[→ MARIA]` = l'humain parle À MARIA (mention / reply au bot).
+  Fait perso précis ici → PRIORITAIRE, à retenir volontiers (toujours avec détail).
+- Lignes sans `[→ MARIA]` = lecture passive du salon. PERSO beaucoup plus prudent :
+  seulement faits très clairs, non ambigus, non sarcastiques. En cas de doute → skip.
+- Collectif : OK depuis le passif si le gag/habitude est identifiable et précis.
+
+DEUX BARRES :
+1) COLLECTIF (server/event) — plus ouvert, mais toujours précis.
+   Gags nommables, habitudes concrètes, soirées/voyages clairement identifiés.
+   Plusieurs gens → server. user_id=null, stable=false, pas d'ids Discord dans content.
+2) PERSO (user) — précis + prudent surtout en passif.
+   DIRECT `[→ MARIA]` : affirmations à MARIA = bonne source.
+   PASSIF : seulement si affirmé net / répété. Liens : « Alice (111) ↔ Bob (222) : coloc ».
+   Pattern (2e fois) → déduction hedgée précise ; 1re → observation détaillée.
 
 BOT = « {bot_name} » / MARIA. JAMAIS de souvenir user sur le bot.
-Blagues sur le bot → ignore, sauf gag collectif → server (user_id=null).
+Blagues sur le bot → ignore, sauf gag collectif précis → server.
 
-IGNORE (les deux) : actu/score du jour, blabla vague, image non décrite,
-transfert non repris. Banter one-shot → ignore en user ; en server OK si ça devient un gag.
+IGNORE : actu/score du jour, blabla, image non décrite, transfert non repris,
+banter one-shot sans ancrage, tout fait sans détail réutilisable.
 
-ATTRIBUTION (surtout user) :
+ATTRIBUTION :
 - `[HH:MM] Pseudo (id) [répond à …]: texte`. « je/mon » = auteur de la ligne.
 - Fait dans l'extrait cité = la cible (sauf « moi aussi/pareil »).
-- Reply au bot + fait perso → auteur humain. user_id / ids content ∈ lot.
+- Reply au bot + fait perso → auteur humain. user_id / ids ∈ lot. Doute sur qui → skip.
 
-stable=true : uniquement anniv / date de naissance affirmés (user). Sinon false.
-server/event : user_id=null, stable=false, content sans ids Discord.
-Même sujet en SOUVENIRS → update/merge (target_id). create = MESSAGES NOUVEAUX seulement.
-Max 8 actions. Priorise le collectif s'il y a de la matière ; perso seulement si solide.
-CONTENT user : « Alice : anniversaire le 25 juillet ». server : « Running gag du kebab 4h »."""
+STYLE — naturel, une info, prêt à être relu :
+- user : « Alice : anniversaire le 22 juillet 1999 »
+- server : « Running gag : kebab à 4h du mat »
+- Pas de « le membre », « a dit que », « semble », pas de troncature « … ».
+
+stable=true : anniv / date de naissance avec jour+mois (année si dite). Sinon false.
+Même sujet en SOUVENIRS → update/merge (target_id) en enrichissant le détail, pas de doublon.
+create = MESSAGES NOUVEAUX seulement. Max 8 actions."""
 
 
 async def extract_memories(
@@ -148,12 +165,12 @@ async def extract_memories(
             "content": (
                 f"SOUVENIRS existants :\n{existing_block}\n\n"
                 f"{messages_block}\n\n"
-                "Collectif : sois ouvert. Perso : seulement les faits solides. "
-                "Si vraiment rien → {\"memories\": []}."
+                "Priorise les faits PRÉCIS des lignes [→ MARIA]. "
+                "Passif perso : très sélectif. Flou → ignore. "
+                "Si rien de solide → {\"memories\": []}."
             ),
         },
     ]
-    # Budget large : même avec reasoning_effort=none côté client, laisser de la marge JSON.
     max_tokens = max(2500, 350 * max_actions)
     try:
         completion = await llm_client.chat(

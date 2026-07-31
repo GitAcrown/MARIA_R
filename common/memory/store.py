@@ -28,6 +28,8 @@ STATUS_ARCHIVED = "archived"
 CONFIDENCE_PENDING = 0.2
 # Collectif (server/event) : actif dès la 1re capture, seuil RAG = 0.3.
 CONFIDENCE_COLLECTIVE = 0.5
+# Fait perso dit directement à MARIA (mention / reply) — confiance élevée, actif tout de suite.
+CONFIDENCE_DIRECT = 0.75
 # Faits immuables affirmés clairement (anniv…) — actifs tout de suite, hors decay.
 CONFIDENCE_STABLE = 0.99
 CONFIDENCE_UPDATE_DELTA = 0.15
@@ -465,11 +467,29 @@ class MemoryStore:
 
     def promote_stable(self, memory_id: str, content: Optional[str] = None) -> Optional[Memory]:
         """Force un souvenir en ACTIVE à confiance stable (faits immuables confirmés)."""
+        return self._promote(memory_id, CONFIDENCE_STABLE, content=content)
+
+    def promote_direct(self, memory_id: str, content: Optional[str] = None) -> Optional[Memory]:
+        """Force ACTIVE à confiance « dit à MARIA » (sans descendre si déjà plus haut)."""
+        mem = self.get(memory_id)
+        if mem is None:
+            return None
+        conf = max(float(mem.confidence), CONFIDENCE_DIRECT)
+        return self._promote(memory_id, conf, content=content)
+
+    def _promote(
+        self,
+        memory_id: str,
+        confidence: float,
+        *,
+        content: Optional[str] = None,
+    ) -> Optional[Memory]:
         mem = self.get(memory_id)
         if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
             return None
         now = datetime.now(timezone.utc)
         new_content = (content if content is not None else mem.content).strip()
+        new_conf = max(0.0, min(1.0, confidence))
         with _db() as conn:
             conn.execute(
                 """
@@ -479,7 +499,7 @@ class MemoryStore:
                 WHERE id = ?
                 """,
                 (
-                    new_content, STATUS_ACTIVE, CONFIDENCE_STABLE, memory_id,
+                    new_content, STATUS_ACTIVE, new_conf, memory_id,
                     now.isoformat(), memory_id,
                 ),
             )

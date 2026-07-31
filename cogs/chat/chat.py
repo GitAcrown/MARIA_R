@@ -51,6 +51,7 @@ from cogs.chat.config import (
     MEMORY_EXISTING_LIMIT,
     MEMORY_EXTRACT_MAX_ACTIONS,
     MEMORY_BATCH_OVERLAP,
+    MEMORY_DIRECT_FLUSH_MESSAGES,
     MEMORY_FLUSH_MESSAGES,
     MEMORY_FLUSH_MINUTES,
     MEMORY_PROFILE_FACTS,
@@ -155,17 +156,17 @@ Réponses très courtes style tchat. Listes seulement si utiles. Markdown si str
 « {bot_name} » (sous toutes ses formes) = TOI. Ne commence jamais une réponse par ton nom.
 
 MÉMOIRE (ordre) :
-1) PROFILS — faits retenus sur les membres de cette réplique ; personnalise, croise les liens (coloc, duo…), ne confonds jamais les ids.
-2) MEMOIRE PERTINENTE — complément (souvent gags / events serveur).
+1) PROFILS — détails retenus sur les membres de cette réplique ; personnalise naturellement,
+   croise les liens, ne confonds jamais les ids. N'invente aucun détail absent des profils.
+2) MEMOIRE PERTINENTE — complément (gags / events serveur précis).
 3) search_memory — énumérer, ou membre/sujet ABSENT des profils.
 4) Déduction → confirmation (si le fil s'y prête) → remember_fact :
-   - Tu peux déduire (ex. « 99 » après un 22 juillet → 1999) et, si ça colle au ton du tchat,
-     demander une conf light (« 1999 ? ») — une phrase max, jamais insister, jamais relancer
-     si la personne ignore ou change de sujet.
-   - Dès qu'elle confirme (oui / exact / ouais / le fait reformulé) → remember_fact tout de suite
-     (stable=true pour anniv/date de naissance). Un fait = un appel.
-   - Fait affirmé clairement sans ambiguïté → remember_fact directement, sans question inutile.
-   - Ne dis jamais « noté » / « j'ai retenu » sans avoir appelé remember_fact avec succès.
+   - Déduction possible (ex. « 99 » après un 22 juillet → 1999) ; conf light (« 1999 ? »)
+     seulement si ça colle au ton — une phrase max, jamais insister ni relancer.
+   - Confirmé → remember_fact avec le fait COMPLET et précis
+     (ex. « anniversaire le 22 juillet 1999 », pas « anniversaire en juillet »).
+     stable=true pour anniv/date de naissance. Un fait précis = un appel.
+   - Fait affirmé clair → remember_fact direct. Pas de « noté » sans l'outil.
    - Ne force jamais l'échange mémoire : le tchat prime.
 
 OUTILS — n'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute ou trop récent → appelle l'outil, sinon dis que tu ne sais pas. Défaut : utilisateurs en France.
@@ -285,7 +286,7 @@ _TIPS_SECTIONS: list[tuple[str, str]] = [
         "› `/moi` — ta mémoire perso ; Retenir… / oublier une ligne / Tout oublier.\n"
         "› `/global` — mémoire collective ; oublier une ligne / reset (modos).\n"
         "› `/souvenirs` — derniers créés sur le serveur, pending inclus (modos).\n"
-        "› Elle n'enregistre pas tout : perso = sélectif, collectif = plus ouvert.",
+        "› Elle n'enregistre que des faits précis ; perso = prudent, collectif = plus ouvert.",
     ),
     (
         "Recherche & infos",
@@ -1326,6 +1327,7 @@ class Chat(commands.Cog):
             existing_limit=MEMORY_EXISTING_LIMIT,
             max_actions=MEMORY_EXTRACT_MAX_ACTIONS,
             batch_overlap=MEMORY_BATCH_OVERLAP,
+            direct_flush_messages=MEMORY_DIRECT_FLUSH_MESSAGES,
             bot_user_id=self.bot.user.id if self.bot.user else None,
             bot_name=getattr(self.bot.user, "name", None) or "MARIA",
         )
@@ -1758,6 +1760,14 @@ class Chat(commands.Cog):
                         reply_to_id = resolved.author.id
                         reply_to_name = resolved.author.name
                         reply_to_content = reply_text or None
+            addressed_to_bot = bool(
+                reply_is_bot
+                or should_respond
+                or (
+                    self.bot.user is not None
+                    and any(u.id == self.bot.user.id for u in message.mentions)
+                )
+            )
             self._memory_worker.ingest(
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,
@@ -1768,6 +1778,7 @@ class Chat(commands.Cog):
                 reply_to_name=reply_to_name,
                 reply_to_content=reply_to_content,
                 reply_is_bot=reply_is_bot,
+                addressed_to_bot=addressed_to_bot,
             )
 
         if not should_respond:

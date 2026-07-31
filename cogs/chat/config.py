@@ -18,9 +18,10 @@ DEBOUNCE_SECONDS: float = 0.5
 
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).
-# Flush un peu plus fréquent : lots trop gros + prompt sévère = peu d'extractions visibles.
+# Flush hybride : lecture passive plus lente ; dialogue avec MARIA flush plus tôt.
 MEMORY_FLUSH_MESSAGES = 25
 MEMORY_FLUSH_MINUTES = 20
+MEMORY_DIRECT_FLUSH_MESSAGES = 8  # si le lot contient des msgs → MARIA
 MEMORY_BUFFER_CAP = 80
 # RAG complémentaire (le perso vient surtout des profils injectés).
 MEMORY_TOP_K = 3

@@ -21,16 +21,16 @@ from common.memory.store import (
     MemoryStore,
 )
 from common.memory.vector import VectorStore
-from common.memory.worker import is_near_duplicate, sanitize_memory_content
+from common.memory.worker import is_near_duplicate, is_too_vague, sanitize_memory_content
 
 logger = logging.getLogger("MARIA.Chat.MemoryTools")
 
 _MAX_RESULTS = 20
-_CONTENT_MAX = 120
+_CONTENT_MAX = 180
 
 
 def _canonical_user_content(display_name: str, fact: str) -> str:
-    """« Pseudo : fait » — un seul fait, sans id Discord dans le texte."""
+    """« Pseudo : fait » — un seul fait précis, sans id Discord dans le texte."""
     fact = sanitize_memory_content(fact)
     if ":" in fact:
         left, _, right = fact.partition(":")
@@ -38,10 +38,7 @@ def _canonical_user_content(display_name: str, fact: str) -> str:
             fact = right.strip() or fact
     fact = re.sub(r"\s*\(\d{17,20}\)", "", fact).strip()
     name = (display_name or "?").strip() or "?"
-    content = f"{name} : {fact}"
-    if len(content) > _CONTENT_MAX:
-        content = content[: _CONTENT_MAX - 1].rstrip() + "…"
-    return content
+    return f"{name} : {fact}"
 
 
 def _find_near_duplicate(memories: list[Memory], content: str) -> Optional[Memory]:
@@ -157,6 +154,17 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         )
         stable = bool(args.get("stable", False))
         content = _canonical_user_content(display_name, fact)
+        if len(content) > _CONTENT_MAX or is_too_vague(content):
+            return ToolResponseRecord(
+                tc.id,
+                {
+                    "error": (
+                        "Fait trop vague ou trop long — reformule avec un détail concret "
+                        "(date, lieu, titre…) ou ignore."
+                    ),
+                },
+                datetime.now(timezone.utc),
+            )
 
         existing = await asyncio.to_thread(
             store.list_for_users, guild.id, {user_id}, limit=40,
@@ -275,21 +283,22 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         Tool(
             name="remember_fact",
             description=(
-                "Écrit ou met à jour TOUT DE SUITE un fait perso (1 fait = 1 souvenir). "
-                "À appeler seulement quand le fait est affirmé clairement OU confirmé "
-                "après une question légère de ta part — jamais sur une simple déduction non validée. "
-                "Avant de dire « noté » / « j'ai retenu » : appelle cet outil. "
-                "fact = fait seul (« anniversaire le 22 juillet 1999 »). "
-                "stable=true pour immuable (anniv / date de naissance). "
-                "memory_id optionnel = id d'un souvenir à remplacer (via search_memory) ; "
-                "sinon fusion seulement si quasi-identique, sinon create."
+                "Écrit ou met à jour TOUT DE SUITE un fait perso précis (1 fait = 1 souvenir). "
+                "Seulement si affirmé clairement OU confirmé après une conf light — "
+                "jamais sur une déduction non validée. "
+                "Avant « noté » / « j'ai retenu » : appelle cet outil. "
+                "fact = détail complet (« anniversaire le 22 juillet 1999 ») — "
+                "refuse le vague (« aime les jeux », « anniv en juillet »). "
+                "stable=true pour anniv/date de naissance. "
+                "memory_id optionnel pour remplacer un souvenir (via search_memory)."
             ),
             properties={
                 "fact": {
                     "type": "string",
                     "description": (
-                        "Un seul fait, sans préfixe pseudo "
-                        "(ex: « anniversaire le 22 juillet 1999 »)."
+                        "Un seul fait PRÉCIS, sans préfixe pseudo "
+                        "(ex: « anniversaire le 22 juillet 1999 », "
+                        "« habite à Lyon 3e », « main Jett sur Valorant »)."
                     ),
                 },
                 "user_id": {

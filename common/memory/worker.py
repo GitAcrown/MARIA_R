@@ -17,6 +17,7 @@ from common.memory.store import (
     CATEGORY_EVENT,
     CATEGORY_SERVER,
     CONFIDENCE_COLLECTIVE,
+    CONFIDENCE_DIRECT,
     CONFIDENCE_PENDING,
     CONFIDENCE_STABLE,
     CONFIDENCE_UPDATE_DELTA,
@@ -34,16 +35,32 @@ _META_PERSON_RE = re.compile(
     r"le\s+user|l['']user)\s+",
     re.IGNORECASE,
 )
-_MEMORY_CONTENT_MAX = 120
+_MEMORY_CONTENT_MAX = 180
 # Discord snowflakes typiques (17–20 chiffres) dans « Name (id) » / content.
 _DISCORD_ID_RE = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
 _SNOWFLAKE_PARENS_RE = re.compile(r"\s*\((\d{17,20})\)")
 _MENTION_NAME_ID_RE = re.compile(r"@?([^\s@<>()]+)\((\d{17,20})\)")
 _NAME_ID_TAIL_RE = re.compile(r"^(.*?)\s*\((\d{17,20})\)\s*$")
+# Faits trop flous pour être utiles relu plus tard → rejet worker.
+_VAGUE_FACT_RE = re.compile(
+    r"(?:"
+    r"\.\.\.|…"
+    r"|quelque\s+part|un\s+truc|des\s+trucs|je\s+sais\s+pas\s+o[uù]"
+    r"|\b(souvent|parfois|un\s+jour|l['']autre\s+jour)\s*$"
+    r"|\b(aime|adore|déteste|détest|kiffe)\s+(les?\s+)?(jeux?|films?|séries?|musiques?)?\s*$"
+    r"|\b(joue|regarde|écoute)\s+(aux?\s+|des?\s+|à\s+la\s+)?(jeux?|films?|séries?)?\s*$"
+    r"|\b(a|ont)\s+(un|des)\s+go[uû]ts?\b"
+    r"|\best\s+(cool|sympa|dr[oô]le|nice|bg)\s*$"
+    r"|\bgag\s+(du\s+)?serveur\b|\binside\s*joke\b\s*$"
+    r"|\banniversaire\s+le\s*$"
+    r"|a\s+demandé\s+la\s+m[eé]t[eé]o\s*$"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def sanitize_memory_content(text: str) -> str:
-    """Raccourcit et enlève les formulations « le membre X »."""
+    """Nettoie le texte. Ne tronque pas avec « … » (ça crée des souvenirs inutiles)."""
     content = (text or "").strip()
     if not content:
         return content
@@ -51,15 +68,27 @@ def sanitize_memory_content(text: str) -> str:
     content = re.sub(r"\s{2,}", " ", content).strip(" .;")
     if content:
         content = content[0].upper() + content[1:]
-    if len(content) > _MEMORY_CONTENT_MAX:
-        content = content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
     return content
 
 
 def _clip(content: str) -> str:
-    if len(content) > _MEMORY_CONTENT_MAX:
-        return content[: _MEMORY_CONTENT_MAX - 1].rstrip() + "…"
+    """Identité : la troncature silencieuse est interdite (précision ou rejet)."""
     return content
+
+
+def is_too_vague(content: str) -> bool:
+    """True si le fait n'a pas assez de détail pour être réutilisable."""
+    fact = _fact_part(content)
+    if not fact or len(fact) < 8:
+        return True
+    words = [w for w in re.split(r"\s+", fact) if w]
+    if len(words) < 3:
+        return True
+    if fact.endswith(("…", "...")) or "…" in fact or "..." in fact:
+        return True
+    if _VAGUE_FACT_RE.search(fact):
+        return True
+    return False
 
 
 def _collect_batch_user_ids(
@@ -254,11 +283,15 @@ class BufferedMessage:
     reply_to_name: Optional[str] = None
     reply_to_content: Optional[str] = None
     reply_is_bot: bool = False
+    # True si l'humain s'adresse à MARIA (mention / reply bot / déclenche une réponse).
+    addressed_to_bot: bool = False
 
     def format_line(self) -> str:
         """Ligne lisible pour l'agent d'extraction, avec contexte de reply si présent."""
         stamp = self.ts.strftime("%H:%M")
         head = f"[{stamp}] {self.author_name} ({self.author_id})"
+        if self.addressed_to_bot:
+            head += " [→ MARIA]"
         # reply_to_id peut être None quand on répond au bot — il faut quand même le marquer.
         if self.reply_to_name or self.reply_to_id is not None:
             if self.reply_is_bot or self.reply_to_id is None:
@@ -297,6 +330,7 @@ class MemoryWorker:
         existing_limit: int = 25,
         max_actions: int = 6,
         batch_overlap: int = 8,
+        direct_flush_messages: int = 8,
         bot_user_id: Optional[int] = None,
         bot_name: str = "MARIA",
     ) -> None:
@@ -306,6 +340,7 @@ class MemoryWorker:
         self.model = model
         self.flush_messages = flush_messages
         self.flush_minutes = flush_minutes
+        self.direct_flush_messages = max(3, min(direct_flush_messages, flush_messages))
         self.buffer_cap = max(buffer_cap, flush_messages)
         self.existing_limit = existing_limit
         self.max_actions = max_actions
@@ -339,12 +374,14 @@ class MemoryWorker:
         reply_to_name: Optional[str] = None,
         reply_to_content: Optional[str] = None,
         reply_is_bot: bool = False,
+        addressed_to_bot: bool = False,
     ) -> None:
         text = (content or "").strip()
         if not text:
             return
         key = (guild_id, channel_id)
         buf = self._buffers.setdefault(key, ChannelBuffer())
+        addressed = bool(addressed_to_bot or reply_is_bot)
         buf.messages.append(
             BufferedMessage(
                 author_id=author_id,
@@ -355,12 +392,17 @@ class MemoryWorker:
                 reply_to_name=reply_to_name,
                 reply_to_content=(reply_to_content or "")[:240] or None,
                 reply_is_bot=reply_is_bot,
+                addressed_to_bot=addressed,
             )
         )
         if len(buf.messages) > self.buffer_cap:
             buf.messages = buf.messages[-self.buffer_cap :]
 
-        if len(buf.messages) >= self.flush_messages and not buf.flushing:
+        should_flush = len(buf.messages) >= self.flush_messages
+        if not should_flush and addressed:
+            # Dialogue avec MARIA : flush plus tôt pour ancrer les faits tout de suite.
+            should_flush = len(buf.messages) >= self.direct_flush_messages
+        if should_flush and not buf.flushing:
             asyncio.create_task(self._flush_key(key))
 
     def _should_flush_timeout(self, buf: ChannelBuffer) -> bool:
@@ -413,6 +455,9 @@ class MemoryWorker:
         )
         batch_text = "\n".join(m.format_line() for m in batch)
         prior_text = "\n".join(m.format_line() for m in prior) if prior else ""
+        direct_user_ids = {
+            m.author_id for m in list(batch) + list(prior) if m.addressed_to_bot
+        }
         actions = await extract_memories(
             self.llm_client,
             model=self.model,
@@ -424,8 +469,8 @@ class MemoryWorker:
         )
         if not actions:
             logger.info(
-                "Flush mémoire : 0 action (guild=%s, msgs=%d)",
-                guild_id, len(batch),
+                "Flush mémoire : 0 action (guild=%s, msgs=%d, direct=%d)",
+                guild_id, len(batch), len(direct_user_ids),
             )
             return
         existing_by_user: dict[Optional[int], list[str]] = {}
@@ -436,6 +481,7 @@ class MemoryWorker:
                 guild_id, action,
                 allowed_ids=allowed_ids, name_by_id=name_by_id,
                 existing_by_user=existing_by_user,
+                direct_user_ids=direct_user_ids,
             )
         logger.info(
             "Flush mémoire : %d action(s) LLM (guild=%s, msgs=%d)",
@@ -450,6 +496,7 @@ class MemoryWorker:
         allowed_ids: Optional[set[int]] = None,
         name_by_id: Optional[dict[int, str]] = None,
         existing_by_user: Optional[dict[Optional[int], list[str]]] = None,
+        direct_user_ids: Optional[set[int]] = None,
     ) -> None:
         kind = (action.get("action") or "").strip()
         category = (action.get("category") or "user").strip()
@@ -480,6 +527,12 @@ class MemoryWorker:
 
         if not content:
             return
+        if len(content) > _MEMORY_CONTENT_MAX:
+            logger.debug("Mémoire rejetée (trop longue): %s", content[:60])
+            return
+        if is_too_vague(content):
+            logger.debug("Mémoire rejetée (trop vague): %s", content[:60])
+            return
 
         # Whitelist : user_id + ids dans content doivent être dans le lot.
         allowed = allowed_ids if allowed_ids is not None else None
@@ -505,12 +558,22 @@ class MemoryWorker:
             if is_near_duplicate(content, existing_contents):
                 logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
-            # user immuable → actif immédiat ; collectif → actif souple ;
-            # user ordinaire → pending (2 hits).
+            # stable / direct→MARIA / collectif → actif ; passif user → pending (2 hits).
             stable = bool(action.get("stable")) and category == "user"
             collective = category in (CATEGORY_SERVER, CATEGORY_EVENT)
-            if stable or collective:
-                conf = CONFIDENCE_STABLE if stable else CONFIDENCE_COLLECTIVE
+            from_direct = (
+                category == "user"
+                and user_id is not None
+                and direct_user_ids is not None
+                and user_id in direct_user_ids
+            )
+            if stable or collective or from_direct:
+                if stable:
+                    conf, label = CONFIDENCE_STABLE, "stable"
+                elif from_direct:
+                    conf, label = CONFIDENCE_DIRECT, "direct"
+                else:
+                    conf, label = CONFIDENCE_COLLECTIVE, "collectif"
                 mem = await asyncio.to_thread(
                     self.store.create,
                     category=category,
@@ -530,11 +593,7 @@ class MemoryWorker:
                     existing_by_user.setdefault(
                         user_id if category == "user" else None, [],
                     ).append(content)
-                logger.info(
-                    "Mémoire %s %s: %s",
-                    "stable" if stable else "collectif",
-                    mem.id[:8], mem.content[:60],
-                )
+                logger.info("Mémoire %s %s: %s", label, mem.id[:8], mem.content[:60])
                 return
             mem = await asyncio.to_thread(
                 self.store.create,
@@ -547,7 +606,7 @@ class MemoryWorker:
             )
             if existing_by_user is not None:
                 existing_by_user.setdefault(user_id, []).append(content)
-            logger.debug("Mémoire pending %s: %s", mem.id[:8], mem.content[:60])
+            logger.debug("Mémoire pending (passif) %s: %s", mem.id[:8], mem.content[:60])
             return
 
         if not target_id:
@@ -586,14 +645,29 @@ class MemoryWorker:
                     logger.debug("Update rejeté (ids content hors lot)")
                     return
             was_pending = existing.status == STATUS_PENDING
+            # Vague check aussi sur update
+            if len(new_content) > _MEMORY_CONTENT_MAX or is_too_vague(new_content):
+                logger.debug("Update rejeté (vague/long): %s", new_content[:60])
+                return
             mem = await asyncio.to_thread(
                 self.store.update_content,
                 target_id, new_content, confidence_delta=CONFIDENCE_UPDATE_DELTA,
             )
             if mem is None:
                 return
+            # Confirmation en parlant à MARIA → boost confiance / actif immédiat.
+            from_direct = (
+                mem.category == "user"
+                and mem.user_id is not None
+                and direct_user_ids is not None
+                and mem.user_id in direct_user_ids
+            )
+            if from_direct and mem.confidence < CONFIDENCE_STABLE:
+                mem = await asyncio.to_thread(
+                    self.store.promote_direct, mem.id, new_content,
+                ) or mem
             # Promotion pending → active : indexation Chroma seulement à ce moment.
-            if mem.status == STATUS_ACTIVE and (was_pending or mem.chroma_id):
+            if mem.status == STATUS_ACTIVE and (was_pending or mem.chroma_id or from_direct):
                 await asyncio.to_thread(
                     self.vectors.upsert,
                     mem.id, mem.content,
