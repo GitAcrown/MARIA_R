@@ -17,7 +17,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from common.dataio import CogData, DictTableBuilder
-from common.emojis import SETTINGS
 from common.llm import MariaGptApi, Tool, resolve_message_reference
 from common.memory import (
     MemoryStore,
@@ -67,6 +66,7 @@ from cogs.chat.tools_reminders import (
 )
 from cogs.chat.tools_discord import build_discord_tools
 from cogs.chat.tools_memory import build_memory_tools
+from cogs.chat.tools_self import build_self_tools
 
 # Détection d'une date JJ/MM/AAAA ou JJ/MM (année en cours) dans un message —
 # réaction pour créer un rappel en un clic.
@@ -131,7 +131,7 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "math_eval", "list_reminders", "show_reminders", "search_memory",
-    "remember_fact",
+    "remember_fact", "about_me",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table",
 })
@@ -148,7 +148,7 @@ def _fmt_delay(minutes: int) -> str:
 
 
 DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de potes.
-MODÈLE : {model} (OpenAI). Si on te demande sur quel modèle tu tournes, réponds exactement ça — n'invente pas une autre version.
+MODÈLE : {model} (OpenAI) — n'invente pas une autre version. Détails sur toi → about_me.
 
 Ton : naturelle, directe, concise. Bienveillante sans niaiserie, factuelle. Pas d'emojis. Argot du groupe seulement (pas d'expressions inventées). Si tu te trompes après vérif, dis-le.
 Réponses très courtes style tchat. Listes seulement si utiles. Markdown si structuré. Pas de saut de ligne pour une réponse simple. Pas de follow-up non demandé. Questions sérieuses → directe, sans morale.
@@ -175,6 +175,7 @@ MÉMOIRE (ordre) :
    - Ne force jamais l'échange mémoire : le tchat prime.
 
 OUTILS — n'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute ou trop récent → appelle l'outil, sinon dis que tu ne sais pas. Défaut : utilisateurs en France.
+- « t'es qui / comment tu marches / ta mémoire / tes outils / ton statut » → about_me
 - Fait / actu / « c'est quoi/qui… » / « ça existe ? » → search_web
 - Argot, slang, expression obscure → urban_dictionary
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media
@@ -269,59 +270,6 @@ class InfoView(discord.ui.LayoutView):
             session = discord.ui.TextDisplay("-# Aucune session active.")
 
         self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
-
-
-_TIPS_SECTIONS: list[tuple[str, str]] = [
-    (
-        "Lui parler",
-        "› Mentionne MARIA ou écris son nom (selon le mode du salon) pour lui parler.\n"
-        "› En mode *greedy*, citer son nom suffit.\n"
-        f"› {SETTINGS} `/chatbot mode` — règle quand MARIA répond sur ce serveur.",
-    ),
-    (
-        "Rappels",
-        "› Demande-lui un rappel en langage naturel (« rappelle-moi demain 18h », « tous les lundis à 8h »).\n"
-        "› `/rappels` — liste tes rappels et annule-les (y compris les séries).\n"
-        "› Une date JJ/MM/AAAA ou JJ/MM dans un message ? MARIA réagit avec 📅 — clique pour te créer un "
-        "rappel (elle lit le reste du message pour deviner de quoi il s'agit).\n"
-        f"› {SETTINGS} `/chatbot datedetect` — active/désactive cette détection sur un salon.",
-    ),
-    (
-        "Mémoire",
-        "› `/moi` — ta mémoire perso ; Retenir… / oublier une ligne / Tout oublier.\n"
-        "› `/global` — mémoire collective ; oublier une ligne / reset (modos).\n"
-        "› `/souvenirs` — derniers créés sur le serveur, pending inclus (modos).\n"
-        "› Elle n'enregistre que des faits précis ; perso = prudent, collectif = plus ouvert.\n"
-        "› Elle peut y faire allusion naturellement si ça colle au fil — jamais forcé.",
-    ),
-    (
-        "Recherche & infos",
-        "› Elle cherche le web pour les faits récents et définit l'argot (Urban Dictionary).\n"
-        "› Météo, films/séries, jeux Steam, scores de foot, images — demande simplement.",
-    ),
-    (
-        "Vocal",
-        "› Ajoute la réaction 🎙️ à un message vocal pour le transcrire à la demande.\n"
-        f"› {SETTINGS} `/chatbot autotranscribe` — transcription automatique des messages vocaux sur un salon.",
-    ),
-]
-
-
-class TipsView(discord.ui.LayoutView):
-    """Astuces statiques pour exploiter MARIA."""
-
-    def __init__(self):
-        super().__init__(timeout=180)
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## Tirer le meilleur de MARIA"),
-            discord.ui.TextDisplay(f"-# {SETTINGS} = commande réservée aux modérateurs."),
-            discord.ui.Separator(),
-        ]
-        for i, (title, body) in enumerate(_TIPS_SECTIONS):
-            children.append(discord.ui.TextDisplay(f"**{title}**\n{body}"))
-            if i < len(_TIPS_SECTIONS) - 1:
-                children.append(discord.ui.Separator())
-        self.add_item(discord.ui.Container(*children))
 
 
 class AddPersonalMemoryModal(discord.ui.Modal, title="À retenir sur moi"):
@@ -1407,6 +1355,11 @@ class Chat(commands.Cog):
         tools.extend(build_reminder_tools(self.rappels))
         tools.extend(build_discord_tools())
         tools.extend(build_memory_tools(self.memory_store, self.memory_vectors))
+        tools.extend(build_self_tools(
+            bot=self.bot,
+            bot_name=getattr(self.bot.user, "name", None) or "MARIA",
+            model=MODEL_MAIN,
+        ))
 
         self.gpt_api.update_tools(tools)
 
@@ -1844,10 +1797,6 @@ class Chat(commands.Cog):
     # ------------------------------------------------------------------
     # Slash commands
     # ------------------------------------------------------------------
-
-    @app_commands.command(name="tips", description="Quelques astuces pour utiliser MARIA")
-    async def cmd_tips(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(view=TipsView(), ephemeral=True)
 
     @app_commands.command(name="rappels", description="Tes rappels en attente — liste et annulation")
     async def cmd_rappels(self, interaction: discord.Interaction) -> None:
