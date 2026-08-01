@@ -47,47 +47,58 @@ def _discord_snapshot(bot: Optional[commands.Bot], guild: Optional[discord.Guild
     user = bot.user
     me = guild.me if guild is not None else None
 
-    status_cog = bot.get_cog("Status")
-    status_from_cog = (getattr(status_cog, "current_status", None) or "").strip() or None
-    status_from_activity = _activity_label(bot.activity)
-    if not status_from_activity and bot.activities:
-        for act in bot.activities:
-            status_from_activity = _activity_label(act)
-            if status_from_activity:
-                break
+    try:
+        status_cog = bot.get_cog("Status")
+        status_from_cog = (getattr(status_cog, "current_status", None) or "").strip() or None
+        status_from_activity = _activity_label(getattr(bot, "activity", None))
+        # Client/Bot n'exposent que `.activity` (singulier) — pas `.activities`.
+        if not status_from_activity:
+            for act in getattr(bot, "activities", ()) or ():
+                status_from_activity = _activity_label(act)
+                if status_from_activity:
+                    break
 
-    presence = "online" if bot.is_ready() else "offline"
-    if me is not None:
+        presence = "online" if bot.is_ready() else "offline"
+        if me is not None:
+            try:
+                presence = str(me.status)
+            except Exception:
+                pass
+
+        roles: list[str] = []
+        if me is not None:
+            roles = [r.name for r in me.roles if r.name != "@everyone"][-8:]
+
+        latency_ms = None
         try:
-            presence = str(me.status)
+            if bot.latency is not None and bot.latency == bot.latency:  # pas NaN
+                latency_ms = int(round(bot.latency * 1000))
         except Exception:
             pass
 
-    roles: list[str] = []
-    if me is not None:
-        roles = [r.name for r in me.roles if r.name != "@everyone"][-8:]
-
-    return {
-        "available": True,
-        "id": str(user.id),
-        "username": user.name,
-        "display_name": (me.display_name if me is not None else None)
-        or getattr(user, "display_name", None)
-        or user.name,
-        "global_name": getattr(user, "global_name", None),
-        "presence": presence,
-        "status_text": status_from_cog or status_from_activity,
-        "avatar_url": str(user.display_avatar.url) if user.display_avatar else None,
-        "created_at": user.created_at.strftime("%Y-%m-%d"),
-        "joined_server": (
-            me.joined_at.strftime("%Y-%m-%d") if me is not None and me.joined_at else None
-        ),
-        "roles": roles,
-        "latency_ms": round(bot.latency * 1000) if bot.latency is not None else None,
-        "guild_count": len(bot.guilds),
-        "current_server": guild.name if guild is not None else None,
-        "current_server_id": str(guild.id) if guild is not None else None,
-    }
+        return {
+            "available": True,
+            "id": str(user.id),
+            "username": user.name,
+            "display_name": (me.display_name if me is not None else None)
+            or getattr(user, "display_name", None)
+            or user.name,
+            "global_name": getattr(user, "global_name", None),
+            "presence": presence,
+            "status_text": status_from_cog or status_from_activity,
+            "avatar_url": str(user.display_avatar.url) if user.display_avatar else None,
+            "created_at": user.created_at.strftime("%Y-%m-%d"),
+            "joined_server": (
+                me.joined_at.strftime("%Y-%m-%d") if me is not None and me.joined_at else None
+            ),
+            "roles": roles,
+            "latency_ms": latency_ms,
+            "guild_count": len(bot.guilds),
+            "current_server": guild.name if guild is not None else None,
+            "current_server_id": str(guild.id) if guild is not None else None,
+        }
+    except Exception as e:
+        return {"available": False, "error": f"snapshot Discord: {type(e).__name__}: {e}"}
 
 
 def _dossier(bot_name: str, model: str) -> dict:
@@ -157,8 +168,8 @@ def build_self_tools(
     name = (bot_name or "MARIA").strip() or "MARIA"
 
     async def _tool_about_me(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-        args = tc.arguments or {}
-        topic = (args.get("topic") or "all").strip().lower()
+        raw_topic = (tc.arguments or {}).get("topic")
+        topic = str(raw_topic or "all").strip().lower()
         if topic not in _TOPICS:
             topic = "all"
 
@@ -169,7 +180,7 @@ def build_self_tools(
         live = _discord_snapshot(bot, guild)
         live_name = live.get("display_name") or name
 
-        data = _dossier(live_name, resolved_model)
+        data = _dossier(str(live_name), resolved_model)
         base = {
             "name": data["name"],
             "model": data["model"],
@@ -178,26 +189,17 @@ def build_self_tools(
         }
 
         if topic == "discord":
-            return ToolResponseRecord(
-                tc.id,
-                {**base, "topic": "discord", "section": data["sections"]["discord"]},
-                datetime.now(timezone.utc),
-            )
-        if topic != "all":
-            return ToolResponseRecord(
-                tc.id,
-                {
-                    **base,
-                    "topic": topic,
-                    "section": data["sections"].get(topic, ""),
-                },
-                datetime.now(timezone.utc),
-            )
-        return ToolResponseRecord(
-            tc.id,
-            {**base, "topic": "all", "sections": data["sections"]},
-            datetime.now(timezone.utc),
-        )
+            payload = {**base, "topic": "discord", "section": data["sections"]["discord"]}
+        elif topic != "all":
+            payload = {
+                **base,
+                "topic": topic,
+                "section": data["sections"].get(topic, ""),
+            }
+        else:
+            payload = {**base, "topic": "all", "sections": data["sections"]}
+
+        return ToolResponseRecord(tc.id, payload, datetime.now(timezone.utc))
 
     return [
         Tool(
