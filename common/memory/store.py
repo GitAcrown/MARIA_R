@@ -19,7 +19,8 @@ DB_PATH = DATA_DIR / "memories.db"
 CATEGORY_USER = "user"
 CATEGORY_SERVER = "server"
 CATEGORY_EVENT = "event"
-VALID_CATEGORIES = (CATEGORY_USER, CATEGORY_SERVER, CATEGORY_EVENT)
+CATEGORY_SELF = "self"  # goûts / faits sur MARIA elle-même (globaux)
+VALID_CATEGORIES = (CATEGORY_USER, CATEGORY_SERVER, CATEGORY_EVENT, CATEGORY_SELF)
 
 STATUS_ACTIVE = "active"
 STATUS_PENDING = "pending"
@@ -244,6 +245,20 @@ class MemoryStore:
             out.append(m)
         return out
 
+    def list_self(self, *, limit: int = 20) -> list[Memory]:
+        """Goûts / faits sur MARIA (globaux, tous serveurs)."""
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE status = ? AND category = ?
+                ORDER BY confidence DESC, confirmed_at DESC
+                LIMIT ?
+                """,
+                (STATUS_ACTIVE, CATEGORY_SELF, max(1, min(limit, 40))),
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
     def list_server(
         self,
         guild_id: int,
@@ -307,11 +322,12 @@ class MemoryStore:
         user_id: Optional[int] = None,
         limit: int = 20,
     ) -> list[Memory]:
-        """Recherche textuelle sur les souvenirs actifs (user globaux + serveur local).
+        """Recherche textuelle sur les souvenirs actifs.
 
         - category=user : perso (tous serveurs), filtre user_id optionnel
+        - category=self : goûts MARIA (globaux)
         - category=server|event : ce guild uniquement
-        - category=None : user (globaux) + server/event du guild
+        - category=None : user + self (globaux) + server/event du guild
         """
         q = (query or "").strip().lower()
         limit = max(1, min(limit, 30))
@@ -331,6 +347,19 @@ class MemoryStore:
                     params.append(f"%{q}%")
                 sql += " ORDER BY confidence DESC, confirmed_at DESC LIMIT ?"
                 params.append(limit if category == CATEGORY_USER else limit)
+                rows.extend(conn.execute(sql, params).fetchall())
+
+            if category == CATEGORY_SELF or (category is None and user_id is None):
+                sql = """
+                    SELECT * FROM memories
+                    WHERE status = ? AND category = ?
+                """
+                params = [STATUS_ACTIVE, CATEGORY_SELF]
+                if q:
+                    sql += " AND lower(content) LIKE ?"
+                    params.append(f"%{q}%")
+                sql += " ORDER BY confidence DESC, confirmed_at DESC LIMIT ?"
+                params.append(limit if category == CATEGORY_SELF else limit)
                 rows.extend(conn.execute(sql, params).fetchall())
 
             if category in (CATEGORY_SERVER, CATEGORY_EVENT) or category is None:

@@ -101,12 +101,23 @@ class VectorStore:
                 "$or": [
                     {"guild_id": int(guild_id)},
                     {"$and": [{"category": "user"}, {"user_id": int(user_id)}]},
+                    {"category": "self"},
                 ]
             }
         elif guild_id is not None:
-            where = {"guild_id": int(guild_id)}
+            where = {
+                "$or": [
+                    {"guild_id": int(guild_id)},
+                    {"category": "self"},
+                ]
+            }
         elif user_id is not None:
-            where = {"$and": [{"category": "user"}, {"user_id": int(user_id)}]}
+            where = {
+                "$or": [
+                    {"$and": [{"category": "user"}, {"user_id": int(user_id)}]},
+                    {"category": "self"},
+                ]
+            }
 
         try:
             kwargs: dict = {

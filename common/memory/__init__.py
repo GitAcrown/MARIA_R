@@ -1,6 +1,11 @@
 """Mémoire long terme — SQLite + Chroma, agent d'extraction, RAG."""
 
-from common.memory.rag import build_profile_ctx, format_memory_ctx, retrieve_memories
+from common.memory.rag import (
+    build_profile_ctx,
+    build_self_ctx,
+    format_memory_ctx,
+    retrieve_memories,
+)
 from common.memory.store import Memory, MemoryStore
 from common.memory.worker import MemoryWorker
 
@@ -9,6 +14,7 @@ __all__ = [
     "MemoryStore",
     "MemoryWorker",
     "build_profile_ctx",
+    "build_self_ctx",
     "format_memory_ctx",
     "retrieve_memories",
 ]

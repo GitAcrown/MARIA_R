@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Optional
 
-from common.memory.store import STATUS_ACTIVE, Memory, MemoryStore
+from common.memory.store import CATEGORY_SELF, STATUS_ACTIVE, Memory, MemoryStore
 from common.memory.vector import VectorStore
 
 logger = logging.getLogger("MARIA.Memory.RAG")
@@ -19,6 +19,42 @@ _DEDUP_RE = re.compile(r"\s+")
 
 def _norm_content(text: str) -> str:
     return _DEDUP_RE.sub(" ", (text or "").strip().lower())
+
+
+def build_self_ctx(
+    store: MemoryStore,
+    *,
+    bot_name: str = "MARIA",
+    limit: int = 8,
+) -> tuple[str, set[str]]:
+    """Goûts / faits retenus sur MARIA — injectés pour rester constante."""
+    memories = store.list_self(limit=limit)
+    if not memories:
+        return "", set()
+
+    name = (bot_name or "MARIA").strip() or "MARIA"
+    seen: set[str] = set()
+    facts: list[str] = []
+    for m in memories:
+        content = (m.content or "").strip()
+        if not content:
+            continue
+        seen.add(_norm_content(content))
+        stripped = content
+        for prefix in (f"{name} :", f"{name}:", "MARIA :", "MARIA:"):
+            if stripped.lower().startswith(prefix.lower()):
+                stripped = stripped[len(prefix) :].strip()
+                break
+        facts.append(stripped or content)
+    if not facts:
+        return "", seen
+
+    header = (
+        f"TES GOÛTS / TOI ({name}) — sois constante : réutilise ces préférences "
+        "quand tu donnes un avis perso ; ne les contredis pas sans qu'on te le demande ; "
+        "ne récite pas la liste :"
+    )
+    return header + "\n- " + " · ".join(facts), seen
 
 
 def build_profile_ctx(
@@ -117,13 +153,16 @@ def retrieve_memories(
             continue
         if _norm_content(m.content) in exclude:
             continue
-        # Perso : global. Collectif / event : guild courant uniquement.
+        # Perso / self : globaux. Collectif / event : guild courant uniquement.
         if m.category == "user":
             if m.user_id != author_id:
                 continue
             # Déjà couvert par les profils → évite le doublon perso dans le RAG.
             if prefer_collective:
                 continue
+        elif m.category == CATEGORY_SELF:
+            # Déjà injecté via TES GOÛTS — pas de doublon RAG.
+            continue
         elif m.guild_id != guild_id:
             continue
         candidates.append(m)

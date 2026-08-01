@@ -91,7 +91,7 @@ DIRECT vs PASSIF (critique pour le perso) :
   seulement faits très clairs, non ambigus, non sarcastiques. En cas de doute → skip.
 - Collectif : OK depuis le passif si le gag/habitude est identifiable et précis.
 
-DEUX BARRES :
+TROIS BARRES :
 1) COLLECTIF (server/event) — plus ouvert, mais toujours précis.
    Gags nommables, habitudes concrètes, soirées/voyages clairement identifiés.
    Plusieurs gens → server. user_id=null, stable=false, pas d'ids Discord dans content.
@@ -99,8 +99,9 @@ DEUX BARRES :
    DIRECT `[→ MARIA]` : affirmations à MARIA = bonne source.
    PASSIF : seulement si affirmé net / répété. Liens : « Alice (111) ↔ Bob (222) : coloc ».
    Pattern (2e fois) → déduction hedgée précise ; 1re → observation détaillée.
-
-BOT = « {bot_name} » / MARIA. JAMAIS de souvenir user sur le bot.
+BOT = « {bot_name} » / MARIA.
+JAMAIS category=self (goûts MARIA) — gérés ailleurs, réservés au créateur.
+JAMAIS category=user avec l'id du bot.
 Blagues sur le bot → ignore, sauf gag collectif précis → server.
 
 IGNORE : actu/score du jour, blabla, image non décrite, transfert non repris,

@@ -12,7 +12,9 @@ import discord
 
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.memory.store import (
+    CATEGORY_SELF,
     CATEGORY_USER,
+    CONFIDENCE_DIRECT,
     CONFIDENCE_STABLE,
     STATUS_ACTIVE,
     STATUS_PENDING,
@@ -21,7 +23,13 @@ from common.memory.store import (
     MemoryStore,
 )
 from common.memory.vector import VectorStore
-from common.memory.worker import is_near_duplicate, is_too_vague, sanitize_memory_content
+from common.memory.worker import (
+    is_near_duplicate,
+    is_too_vague,
+    normalize_self_memory,
+    sanitize_memory_content,
+)
+from discord.ext import commands
 
 logger = logging.getLogger("MARIA.Chat.MemoryTools")
 
@@ -48,7 +56,12 @@ def _find_near_duplicate(memories: list[Memory], content: str) -> Optional[Memor
     return None
 
 
-def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
+def build_memory_tools(
+    store: MemoryStore,
+    vectors: VectorStore,
+    *,
+    bot: Optional[commands.Bot] = None,
+) -> list[Tool]:
     """Construit search_memory + remember_fact."""
 
     async def _tool_search_memory(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -71,7 +84,8 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
                 return ToolResponseRecord(
                     tc.id, {"error": "user_id invalide"}, datetime.now(timezone.utc),
                 )
-            category = "user"
+            if category != CATEGORY_SELF:
+                category = "user"
 
         memories = store.search_active(
             guild_id,
@@ -101,7 +115,7 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         }, datetime.now(timezone.utc))
 
     async def _tool_remember_fact(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
-        """Écrit / met à jour un fait perso après affirmation ou confirmation en tchat."""
+        """Écrit / met à jour un fait perso (membre) ou un goût MARIA (about_self)."""
         if not ctx or not ctx.trigger_message or not ctx.trigger_message.guild:
             return ToolResponseRecord(
                 tc.id, {"error": "Disponible uniquement sur un serveur"}, datetime.now(timezone.utc),
@@ -115,6 +129,133 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
             return ToolResponseRecord(
                 tc.id, {"error": "fact vide"}, datetime.now(timezone.utc),
             )
+
+        about_self = bool(args.get("about_self", False))
+        bot_user = guild.me
+        bot_name = (
+            (bot_user.display_name if bot_user else None)
+            or getattr(guild.me, "name", None)
+            or "MARIA"
+        )
+
+        if about_self:
+            # own = tu te forges un goût ; owner = le créateur force / corrige.
+            source = str(args.get("self_source") or "own").strip().lower()
+            if source not in ("own", "owner"):
+                source = "own"
+            if bot is None:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Contrôle owner indisponible"}, datetime.now(timezone.utc),
+                )
+            try:
+                is_owner = await bot.is_owner(msg.author)
+            except Exception:
+                is_owner = False
+            if source == "owner" and not is_owner:
+                return ToolResponseRecord(
+                    tc.id,
+                    {
+                        "error": (
+                            "Seul le créateur (owner) peut forcer un goût. "
+                            "Si c'est ton avis à toi → self_source=own. "
+                            "Si un non-owner te dicte un goût → refuse, n'appelle pas l'outil."
+                        ),
+                        "refused": True,
+                    },
+                    datetime.now(timezone.utc),
+                )
+            if bot_user is None:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Bot introuvable sur ce serveur"}, datetime.now(timezone.utc),
+                )
+            content = normalize_self_memory(fact, bot_name=bot_name)
+            if len(content) > _CONTENT_MAX or is_too_vague(content):
+                return ToolResponseRecord(
+                    tc.id,
+                    {
+                        "error": (
+                            "Goût trop vague ou trop long — reformule avec un détail "
+                            "(ex. « préfère le café noir », « déteste le foot »)."
+                        ),
+                    },
+                    datetime.now(timezone.utc),
+                )
+            self_mems = await asyncio.to_thread(store.list_self, limit=40)
+            target: Optional[Memory] = None
+            raw_mid = (args.get("memory_id") or "").strip()
+            if raw_mid:
+                cand = await asyncio.to_thread(store.get, raw_mid)
+                if (
+                    cand is None
+                    or cand.category != CATEGORY_SELF
+                    or cand.status not in (STATUS_ACTIVE, STATUS_PENDING)
+                ):
+                    return ToolResponseRecord(
+                        tc.id,
+                        {"error": "memory_id invalide (pas un goût self)"},
+                        datetime.now(timezone.utc),
+                    )
+                target = cand
+            else:
+                target = _find_near_duplicate(self_mems, content)
+
+            if target is not None:
+                mem = await asyncio.to_thread(
+                    store.update_content, target.id, content, confidence_delta=0.2,
+                )
+                if mem is None:
+                    return ToolResponseRecord(
+                        tc.id, {"error": "Mise à jour échouée"}, datetime.now(timezone.utc),
+                    )
+                if mem.status == STATUS_ACTIVE:
+                    await asyncio.to_thread(
+                        vectors.upsert,
+                        mem.id, mem.content,
+                        category=mem.category, guild_id=mem.guild_id,
+                        user_id=mem.user_id, confidence=mem.confidence,
+                    )
+                logger.info(
+                    "remember_fact self update (%s) %s → %s",
+                    source, mem.id[:8], content[:60],
+                )
+                return ToolResponseRecord(tc.id, {
+                    "ok": True,
+                    "action": "updated",
+                    "about_self": True,
+                    "self_source": source,
+                    "memory_id": mem.id,
+                    "content": mem.content,
+                    "_llm_summary": f"Goût retenu (toi) : {content}",
+                }, datetime.now(timezone.utc))
+
+            mem = await asyncio.to_thread(
+                store.create,
+                category=CATEGORY_SELF,
+                guild_id=guild.id,
+                content=content,
+                user_id=bot_user.id,
+                confidence=CONFIDENCE_DIRECT,
+                status=STATUS_ACTIVE,
+            )
+            await asyncio.to_thread(
+                vectors.upsert,
+                mem.id, mem.content,
+                category=mem.category, guild_id=mem.guild_id,
+                user_id=mem.user_id, confidence=mem.confidence,
+            )
+            logger.info(
+                "remember_fact self create (%s) %s → %s",
+                source, mem.id[:8], content[:60],
+            )
+            return ToolResponseRecord(tc.id, {
+                "ok": True,
+                "action": "created",
+                "about_self": True,
+                "self_source": source,
+                "memory_id": mem.id,
+                "content": mem.content,
+                "_llm_summary": f"Goût retenu (toi) : {content}",
+            }, datetime.now(timezone.utc))
 
         raw_uid = (args.get("user_id") or "").strip()
         if raw_uid:
@@ -141,10 +282,16 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
                 datetime.now(timezone.utc),
             )
 
-        bot_user = guild.me
         if bot_user is not None and user_id == bot_user.id:
             return ToolResponseRecord(
-                tc.id, {"error": "Impossible de retenir un fait sur le bot"}, datetime.now(timezone.utc),
+                tc.id,
+                {
+                    "error": (
+                        "Pour un goût / fait sur toi-même, rappelle avec about_self=true "
+                        "(pas user_id du bot)."
+                    ),
+                },
+                datetime.now(timezone.utc),
             )
 
         member = guild.get_member(user_id)
@@ -175,7 +322,7 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         ]
 
         # Cible explicite (id renvoyé par search_memory) ou quasi-doublon uniquement.
-        target: Optional[Memory] = None
+        target = None
         raw_mid = (args.get("memory_id") or "").strip()
         if raw_mid:
             cand = await asyncio.to_thread(store.get, raw_mid)
@@ -196,7 +343,6 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
 
         if target is not None:
             was_pending = target.status != STATUS_ACTIVE
-            # Remplace le contenu par le fait canonique (1 souvenir = 1 fait).
             mem = await asyncio.to_thread(
                 store.update_content, target.id, content, confidence_delta=0.2,
             )
@@ -256,11 +402,10 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         Tool(
             name="search_memory",
             description=(
-                "Mémoire long terme (lecture seule). Les PROFILS du prompt couvrent déjà "
-                "auteur + mentions — ne pas rappeler pour ça. "
-                "Pour : membre/sujet ABSENT des profils, énumérer, filtrer par mot-clé. "
-                "Renvoie aussi l'id de chaque souvenir (utile pour remember_fact). "
-                "Pas d'écriture — pour écrire utilise remember_fact."
+                "Mémoire long terme (lecture seule). Les PROFILS + TES GOÛTS du prompt "
+                "couvrent déjà auteur/mentions et toi — ne pas rappeler pour ça. "
+                "Pour : membre/sujet ABSENT, énumérer, category=self pour tes goûts. "
+                "Renvoie aussi l'id (utile pour remember_fact). Pas d'écriture."
             ),
             properties={
                 "query": {
@@ -270,7 +415,7 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
                 "category": {
                     "type": "string",
                     "enum": list(VALID_CATEGORIES),
-                    "description": "Filtrer par catégorie. Omettre pour user+server+event.",
+                    "description": "Filtrer (self = tes goûts). Omettre = user+self+server+event.",
                 },
                 "user_id": {
                     "type": "string",
@@ -283,38 +428,51 @@ def build_memory_tools(store: MemoryStore, vectors: VectorStore) -> list[Tool]:
         Tool(
             name="remember_fact",
             description=(
-                "Écrit ou met à jour TOUT DE SUITE un fait perso précis (1 fait = 1 souvenir). "
-                "Seulement si affirmé clairement OU confirmé après une conf light — "
-                "jamais sur une déduction non validée. "
+                "Écrit ou met à jour TOUT DE SUITE un fait précis (1 fait = 1 souvenir). "
+                "Membre : affirmé/confirmé clairement — jamais déduction seule. "
+                "Toi (goûts) : about_self=true + self_source : "
+                "own = tu te forges un avis perso net que tu veux garder ; "
+                "owner = le créateur te force/corrige un goût (refuse si pas owner). "
+                "Un non-owner qui te dicte un goût → refuse, n'appelle pas l'outil. "
                 "Avant « noté » / « j'ai retenu » : appelle cet outil. "
-                "fact = détail complet (« anniversaire le 22 juillet 1999 ») — "
-                "refuse le vague (« aime les jeux », « anniv en juillet »). "
-                "stable=true pour anniv/date de naissance. "
-                "memory_id optionnel pour remplacer un souvenir (via search_memory)."
+                "stable=true pour anniv (membres seulement). "
+                "memory_id optionnel pour remplacer un souvenir."
             ),
             properties={
                 "fact": {
                     "type": "string",
                     "description": (
                         "Un seul fait PRÉCIS, sans préfixe pseudo "
-                        "(ex: « anniversaire le 22 juillet 1999 », "
-                        "« habite à Lyon 3e », « main Jett sur Valorant »)."
+                        "(membre : « anniversaire le 22 juillet 1999 » ; "
+                        "toi : « préfère le café noir », « déteste le foot »)."
                     ),
                 },
                 "user_id": {
                     "type": "string",
-                    "description": "Id Discord concerné (défaut = auteur du FOCUS).",
+                    "description": "Id Discord concerné (défaut = auteur). Ignoré si about_self.",
+                },
+                "about_self": {
+                    "type": "boolean",
+                    "description": "true = goût / fait sur TOI (MARIA), pas sur un membre.",
+                },
+                "self_source": {
+                    "type": "string",
+                    "enum": ["own", "owner"],
+                    "description": (
+                        "own = ton avis à toi ; owner = forcé par le créateur "
+                        "(nécessite que l'auteur soit owner)."
+                    ),
                 },
                 "stable": {
                     "type": "boolean",
-                    "description": "true si fait immuable (anniversaire, date de naissance).",
+                    "description": "true si fait immuable membre (anniversaire, date de naissance).",
                 },
                 "memory_id": {
                     "type": "string",
                     "description": "Id d'un souvenir existant à mettre à jour (optionnel).",
                 },
             },
-            optional_props=["user_id", "stable", "memory_id"],
+            optional_props=["user_id", "about_self", "self_source", "stable", "memory_id"],
             function=_tool_remember_fact,
         ),
     ]

@@ -15,6 +15,7 @@ from discord.ext import tasks
 from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
     CATEGORY_EVENT,
+    CATEGORY_SELF,
     CATEGORY_SERVER,
     CONFIDENCE_COLLECTIVE,
     CONFIDENCE_DIRECT,
@@ -273,6 +274,22 @@ def normalize_user_memory(
     return resolved, _clip(f"{canonical} : {fact}")
 
 
+def normalize_self_memory(content: str, *, bot_name: str = "MARIA") -> str:
+    """« MARIA : goût précis » — pas d'id Discord."""
+    content = sanitize_memory_content(content)
+    if not content:
+        return ""
+    name = (bot_name or "MARIA").strip() or "MARIA"
+    if ":" in content:
+        left, _, right = content.partition(":")
+        if len(left) <= 40 and not re.search(r"\d{17,20}", left):
+            content = right.strip() or content
+    content = _SNOWFLAKE_PARENS_RE.sub("", content).strip()
+    if not content:
+        return ""
+    return _clip(f"{name} : {content}")
+
+
 @dataclass
 class BufferedMessage:
     author_id: int
@@ -453,6 +470,11 @@ class MemoryWorker:
         existing = await asyncio.to_thread(
             self.store.list_for_users, guild_id, allowed_ids, limit=self.existing_limit,
         )
+        self_existing = await asyncio.to_thread(
+            self.store.list_self, limit=min(15, self.existing_limit),
+        )
+        if self_existing:
+            existing = list(existing) + list(self_existing)
         batch_text = "\n".join(m.format_line() for m in batch)
         prior_text = "\n".join(m.format_line() for m in prior) if prior else ""
         direct_user_ids = {
@@ -475,7 +497,8 @@ class MemoryWorker:
             return
         existing_by_user: dict[Optional[int], list[str]] = {}
         for m in existing:
-            existing_by_user.setdefault(m.user_id, []).append(m.content)
+            key = m.user_id if m.category != CATEGORY_SELF else self.bot_user_id
+            existing_by_user.setdefault(key, []).append(m.content)
         for action in actions[: self.max_actions]:
             await self._apply_action(
                 guild_id, action,
@@ -509,7 +532,11 @@ class MemoryWorker:
         raw_content = action.get("content") or ""
         names = name_by_id or {}
 
-        # Jamais de souvenir perso (ni update) attribué au bot Discord.
+        # Goûts MARIA (self) : jamais via extraction — réservés au owner (remember_fact).
+        if category == CATEGORY_SELF:
+            return
+
+        # Jamais de souvenir *user* attribué au bot Discord.
         if self.bot_user_id is not None and user_id == self.bot_user_id:
             return
 
@@ -535,8 +562,13 @@ class MemoryWorker:
             return
 
         # Whitelist : user_id + ids dans content doivent être dans le lot.
+        # self : user_id = bot (hors lot) — OK si le lot contient au moins un msg → MARIA.
         allowed = allowed_ids if allowed_ids is not None else None
-        if allowed is not None:
+        if category == CATEGORY_SELF:
+            if not direct_user_ids:
+                logger.debug("Mémoire self rejetée (pas de dialogue → MARIA)")
+                return
+        elif allowed is not None:
             if user_id is not None and user_id not in allowed:
                 logger.debug("Mémoire rejetée (user_id hors lot): %s", user_id)
                 return
@@ -551,27 +583,35 @@ class MemoryWorker:
         if kind == "create":
             if category == "user" and user_id is None:
                 return
+            if category == CATEGORY_SELF and user_id is None:
+                return
             # Dédup : fait quasi identique déjà en base pour cette personne/ce serveur.
-            existing_contents = (existing_by_user or {}).get(
-                user_id if category == "user" else None, [],
-            )
+            dedup_key: Optional[int]
+            if category == "user":
+                dedup_key = user_id
+            elif category == CATEGORY_SELF:
+                dedup_key = self.bot_user_id
+            else:
+                dedup_key = None
+            existing_contents = (existing_by_user or {}).get(dedup_key, [])
             if is_near_duplicate(content, existing_contents):
                 logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
-            # stable / direct→MARIA / collectif → actif ; passif user → pending (2 hits).
+            # stable / direct→MARIA / collectif / self → actif ; passif user → pending.
             stable = bool(action.get("stable")) and category == "user"
             collective = category in (CATEGORY_SERVER, CATEGORY_EVENT)
+            is_self = category == CATEGORY_SELF
             from_direct = (
                 category == "user"
                 and user_id is not None
                 and direct_user_ids is not None
                 and user_id in direct_user_ids
             )
-            if stable or collective or from_direct:
+            if stable or collective or from_direct or is_self:
                 if stable:
                     conf, label = CONFIDENCE_STABLE, "stable"
-                elif from_direct:
-                    conf, label = CONFIDENCE_DIRECT, "direct"
+                elif is_self or from_direct:
+                    conf, label = CONFIDENCE_DIRECT, "self" if is_self else "direct"
                 else:
                     conf, label = CONFIDENCE_COLLECTIVE, "collectif"
                 mem = await asyncio.to_thread(
@@ -590,9 +630,7 @@ class MemoryWorker:
                     user_id=mem.user_id, confidence=mem.confidence,
                 )
                 if existing_by_user is not None:
-                    existing_by_user.setdefault(
-                        user_id if category == "user" else None, [],
-                    ).append(content)
+                    existing_by_user.setdefault(dedup_key, []).append(content)
                 logger.info("Mémoire %s %s: %s", label, mem.id[:8], mem.content[:60])
                 return
             mem = await asyncio.to_thread(
@@ -614,9 +652,12 @@ class MemoryWorker:
         existing = await asyncio.to_thread(self.store.get, target_id)
         if existing is None:
             return
+        # Goûts self : lecture seule côté extracteur (owner via remember_fact uniquement).
+        if existing.category == CATEGORY_SELF:
+            return
         if self.bot_user_id is not None and existing.user_id == self.bot_user_id:
             return
-        # Souvenirs user = globaux ; server/event restent scopés au guild.
+        # user = globaux ; server/event restent scopés au guild.
         if existing.category != "user" and existing.guild_id != guild_id:
             return
 

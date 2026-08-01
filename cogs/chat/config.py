@@ -32,3 +32,5 @@ MEMORY_BATCH_OVERLAP = 8
 # Mini-profils injectés à chaque réponse (auteur + mentions/reply).
 MEMORY_PROFILE_FACTS = 5
 MEMORY_PROFILE_MAX_OTHERS = 3
+# Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).
+MEMORY_SELF_FACTS = 8

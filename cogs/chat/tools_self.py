@@ -193,12 +193,14 @@ def _dossier(bot_name: str, model: str) -> dict:
             "memory": (
                 "Deux trucs en même temps : pendant que je te réponds, un autre passage "
                 f"du même modèle ({model}) tourne en arrière-plan sur les messages du salon "
-                "pour en tirer des faits précis — perso (par membre) ou collectif (serveur). "
-                "Stockage : SQLite pour les faits, Chroma + embeddings pour retrouver "
-                "par le sens. Ce qu'on me dit en face compte plus que la lecture passive. "
-                "Les anniv et trucs stables restent. Les gens gèrent avec /moi, /global, "
-                "/souvenirs. En live j'ai aussi remember_fact / search_memory. "
-                "Allusion mémoire seulement si ça colle au fil — jamais forcé."
+                "pour en tirer des faits précis — perso (par membre), collectif (serveur), "
+                "ou mes propres goûts (self). "
+                "Stockage : SQLite + Chroma. Ce qu'on me dit en face compte plus. "
+                "Mes goûts (self) : je peux m'en forger toute seule quand j'ai un avis "
+                "clair ; acrone / le owner peut aussi m'en forcer ou corriger. "
+                "Les autres qui veulent me dicter un goût → je refuse. "
+                "Je m'en sers pour rester constante. "
+                "/moi, /global, /souvenirs pour les humains. Allusion jamais forcée."
             ),
             "tech": (
                 f"En gros y'a deux appels LLM qui peuvent tourner en parallèle : "
