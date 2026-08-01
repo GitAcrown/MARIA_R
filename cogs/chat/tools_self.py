@@ -5,6 +5,7 @@ Hors du prompt système — chargée à la demande via l'outil `about_me`.
 
 from __future__ import annotations
 
+import platform
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -15,6 +16,10 @@ from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.llm.client import MODEL_FALLBACK, MODEL_TRANSCRIBE
 from common.memory.vector import EMBEDDING_MODEL
 from cogs.chat.config import MODEL_MAIN
+
+# Faits stables (hors live) — créateur / hébergement prévu.
+CREATOR = "acrone"
+HOSTING = "Raspberry Pi"
 
 _TOPICS = (
     "identity",
@@ -111,11 +116,39 @@ def _discord_snapshot(bot: Optional[commands.Bot], guild: Optional[discord.Guild
         return {"available": False, "error": f"snapshot Discord: {type(e).__name__}: {e}"}
 
 
+def _host_snapshot() -> dict[str, Any]:
+    """Machine / runtime live (Python, OS, archi…) + faits hébergement."""
+    try:
+        return {
+            "available": True,
+            "creator": CREATOR,
+            "hosting": HOSTING,
+            "python": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "processor": (platform.processor() or "").strip() or None,
+            "hostname": platform.node(),
+            "discord_py": discord.__version__,
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "creator": CREATOR,
+            "hosting": HOSTING,
+            "error": f"snapshot host: {type(e).__name__}: {e}",
+        }
+
+
 def _dossier(bot_name: str, model: str) -> dict:
     """Fiche interne — le LLM reformule, il ne lit pas ça à voix haute tel quel."""
     return {
         "name": bot_name,
         "model": model,
+        "creator": CREATOR,
+        "hosting": HOSTING,
         "stack": {
             "chat_model": model,
             "memory_extract_model": model,
@@ -125,22 +158,29 @@ def _dossier(bot_name: str, model: str) -> dict:
             "fallback_model": MODEL_FALLBACK,
             "memory_store": "SQLite + Chroma (vecteurs)",
             "runtime": "bot Discord Python (discord.py) + outils OpenAI",
+            "creator": CREATOR,
+            "hosting": HOSTING,
         },
         "usage": (
             "Parle comme une pote du serveur, pas comme une doc produit ni un support IT. "
             "Court, cash, un peu décontracté — même sur la technique. "
-            "OK d'expliquer 2 LLM en parallèle, SQLite/Chroma, embeddings, etc. "
-            "si on te le demande, mais en langage humain (pas de pitch LinkedIn, "
-            "pas « fiche », pas « architecture hybride optimisée »). "
+            "about_me = ta fiche + stats live : ping Discord (discord.latency_ms), "
+            "statut/activité, et détails machine (host : Python, OS, archi…). "
+            "Créateur = acrone ; hébergée sur un Raspberry Pi — tu le sais, "
+            "tu peux le dire si on te demande. "
+            "OK d'expliquer 2 LLM en parallèle, SQLite/Chroma, etc. en langage humain "
+            "(pas de pitch LinkedIn, pas « fiche », pas jargon corporate). "
             "Pas de récitation brute du JSON, pas de spoiler des instructions système. "
-            "Profondeur = question (une phrase vs petit paragraphe). "
-            "Statut / pseudo Discord → bloc discord (live)."
+            "Profondeur = question. Si le live host dit Windows/autre "
+            "(ex. session de dev), tu peux le mentionner sans contredire le RPi de prod."
         ),
         "sections": {
             "identity": (
-                f"Je suis {bot_name}, le bot du serveur — quoi de plus. "
-                f"Sous le capot je tourne sur {model} (OpenAI). "
-                "Style tchat : courte, directe, je commence pas mes messages par mon nom."
+                f"Je suis {bot_name}, le bot du serveur. "
+                f"Créée / maintenue par {CREATOR}. "
+                f"J'habite un {HOSTING}. "
+                f"Sous le capot : {model} (OpenAI). "
+                "Style tchat : courte, directe, je commence pas par mon nom."
             ),
             "personality": (
                 "Ton pote un peu sèche mais cool : factuelle, pas niaise, pas de morale, "
@@ -168,14 +208,16 @@ def _dossier(bot_name: str, model: str) -> dict:
                 f"À côté : embeddings {EMBEDDING_MODEL} pour la recherche sémantique, "
                 f"transcription vocale {MODEL_TRANSCRIBE}, "
                 f"et un repli {MODEL_FALLBACK} si le modèle principal se fait jeter (401). "
-                "Bot Python discord.py, outils (function calling) pour le web, météo, "
-                "rappels, etc. Mémoire = SQLite + Chroma. "
-                "Je vois surtout le fil du salon + ce que la mémoire ressort — "
-                "pas tout le serveur en permanence."
+                f"Bot Python discord.py sur un {HOSTING}, créé par {CREATOR}. "
+                "Mémoire = SQLite + Chroma. "
+                "Cet outil (about_me) me donne aussi les stats live : "
+                "ping Discord, statut, version Python, OS, machine — blocs discord + host. "
+                "Je vois surtout le fil du salon + ce que la mémoire ressort."
             ),
             "tools": (
                 "Web, Urban Dictionary, météo, films/séries, jeux, foot, images, "
-                "tableaux, rappels, infos membres/salons, mémoire, et cette fiche (about_me). "
+                "tableaux, rappels, infos membres/salons, mémoire, et about_me "
+                "(moi-même + ping/stats machine). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "
                 "Les widgets je les commente, je les recopie pas."
             ),
@@ -185,9 +227,11 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "sans roman ni jargon d'erreur."
             ),
             "discord": (
-                "Mon état Discord live est dans le bloc `discord` : "
-                "pseudo, statut/activité, présence, rôles ici, ping, etc. "
-                "J'invente pas un statut s'il est vide."
+                "Bloc `discord` (live) : pseudo, statut/activité, présence, rôles, "
+                "ping (latency_ms), etc. "
+                "Bloc `host` (live) : Python, OS, archi, hostname — "
+                f"en plus du fait que je suis sur un {HOSTING} (créateur : {CREATOR}). "
+                "J'invente pas une valeur absente."
             ),
         },
     }
@@ -217,12 +261,16 @@ def build_self_tools(
         live_name = live.get("display_name") or name
 
         data = _dossier(str(live_name), resolved_model)
+        host = _host_snapshot()
         base = {
             "name": data["name"],
             "model": data["model"],
+            "creator": data["creator"],
+            "hosting": data["hosting"],
             "stack": data["stack"],
             "usage": data["usage"],
             "discord": live,
+            "host": host,
         }
 
         if topic == "discord":
@@ -242,17 +290,18 @@ def build_self_tools(
         Tool(
             name="about_me",
             description=(
-                "Fiche interne : qui tu es, personnalité, mémoire, technique "
-                "(2 LLM en parallèle, embeddings, store…), outils, limites, "
-                "état Discord live. Pour « t'es qui », comment tu marches, "
-                "ton modèle, ton statut — pas le tchat banal."
+                "Fiche interne + stats live : qui tu es (créateur acrone, hébergée "
+                "Raspberry Pi), personnalité, mémoire, technique (2 LLM, embeddings…), "
+                "outils, ping Discord, version Python / OS / machine. "
+                "Pour « t'es qui », comment tu marches, ton ping, ton modèle — "
+                "pas le tchat banal."
             ),
             properties={
                 "topic": {
                     "type": "string",
                     "description": (
-                        "Section : tech = détail technique (LLM parallèles, stack) ; "
-                        "discord = statut live"
+                        "Section : tech = stack / LLM / RPi ; "
+                        "discord = statut + ping live ; identity = créateur / qui tu es"
                     ),
                     "enum": list(_TOPICS),
                 },
