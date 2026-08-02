@@ -115,10 +115,12 @@ class Layout(commands.Cog):
                 description=(
                     "Compose et affiche un widget visuel libre dans le salon (catalogue fermé de blocs : "
                     "text, separator, stat_row, thumbnail, gallery, footer). "
-                    "N'UTILISE CE OUTIL QUE quand aucun outil dédié n'existe déjà pour l'info "
-                    "(météo/film/jeu/foot/rappels ont leurs propres widgets, plus riches — ne les remplace pas). "
-                    "Cas typiques : classement, comparatif, récap perso, fiche improvisée. "
-                    "Reste sobre : peu de blocs, un footer qui source l'info si pertinent.\n\n"
+                    "À UTILISER dès que l'utilisateur demande un contenu structuré à garder sous les yeux : "
+                    "recette (ingrédients + étapes), tutoriel / mode d'emploi, checklist, classement, "
+                    "comparatif, fiche improvisée. "
+                    "Ne PAS utiliser pour une réponse tchat courte (avis, blague, oui/non, une phrase). "
+                    "Ne remplace JAMAIS les widgets dédiés (météo/film/jeu/foot/rappels). "
+                    "Reste sobre : peu de blocs, footer qui source l'info si pertinent.\n\n"
                     + WIDGET_CANON_EXAMPLES
                 ),
                 properties={

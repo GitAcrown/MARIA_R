@@ -217,4 +217,13 @@ WIDGET_CANON_EXAMPLES = """Exemples canon (respecte ce style : titres courts, fo
 {"title": "Carte de membre", "emoji": "🪪", "blocks": [
   {"type": "thumbnail", "url": "https://exemple.com/avatar.png", "text": "Membre actif, aime les RPG."},
   {"type": "footer", "text": "D'après la mémoire de MARIA"}
+]}
+
+4) Recette / tutoriel :
+{"title": "Pâtes carbonara", "emoji": "🍝", "blocks": [
+  {"type": "stat_row", "items": [{"label": "Temps", "value": "25 min"}, {"label": "Pers.", "value": "2"}]},
+  {"type": "text", "content": "**Ingrédients**\\n• 200 g spaghetti\\n• 100 g guanciale\\n• 2 jaunes\\n• 40 g pecorino"},
+  {"type": "separator"},
+  {"type": "text", "content": "**Étapes**\\n1. Dorer le guanciale.\\n2. Cuire les pâtes.\\n3. Lier hors du feu avec jaunes + pecorino."},
+  {"type": "footer", "text": "Recette classique"}
 ]}"""
