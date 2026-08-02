@@ -16,6 +16,7 @@ from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.widgets import register_widget, unregister_widget
 
 try:
     from readability import Document
@@ -512,3 +513,8 @@ class Web(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Web(bot))
+    register_widget("search_images", build_image_view)
+
+
+async def teardown(bot):
+    unregister_widget("search_images")

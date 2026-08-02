@@ -3,7 +3,7 @@ discord.py
 python-dotenv
 openai
 tiktoken
-duckduckgo-search
+ddgs
 beautifulsoup4
 requests
 readability-lxml

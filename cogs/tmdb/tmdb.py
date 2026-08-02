@@ -13,6 +13,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.TMDB")
 
@@ -310,3 +311,8 @@ class TMDB(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(TMDB(bot))
+    register_widget("search_media", build_media_view)
+
+
+async def teardown(bot: commands.Bot) -> None:
+    unregister_widget("search_media")

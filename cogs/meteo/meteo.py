@@ -13,6 +13,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
+from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Meteo")
 
@@ -482,3 +483,8 @@ class Meteo(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Meteo(bot))
+    register_widget("get_weather", build_weather_view)
+
+
+async def teardown(bot: commands.Bot) -> None:
+    unregister_widget("get_weather")

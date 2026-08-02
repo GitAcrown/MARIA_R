@@ -56,6 +56,40 @@ def _find_near_duplicate(memories: list[Memory], content: str) -> Optional[Memor
     return None
 
 
+def _semantic_search(
+    store: MemoryStore,
+    vectors: VectorStore,
+    guild_id: int,
+    query: str,
+    *,
+    category: Optional[str],
+    user_id: Optional[int],
+    limit: int,
+) -> list[Memory]:
+    """Recherche par similarité (Chroma), utile quand le mot-clé exact n'existe pas
+    dans le texte (paraphrase, synonyme). Résultats triés par proximité."""
+    results = vectors.query(query, guild_id=guild_id, user_id=user_id, n=limit * 2)
+    out: list[Memory] = []
+    seen: set[str] = set()
+    for r in results:
+        mid = r.get("id")
+        if not mid or mid in seen:
+            continue
+        meta = r.get("metadata") or {}
+        if category and meta.get("category") != category:
+            continue
+        if user_id is not None and meta.get("category") == CATEGORY_USER and meta.get("user_id") != user_id:
+            continue
+        mem = store.get(mid)
+        if mem is None or mem.status != STATUS_ACTIVE:
+            continue
+        seen.add(mid)
+        out.append(mem)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_memory_tools(
     store: MemoryStore,
     vectors: VectorStore,
@@ -87,13 +121,20 @@ def build_memory_tools(
             if category != CATEGORY_SELF:
                 category = "user"
 
-        memories = store.search_active(
-            guild_id,
-            query=query,
-            category=category,
-            user_id=user_id,
-            limit=_MAX_RESULTS,
-        )
+        semantic = bool(args.get("semantic", False)) and bool(query) and vectors.available
+        if semantic:
+            memories = await asyncio.to_thread(
+                _semantic_search, store, vectors, guild_id, query,
+                category=category, user_id=user_id, limit=_MAX_RESULTS,
+            )
+        else:
+            memories = store.search_active(
+                guild_id,
+                query=query,
+                category=category,
+                user_id=user_id,
+                limit=_MAX_RESULTS,
+            )
         items = [
             {
                 "id": m.id,
@@ -421,8 +462,16 @@ def build_memory_tools(
                     "type": "string",
                     "description": "Id Discord du membre (mémoires user uniquement).",
                 },
+                "semantic": {
+                    "type": "boolean",
+                    "description": (
+                        "true = recherche par sens (paraphrase/synonyme) au lieu du mot-clé exact. "
+                        "À utiliser si une recherche par mot-clé direct semble avoir raté un souvenir "
+                        "reformulé différemment. Nécessite query non vide."
+                    ),
+                },
             },
-            optional_props=["query", "category", "user_id"],
+            optional_props=["query", "category", "user_id", "semantic"],
             function=_tool_search_memory,
         ),
         Tool(

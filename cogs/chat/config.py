@@ -34,3 +34,6 @@ MEMORY_PROFILE_FACTS = 5
 MEMORY_PROFILE_MAX_OTHERS = 3
 # Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).
 MEMORY_SELF_FACTS = 8
+# Dédup sémantique à la création (distance cosine Chroma) : en dessous de ce seuil,
+# un souvenir actif existant est considéré comme "le même fait" et bloque la création.
+MEMORY_SEMANTIC_DEDUP_DISTANCE = 0.1

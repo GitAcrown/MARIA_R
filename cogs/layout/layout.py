@@ -1,7 +1,9 @@
-"""Cog Layout — rendu de tableaux ASCII (tabulate) en codeblock pour l'IA."""
+"""Cog Layout — rendu de tableaux ASCII (tabulate) et de widgets libres pour l'IA."""
 
 from datetime import datetime, timezone
+from typing import Optional
 
+import discord
 from discord.ext import commands
 
 try:
@@ -11,10 +13,19 @@ except ImportError:
     _HAS_TABULATE = False
 
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.widget_catalog import WIDGET_CANON_EXAMPLES, WIDGET_SPEC_SCHEMA, render_free_widget
+from common.widgets import register_widget, unregister_widget
 
 _MAX_COLS = 8
 _MAX_ROWS = 20
 _MAX_CELL = 40
+
+
+def build_render_widget_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Builder du widget libre — rend le spec produit par l'outil render_widget."""
+    if not isinstance(data, dict) or "error" in data:
+        return None
+    return render_free_widget(data.get("spec"), commentary=commentary)
 
 
 def _render_table(headers: list, rows: list) -> str:
@@ -62,6 +73,16 @@ class Layout(commands.Cog):
             "note":  "Colle ce bloc tel quel dans ta réponse, sans le modifier.",
         }, datetime.now(timezone.utc))
 
+    def _tool_render_widget(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        spec = tc.arguments.get("spec")
+        if not isinstance(spec, dict):
+            return ToolResponseRecord(tc.id, {"error": "spec manquant ou invalide."}, datetime.now(timezone.utc))
+        return ToolResponseRecord(tc.id, {
+            "_tool":        "render_widget",
+            "_llm_summary": "Widget affiché dans le salon.",
+            "spec":         spec,
+        }, datetime.now(timezone.utc))
+
     @property
     def GLOBAL_TOOLS(self) -> list:
         return [
@@ -89,8 +110,29 @@ class Layout(commands.Cog):
                 },
                 function=self._tool_render_table,
             ),
+            Tool(
+                name="render_widget",
+                description=(
+                    "Compose et affiche un widget visuel libre dans le salon (catalogue fermé de blocs : "
+                    "text, separator, stat_row, thumbnail, gallery, footer). "
+                    "N'UTILISE CE OUTIL QUE quand aucun outil dédié n'existe déjà pour l'info "
+                    "(météo/film/jeu/foot/rappels ont leurs propres widgets, plus riches — ne les remplace pas). "
+                    "Cas typiques : classement, comparatif, récap perso, fiche improvisée. "
+                    "Reste sobre : peu de blocs, un footer qui source l'info si pertinent.\n\n"
+                    + WIDGET_CANON_EXAMPLES
+                ),
+                properties={
+                    "spec": {**WIDGET_SPEC_SCHEMA, "description": "Structure du widget à afficher."},
+                },
+                function=self._tool_render_widget,
+            ),
         ]
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Layout(bot))
+    register_widget("render_widget", build_render_widget_view)
+
+
+async def teardown(bot: commands.Bot) -> None:
+    unregister_widget("render_widget")

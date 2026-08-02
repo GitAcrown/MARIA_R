@@ -25,6 +25,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary
 from common.emojis import DIRECT, FOOTBALL, FOOTBALL_PLAYER
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Football")
 
@@ -813,3 +814,8 @@ def _kickoff_str_human(fixture: dict) -> str:
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Football(bot))
+    register_widget("get_football", build_football_view)
+
+
+async def teardown(bot: commands.Bot) -> None:
+    unregister_widget("get_football")

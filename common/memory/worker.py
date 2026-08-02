@@ -350,6 +350,7 @@ class MemoryWorker:
         direct_flush_messages: int = 8,
         bot_user_id: Optional[int] = None,
         bot_name: str = "MARIA",
+        semantic_dedup_distance: float = 0.1,
     ) -> None:
         self.store = store
         self.vectors = vectors
@@ -364,6 +365,7 @@ class MemoryWorker:
         self.batch_overlap = max(0, min(batch_overlap, max(0, flush_messages // 2)))
         self.bot_user_id = bot_user_id
         self.bot_name = bot_name or "MARIA"
+        self.semantic_dedup_distance = semantic_dedup_distance
         self._buffers: dict[tuple[int, int], ChannelBuffer] = {}
         self._lock = asyncio.Lock()
 
@@ -511,6 +513,38 @@ class MemoryWorker:
             len(actions), guild_id, len(batch),
         )
 
+    async def _is_semantic_duplicate(
+        self, content: str, *, category: str, guild_id: int, user_id: Optional[int],
+    ) -> bool:
+        """Complète `is_near_duplicate` (texte) par une recherche Chroma (paraphrase).
+
+        Ne compare qu'aux souvenirs actifs déjà indexés (les pending ne sont pas
+        embeddés) — suffisant pour éviter les doublons reformulés sur les créations
+        actives (stable/direct/collectif/self).
+        """
+        if not self.vectors.available:
+            return False
+        fact = _fact_part(content)
+        if not fact:
+            return False
+        query_user_id = user_id if category == "user" else None
+        try:
+            results = await asyncio.to_thread(
+                self.vectors.query, content, guild_id=guild_id, user_id=query_user_id, n=5,
+            )
+        except Exception:
+            return False
+        for r in results:
+            if r.get("distance", 1.0) > self.semantic_dedup_distance:
+                continue
+            meta = r.get("metadata") or {}
+            if meta.get("category") != category:
+                continue
+            if category == "user" and meta.get("user_id") != (user_id if user_id is not None else -1):
+                continue
+            return True
+        return False
+
     async def _apply_action(
         self,
         guild_id: int,
@@ -608,6 +642,12 @@ class MemoryWorker:
                 and user_id in direct_user_ids
             )
             if stable or collective or from_direct or is_self:
+                semantic_user_id = self.bot_user_id if is_self else user_id
+                if await self._is_semantic_duplicate(
+                    content, category=category, guild_id=guild_id, user_id=semantic_user_id,
+                ):
+                    logger.debug("Mémoire rejetée (doublon sémantique): %s", content[:60])
+                    return
                 if stable:
                     conf, label = CONFIDENCE_STABLE, "stable"
                 elif is_self or from_direct:
