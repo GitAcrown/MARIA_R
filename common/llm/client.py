@@ -79,9 +79,9 @@ class MariaLLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         # gpt-5.x : sans ça, le raisonnement peut manger tout max_completion_tokens
-        # (sortie content vide) — et les function tools exigent reasoning_effort='none'.
-        if tools or response_format:
-            kwargs["reasoning_effort"] = "none"
+        # (sortie content vide) — notamment /moi, /global, résumés, etc.
+        # Les function tools exigent aussi reasoning_effort='none'.
+        kwargs["reasoning_effort"] = "none"
 
         try:
             return await self._client.chat.completions.create(**kwargs)

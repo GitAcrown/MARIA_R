@@ -50,9 +50,17 @@ async def summarize_memories(
         completion = await llm_client.chat(
             messages, model=model, max_tokens=300,
         )
-        text = (completion.choices[0].message.content or "").strip()
+        choice = completion.choices[0] if completion.choices else None
+        text = (choice.message.content if choice else None) or ""
+        text = text.strip()
         if text:
             return text
+        logger.warning(
+            "Résumé mémoire vide (scope=%s finish=%s usage=%s)",
+            scope,
+            getattr(choice, "finish_reason", None),
+            getattr(completion, "usage", None),
+        )
     except Exception as e:
         logger.warning("Résumé mémoire échoué: %s", e)
 
