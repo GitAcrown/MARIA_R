@@ -120,9 +120,11 @@ class Layout(commands.Cog):
                     "comparatif, fiche improvisée. "
                     "Ne PAS utiliser pour une réponse tchat courte (avis, blague, oui/non, une phrase). "
                     "Ne remplace JAMAIS les widgets dédiés (météo/film/jeu/foot/rappels). "
-                    "Blocs thumbnail/gallery : n'invente JAMAIS une URL d'image. Si une image serait utile "
-                    "et qu'aucune URL fiable n'est déjà en contexte, appelle d'abord search_images puis "
-                    "réutilise l'URL renvoyée. Sans URL fiable, laisse tomber l'image plutôt que d'en inventer une. "
+                    "Blocs thumbnail/gallery : UNIQUEMENT une URL d'image déjà fiable dans le contexte "
+                    "(avatar Discord, pochette/affiche d'un résultat d'outil dédié). "
+                    "Ne va PAS chercher une image via search_images pour ces blocs : les images trouvées sur "
+                    "le web s'affichent souvent cassées dans Discord (protection anti-hotlink, liens temporaires). "
+                    "Sans URL fiable, ignore l'image plutôt que d'en risquer une cassée. "
                     "Reste sobre : peu de blocs, footer qui source l'info si pertinent.\n\n"
                     + WIDGET_CANON_EXAMPLES
                 ),
