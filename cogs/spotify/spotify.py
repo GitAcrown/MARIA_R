@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.emojis import MUSIC
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.widgets import register_widget, unregister_widget
 
@@ -96,10 +97,9 @@ def _track_container(t: dict) -> Optional[discord.ui.Container]:
     url     = (t.get("external_urls") or {}).get("spotify", "")
     explicit = t.get("explicit", False)
 
-    header = discord.ui.TextDisplay(f"## 🎵 {name}")
-    sep1   = discord.ui.Separator()
-
-    body_lines = []
+    # Titre + artiste + méta dans le même bloc (à côté de la pochette) pour éviter
+    # une section clairsemée quand il y a peu de texte à afficher.
+    body_lines = [f"## {MUSIC} {name}"]
     if artists:
         body_lines.append(f"**{artists}**")
     meta = []
@@ -112,13 +112,13 @@ def _track_container(t: dict) -> Optional[discord.ui.Container]:
     if explicit:
         meta.append("🅴")
     if meta:
-        body_lines.append(" · ".join(meta))
-    body_block = discord.ui.TextDisplay("\n".join(body_lines) or "-# Aucun détail disponible.")
+        body_lines.append(f"-# {' · '.join(meta)}")
+    body_block = discord.ui.TextDisplay("\n".join(body_lines))
     main_section = section_with_thumbnail(body_block, cover)
 
-    children: list = [header, sep1, main_section]
+    children: list = [main_section]
     if url:
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# [Écouter sur Spotify]({url})")]
+        children += [discord.ui.TextDisplay(f"-# [Écouter sur Spotify]({url})")]
 
     return discord.ui.Container(*children)
 
