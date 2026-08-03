@@ -61,7 +61,6 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
         children.append(_text_block(head))
         children.append(discord.ui.Separator())
 
-    gallery_urls: list[str] = []
     for raw in blocks[:_MAX_BLOCKS]:
         if not isinstance(raw, dict):
             continue
@@ -87,35 +86,34 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
             urls = [
                 u for u in (raw.get("urls") or [])
                 if isinstance(u, str) and u.startswith(("http://", "https://"))
-            ]
+            ][:_MAX_GALLERY]
             if urls:
-                gallery_urls = urls[:_MAX_GALLERY]
+                # Imbriquée directement dans le Container, à sa place dans l'ordre des
+                # blocs — sinon elle apparaît comme un composant à part, détaché du widget.
+                gallery = discord.ui.MediaGallery()
+                added = 0
+                for url in urls:
+                    try:
+                        gallery.add_item(media=url)
+                        added += 1
+                    except Exception:
+                        continue
+                if added:
+                    children.append(gallery)
         elif btype == "footer":
             text = (raw.get("text") or "").strip()
             if text:
                 children.append(discord.ui.Separator())
                 children.append(discord.ui.TextDisplay(f"-# {text}"))
 
-    if not children and not gallery_urls:
+    if not children:
         return None
 
     view = discord.ui.LayoutView(timeout=None)
     if commentary:
         view.add_item(discord.ui.TextDisplay(commentary))
         view.add_item(discord.ui.Separator())
-    if children:
-        view.add_item(discord.ui.Container(*children))
-    if gallery_urls:
-        gallery = discord.ui.MediaGallery()
-        added = 0
-        for url in gallery_urls:
-            try:
-                gallery.add_item(media=url)
-                added += 1
-            except Exception:
-                continue
-        if added:
-            view.add_item(gallery)
+    view.add_item(discord.ui.Container(*children))
 
     return view if view.children else None
 
