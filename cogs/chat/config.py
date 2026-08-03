@@ -11,7 +11,10 @@ MODEL_MAIN = "gpt-5.6-luna"
 CONTEXT_WINDOW = 8000
 CONTEXT_AGE_HOURS = 1
 MAX_MESSAGES = 40
-MAX_TOKENS = 2800
+# Plafond, pas un coût fixe (une réponse courte ne consomme que ce qu'elle écrit).
+# Doit couvrir le pire cas d'un tool call render_widget rempli à fond : 12 blocs
+# à ~800 caractères chacun ≈ 2500 tokens rien que pour l'argument JSON — d'où la marge.
+MAX_TOKENS = 4000
 
 # Debounce des réponses (regroupe les messages rapprochés en un seul appel)
 DEBOUNCE_SECONDS: float = 0.5

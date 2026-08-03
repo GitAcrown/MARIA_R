@@ -120,6 +120,9 @@ class Layout(commands.Cog):
                     "comparatif, fiche improvisée. "
                     "Ne PAS utiliser pour une réponse tchat courte (avis, blague, oui/non, une phrase). "
                     "Ne remplace JAMAIS les widgets dédiés (météo/film/jeu/foot/rappels). "
+                    "Blocs thumbnail/gallery : n'invente JAMAIS une URL d'image. Si une image serait utile "
+                    "et qu'aucune URL fiable n'est déjà en contexte, appelle d'abord search_images puis "
+                    "réutilise l'URL renvoyée. Sans URL fiable, laisse tomber l'image plutôt que d'en inventer une. "
                     "Reste sobre : peu de blocs, footer qui source l'info si pertinent.\n\n"
                     + WIDGET_CANON_EXAMPLES
                 ),
