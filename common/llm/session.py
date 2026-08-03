@@ -211,8 +211,10 @@ class ChannelSession:
         api_name = _api_message_name(message)
         display_name = _display_user_label(message)
 
-        # Pour les messages contexte-seul sans texte, ignorer (évite le bruit)
-        if is_context_only and not text.strip():
+        # Contexte-seul sans texte ni contenu textuel riche → ignorer (évite le bruit).
+        # Les embeds / LayoutView ont du texte exploitable : on les garde.
+        has_rich_text = bool(getattr(message, "embeds", None) or getattr(message, "components", None))
+        if is_context_only and not text.strip() and not has_rich_text:
             return MessageRecord(
                 role="user",
                 components=[],
@@ -256,20 +258,21 @@ class ChannelSession:
                     else:
                         parts.append(TextComponent(f"[Répond à la dernière réponse du bot]"))
                 else:
-                    # Message utilisateur → aperçu complet
+                    # Message utilisateur → aperçu texte (+ embeds / LayoutView)
                     ref_lines: list[str] = []
                     if ref_text:
                         ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
-                    if not is_context_only:
-                        for emb in getattr(ref, "embeds", []):
-                            t = _embed_to_text(emb)
-                            if t:
-                                ref_lines.append(t[:300])
-                        ref_comps = getattr(ref, "components", None)
-                        if ref_comps:
-                            comp_texts, _ = _components_v2_to_parts(list(ref_comps))
-                            if comp_texts:
-                                ref_lines.append("\n".join(comp_texts)[:400])
+                    ref_cap = 200 if is_context_only else 300
+                    for emb in getattr(ref, "embeds", []):
+                        t = _embed_to_text(emb)
+                        if t:
+                            ref_lines.append(t[:ref_cap])
+                    ref_comps = getattr(ref, "components", None)
+                    if ref_comps:
+                        comp_texts, _ = _components_v2_to_parts(list(ref_comps))
+                        if comp_texts:
+                            layout_bit = "\n".join(comp_texts)
+                            ref_lines.append(layout_bit[:300 if is_context_only else 400])
                     if ref_lines:
                         preview = " | ".join(ref_lines)[:500]
                         parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
@@ -281,30 +284,28 @@ class ChannelSession:
                         parts.append(ImageComponent(att.url, detail="low"))
 
         # --- Texte principal ---
+        # Les messages non adressés au bot sont tagués [contexte] pour que le LLM
+        # ne les traite pas comme une question qui lui est posée.
         msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
+        ctx_tag = "[contexte] " if is_context_only else ""
         if text.strip():
-            parts.append(TextComponent(f"[{msg_time}] {display_name}: {message.clean_content}"))
-        elif not is_context_only and (message.embeds or message.stickers or message.attachments):
-            parts.append(TextComponent(f"[{msg_time}] {display_name}:"))
+            parts.append(TextComponent(
+                f"{ctx_tag}[{msg_time}] {display_name}: {message.clean_content}"
+            ))
+        elif message.embeds or message.components or (
+            not is_context_only and (message.stickers or message.attachments)
+        ):
+            parts.append(TextComponent(f"{ctx_tag}[{msg_time}] {display_name}:"))
 
-        # --- Média (uniquement pour les messages adressés au bot) ---
-        if not is_context_only:
-            # URLs d'images dans le texte
-            for m in re.finditer(r"https?://[^\s]+", text):
-                url = re.sub(r"\?.*$", "", m.group(0))
-                if url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    parts.append(ImageComponent(url, detail="auto"))
-                elif url.lower().endswith(".gif"):
-                    parts.append(ImageComponent(
-                        f"{url}?format=png" if "?" not in url else f"{url}&format=png",
-                        detail="auto",
-                    ))
+        # --- Embeds + LayoutView : texte toujours ; images seulement si adressé au bot ---
+        embed_cap = 400 if is_context_only else 800
+        layout_cap = 600 if is_context_only else 1200
 
-            # Embeds
-            for emb in message.embeds:
-                emb_text = _embed_to_text(emb)
-                if emb_text:
-                    parts.append(TextComponent(f"[EMBED]\n{emb_text[:800]}"))
+        for emb in message.embeds:
+            emb_text = _embed_to_text(emb)
+            if emb_text:
+                parts.append(TextComponent(f"[EMBED]\n{emb_text[:embed_cap]}"))
+            if not is_context_only:
                 if emb.image and emb.image.url:
                     url = emb.image.url
                     if url.lower().endswith(".gif"):
@@ -318,23 +319,33 @@ class ChannelSession:
                 if emb.video and emb.video.url:
                     parts.append(TextComponent(f"[VIDEO: {emb.video.url}]"))
 
-            # Components v2
-            if message.components:
-                comp_texts, comp_imgs = _components_v2_to_parts(list(message.components))
-                if comp_texts:
-                    full = "\n".join(comp_texts)
-                    parts.append(TextComponent(f"[LAYOUT]\n{full[:1200]}"))
+        if message.components:
+            comp_texts, comp_imgs = _components_v2_to_parts(list(message.components))
+            if comp_texts:
+                full = "\n".join(comp_texts)
+                parts.append(TextComponent(f"[LAYOUT]\n{full[:layout_cap]}"))
+            if not is_context_only:
                 for url in comp_imgs[:6]:
                     if url.lower().endswith(".gif"):
                         url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
                     parts.append(ImageComponent(url, detail="low"))
 
-            # Stickers
+        # --- Médias riches : uniquement si le message s'adresse au bot ---
+        if not is_context_only:
+            for m in re.finditer(r"https?://[^\s]+", text):
+                url = re.sub(r"\?.*$", "", m.group(0))
+                if url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    parts.append(ImageComponent(url, detail="auto"))
+                elif url.lower().endswith(".gif"):
+                    parts.append(ImageComponent(
+                        f"{url}?format=png" if "?" not in url else f"{url}&format=png",
+                        detail="auto",
+                    ))
+
             for st in message.stickers:
                 if st.url:
                     parts.append(ImageComponent(st.url, detail="auto"))
 
-            # Attachments images
             for att in message.attachments:
                 ct = att.content_type or ""
                 fn = (att.filename or "").lower()
@@ -346,7 +357,10 @@ class ChannelSession:
 
         if not parts:
             msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
-            parts.append(TextComponent(f"[{msg_time}] {display_name}: (message vide)"))
+            ctx_tag = "[contexte] " if is_context_only else ""
+            parts.append(TextComponent(
+                f"{ctx_tag}[{msg_time}] {display_name}: (message vide)"
+            ))
 
         record = self.context.add_user_message(components=parts, name=api_name)
         if hasattr(record, "metadata"):
@@ -397,9 +411,22 @@ class ChannelSession:
             author = f"{trigger.author.name} ({trigger.author.id})"
             content = trigger.clean_content.strip()
             if content:
-                hint = f"[FOCUS] Tu réponds au message de {author} : « {content[:200]} »"
+                hint = (
+                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:200]} ». "
+                    f"Ignore les autres questions du fil ; le `[contexte]` et les citations "
+                    f"`[Répond à …]` ne sont que du décor."
+                )
             else:
-                hint = f"[FOCUS] Tu réponds à {author}."
+                hint = (
+                    f"[FOCUS] Réponds UNIQUEMENT à {author} "
+                    f"(média / message sans texte). Pas aux autres messages du fil."
+                )
+            # Reply Discord : rappeler que le message cité n'est pas la question.
+            if trigger.reference is not None:
+                hint += (
+                    " Ce message est une réponse Discord : traite la demande de "
+                    f"{trigger.author.name}, pas le message auquel iel répond."
+                )
             # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
             # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
             ctx_hint = self._build_context_hint()
