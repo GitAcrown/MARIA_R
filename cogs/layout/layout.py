@@ -115,9 +115,10 @@ class Layout(commands.Cog):
                 description=(
                     "Compose et affiche un widget visuel libre dans le salon (catalogue fermé de blocs : "
                     "text, separator, stat_row, thumbnail, gallery, footer). "
-                    "À UTILISER dès que l'utilisateur demande un contenu structuré à garder sous les yeux : "
-                    "recette (ingrédients + étapes), tutoriel / mode d'emploi, checklist, classement, "
-                    "comparatif, fiche improvisée. "
+                    "À utiliser RAREMENT — seulement pour un contenu dense à garder sous les yeux : "
+                    "recette complète, tutoriel multi-étapes, classement/comparatif substantiel. "
+                    "PAS pour une petite liste, des tips, 3–5 puces, une checklist courte : "
+                    "réponds en markdown dans le tchat. "
                     "Ne PAS utiliser pour une réponse tchat courte (avis, blague, oui/non, une phrase). "
                     "Ne remplace JAMAIS les widgets dédiés (météo/film/jeu/foot/rappels). "
                     "Blocs thumbnail/gallery : UNIQUEMENT une URL d'image déjà fiable dans le contexte "
