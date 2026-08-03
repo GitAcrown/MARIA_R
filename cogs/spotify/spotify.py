@@ -31,6 +31,51 @@ def _fmt_duration(ms: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+# Versions à pénaliser quand la requête ne les demande pas explicitement — Spotify les
+# classe parfois devant l'originale (reprises karaoké très streamées, rééditions...).
+_LOW_PRIORITY_MARKERS = (
+    "karaoke", "made famous", "tribute", "in the style of",
+    "cover version", "instrumental version",
+)
+
+
+def _pick_best_track(items: list[dict], query: str) -> Optional[dict]:
+    """Choisit le meilleur morceau (match exact titre/artiste → popularité).
+
+    `limit=1` renvoyait parfois un remix/cover/live mieux streamé que l'original :
+    on récupère plusieurs candidats et on les score au lieu de prendre le premier.
+    """
+    if not items:
+        return None
+    q = query.strip().casefold()
+
+    def title_of(it: dict) -> str:
+        return (it.get("name") or "").strip()
+
+    def artist_names(it: dict) -> list[str]:
+        return [a.get("name", "") for a in it.get("artists", [])]
+
+    def is_title_exact(it: dict) -> bool:
+        return title_of(it).casefold() == q
+
+    def artist_mentioned(it: dict) -> bool:
+        return any(a and a.casefold() in q for a in artist_names(it))
+
+    def is_low_priority(it: dict) -> bool:
+        low = title_of(it).casefold()
+        return any(marker in low for marker in _LOW_PRIORITY_MARKERS)
+
+    def score(it: dict) -> tuple[int, int, int, float]:
+        return (
+            int(is_title_exact(it)),
+            int(artist_mentioned(it)),
+            -int(is_low_priority(it)),
+            float(it.get("popularity") or 0.0),
+        )
+
+    return max(items, key=score)
+
+
 def _best_image(images: list[dict]) -> Optional[str]:
     if not images:
         return None
@@ -184,7 +229,7 @@ class Spotify(commands.Cog):
             r = requests.get(
                 SEARCH_URL,
                 headers={"Authorization": f"Bearer {token}"},
-                params={"q": query, "type": "track", "market": "FR", "limit": 1},
+                params={"q": query, "type": "track", "market": "FR", "limit": 10},
                 timeout=8,
             )
             if r.status_code == 401:
@@ -196,7 +241,10 @@ class Spotify(commands.Cog):
             items = (r.json().get("tracks") or {}).get("items") or []
             if not items:
                 return {"error": f"Morceau introuvable sur Spotify : {query!r}"}
-            return {"first": items[0]}
+            best = _pick_best_track(items, query)
+            if best is None:
+                return {"error": f"Morceau introuvable sur Spotify : {query!r}"}
+            return {"first": best}
         except requests.RequestException as e:
             return {"error": str(e)}
 
