@@ -33,11 +33,15 @@ logger = logging.getLogger("llm.session")
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
 
-# Fuites de tokens connues côté modèle (jargon d'outils internes OpenAI genre
-# l'outil « automations » de ChatGPT, format iCal) qui n'ont rien à faire dans
-# une réponse Discord — filet de sécurité, pas un vrai fix côté modèle.
+# Fuites de tokens / placeholders connus côté modèle — filet de sécurité, pas un
+# vrai fix côté modèle. VEVENT = jargon iCal d'outils internes OpenAI ;
+# `[](widget)` = le modèle invente parfois un lien markdown pour « pointer »
+# vers le LayoutView Discord qu'il vient d'appeler.
 _LEAKED_TOKEN_RE = re.compile(
-    r"\s*BEGIN:VEVENT.*?END:VEVENT\s*|\s*:?\bVEVENT\b\s*",
+    r"\s*BEGIN:VEVENT.*?END:VEVENT\s*"
+    r"|\s*:?\bVEVENT\b\s*"
+    r"|\s*!?\[[^\]]*\]\(\s*widget\s*\)\s*"
+    r"|\s*\[widget\]\s*",
     re.IGNORECASE | re.DOTALL,
 )
 
