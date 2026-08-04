@@ -454,8 +454,12 @@ class Meteo(commands.Cog):
                     "Récupère et affiche la météo d'une ville. "
                     "type='current' → météo maintenant. type='forecast' → prévisions. "
                     "Pour un jour précis ('demain', 'jeudi'…) : type='forecast' + target_date='demain'/'lundi'/etc. "
-                    "Questions de suivi SANS ville explicite ('et demain ?', 'et la semaine ?', 'pour lundi ?', "
-                    "'il fait quoi demain ?') → réutiliser la ville du dernier appel get_weather visible en contexte."
+                    "Question de suivi de LA MÊME personne, sans ville explicite ('et demain ?', 'et la "
+                    "semaine ?', 'pour lundi ?') → réutiliser la ville du dernier appel get_weather visible "
+                    "en contexte. "
+                    "« chez moi / chez toi » → ville de LA PERSONNE QUI PARLE MAINTENANT (son profil, PAS "
+                    "la ville du dernier appel get_weather si c'était pour quelqu'un d'autre). Adresse "
+                    "absente du profil → ne PAS deviner ni réutiliser une autre ville : dis-le simplement."
                 ),
                 properties={
                     "city": {

@@ -138,7 +138,7 @@ Pour tout widget dédié (météo/film/jeu/musique/foot/rappels/carte membre/ré
 - search_web → fait, actu, « c'est quoi/qui… », « ça existe ? », argot/slang obscur
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media
 - schedule_reminder → rappel (execute_at ISO 8601 ou delay_minutes/delay_hours, max 365j ; daily/weekly ≤ 30j) ; edit_reminder / cancel_reminder pour modifier/annuler (list_reminders si ID inconnu) ; show_reminders pour afficher. task_description = le fait seul (« Anniversaire de Enzo »)
-- get_weather → météo
+- get_weather → météo ; « chez moi/toi » = adresse du PROFIL de qui parle MAINTENANT, jamais la ville d'un appel précédent pour quelqu'un d'autre. Adresse absente du profil → dis-le, n'invente rien et ne réutilise pas une autre ville
 - search_media → film/série par titre, tout de suite (même « c'est bien ? »)
 - search_game → jeu par titre, tout de suite
 - search_track → musique, titre connu, tout de suite. Suggestion vague → search_web pour trouver un titre précis, puis search_track
