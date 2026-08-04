@@ -62,7 +62,6 @@ from cogs.chat.tools_reminders import build_reminder_tools, build_reminders_view
 from cogs.chat.tools_discord import build_discord_tools
 from cogs.chat.tools_memory import build_memory_tools
 from cogs.chat.tools_self import build_self_tools
-from cogs.chat.tools_widgets import build_member_card_tools, build_member_card_view
 from cogs.chat.tools_summary import build_channel_summary_tools, build_channel_summary_view
 from cogs.chat.views import (
     AllMemoryView,
@@ -99,7 +98,7 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "math_eval", "list_reminders", "show_reminders", "search_memory",
     "remember_fact", "about_me",
     "get_weather", "search_media", "search_game",
-    "get_football", "render_table", "render_widget", "show_member_card",
+    "get_football", "render_table", "render_widget",
     "summarize_channel", "search_track",
 })
 
@@ -136,8 +135,7 @@ OUTILS — n'invente JAMAIS fait, définition, date, chiffre, actu, titre ou sou
 Chaîner plusieurs outils dans le même tour est normal et encouragé quand un seul ne suffit pas (ex. identifier via search_web puis afficher la fiche exacte) : ne réponds pas à moitié faute d'avoir enchaîné.
 Pour tout widget dédié (météo/film/jeu/musique/foot/rappels/carte membre/résumé salon) : appelle l'outil directement, commente sans répéter son contenu.
 - about_me → « t'es qui / comment tu marches / ta mémoire / tes outils / ton statut »
-- search_web → fait, actu, « c'est quoi/qui… », « ça existe ? »
-- urban_dictionary → argot, slang, expression obscure
+- search_web → fait, actu, « c'est quoi/qui… », « ça existe ? », argot/slang obscur
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media
 - schedule_reminder → rappel (execute_at ISO 8601 ou delay_minutes/delay_hours, max 365j ; daily/weekly ≤ 30j) ; edit_reminder / cancel_reminder pour modifier/annuler (list_reminders si ID inconnu) ; show_reminders pour afficher. task_description = le fait seul (« Anniversaire de Enzo »)
 - get_weather → météo
@@ -148,7 +146,6 @@ Pour tout widget dédié (météo/film/jeu/musique/foot/rappels/carte membre/ré
 - search_images → image / photo, bref, ne décris pas chaque image
 - render_table → tableau (colle le bloc retourné, jamais de |---| à la main)
 - render_widget → RARE, seulement si le contenu mérite vraiment d'être gardé sous les yeux (recette complète, tutoriel multi-étapes, classement/comparatif dense). Une petite liste, des tips, 3–5 puces → markdown en tchat. Jamais pour un widget dédié ci-dessus.
-- show_member_card → « qui est X » / carte d'un membre
 - summarize_channel → « résume le salon / ce fil / les derniers messages »
 Erreur outil (champ « error ») → explique en langage normal, n'invente pas de résultat. Refus sur goût forcé → dis que seul le créateur peut te l'imposer.
 
@@ -284,7 +281,6 @@ class Chat(commands.Cog):
         )
         await self._memory_worker.start()
         register_widget("show_reminders", build_reminders_view)
-        register_widget("show_member_card", build_member_card_view)
         register_widget("summarize_channel", build_channel_summary_view)
         await self._register_tools_from_cogs()
 
@@ -294,7 +290,6 @@ class Chat(commands.Cog):
         if self._memory_worker:
             await self._memory_worker.stop()
         unregister_widget("show_reminders")
-        unregister_widget("show_member_card")
         unregister_widget("summarize_channel")
         await self.gpt_api.close()
         self.data.close_all()
@@ -365,7 +360,6 @@ class Chat(commands.Cog):
             bot_name=getattr(self.bot.user, "name", None) or "MARIA",
             model=MODEL_MAIN,
         ))
-        tools.extend(build_member_card_tools(self.memory_store))
         tools.extend(build_channel_summary_tools(
             self.gpt_api.client,
             model=MODEL_MAIN,
@@ -557,9 +551,6 @@ class Chat(commands.Cog):
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
                     delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = f'**Rappel planifié** — "{desc}"{delay_str}' if desc else "**Rappel planifié**"
-            elif name == "urban_dictionary":
-                term = args.get("term", "").strip()
-                label = f"**Urban Dictionary** — {term}" if term else "**Urban Dictionary**"
             elif name == "cancel_reminder":
                 tid = args.get("task_id", "")
                 label = f"**Rappel #{tid} annulé**" if tid else "**Rappel annulé**"
