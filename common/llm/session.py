@@ -32,6 +32,21 @@ logger = logging.getLogger("llm.session")
 # Le pseudo+id lisible va dans le *contenu* du message, pas dans ce champ.
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
+
+# Fuites de tokens connues côté modèle (jargon d'outils internes OpenAI genre
+# l'outil « automations » de ChatGPT, format iCal) qui n'ont rien à faire dans
+# une réponse Discord — filet de sécurité, pas un vrai fix côté modèle.
+_LEAKED_TOKEN_RE = re.compile(
+    r"\s*BEGIN:VEVENT.*?END:VEVENT\s*|\s*:?\bVEVENT\b\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_leaked_tokens(text: str) -> str:
+    # Remplacer par un espace (pas une chaîne vide) pour ne pas coller les mots
+    # entourant le fragment retiré ; on nettoie ensuite les espaces doublés.
+    cleaned = _LEAKED_TOKEN_RE.sub(" ", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 # Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
 INGESTED_IDS_MAX = 500
 
@@ -474,9 +489,10 @@ class ChannelSession:
                     )
                 )
 
+        cleaned_content = _strip_leaked_tokens(msg.content) if msg.content else msg.content
         components = []
-        if msg.content:
-            components.append(TextComponent(msg.content))
+        if cleaned_content:
+            components.append(TextComponent(cleaned_content))
         else:
             components.append(MetadataComponent("EMPTY"))
 
@@ -490,7 +506,7 @@ class ChannelSession:
             await self._execute_tools(tool_calls)
             return await self._run(None, depth + 1, model=model)
 
-        if not msg.content or not str(msg.content).strip():
+        if not cleaned_content or not cleaned_content.strip():
             self.context._messages.pop()
             self.context.add_user_message(components=[TextComponent("[SYSTEM] Réponds maintenant.")], name="system")
             return await self._run(None, depth + 1, model=model)
