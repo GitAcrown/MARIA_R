@@ -31,6 +31,8 @@ from common.memory.worker import (
 )
 from discord.ext import commands
 
+from cogs.chat.views import _is_memory_mod
+
 logger = logging.getLogger("MARIA.Chat.MemoryTools")
 
 _MAX_RESULTS = 20
@@ -439,6 +441,108 @@ def build_memory_tools(
             "_llm_summary": f"Souvenir retenu : {content}",
         }, datetime.now(timezone.utc))
 
+    async def _tool_forget_fact(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        """Supprime (archive) un souvenir existant — sans remplacement. Pour une correction
+        avec un fait de rechange, préférer remember_fact(memory_id=...)."""
+        if not ctx or not ctx.trigger_message or not ctx.trigger_message.guild:
+            return ToolResponseRecord(
+                tc.id, {"error": "Disponible uniquement sur un serveur"}, datetime.now(timezone.utc),
+            )
+        msg = ctx.trigger_message
+        guild = msg.guild
+        assert guild is not None
+        args = tc.arguments or {}
+        memory_id = (args.get("memory_id") or "").strip()
+        if not memory_id:
+            return ToolResponseRecord(
+                tc.id, {"error": "memory_id vide (cherche avec search_memory d'abord)"},
+                datetime.now(timezone.utc),
+            )
+
+        mem = await asyncio.to_thread(store.get, memory_id)
+        if mem is None or mem.guild_id != guild.id or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
+            return ToolResponseRecord(
+                tc.id, {"error": "memory_id introuvable ou déjà oublié"}, datetime.now(timezone.utc),
+            )
+
+        if mem.category == CATEGORY_SELF:
+            if bot is None:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Contrôle owner indisponible"}, datetime.now(timezone.utc),
+                )
+            try:
+                is_owner = await bot.is_owner(msg.author)
+            except Exception:
+                is_owner = False
+            if not is_owner:
+                return ToolResponseRecord(
+                    tc.id,
+                    {
+                        "error": "Seul le créateur peut te faire oublier un goût.",
+                        "refused": True,
+                    },
+                    datetime.now(timezone.utc),
+                )
+            had_vector = mem.status == STATUS_ACTIVE
+            await asyncio.to_thread(store.archive, mem.id)
+            if had_vector:
+                await asyncio.to_thread(vectors.delete, mem.id)
+            logger.info("forget_fact self %s", mem.id[:8])
+            return ToolResponseRecord(tc.id, {
+                "ok": True,
+                "memory_id": mem.id,
+                "_llm_summary": f"Goût oublié : {mem.content}",
+            }, datetime.now(timezone.utc))
+
+        if mem.category == CATEGORY_USER:
+            allowed = {msg.author.id}
+            for u in msg.mentions:
+                if not u.bot:
+                    allowed.add(u.id)
+            ref = msg.reference.resolved if msg.reference else None
+            if isinstance(ref, discord.Message) and ref.author and not ref.author.bot:
+                allowed.add(ref.author.id)
+            if mem.user_id not in allowed:
+                return ToolResponseRecord(
+                    tc.id,
+                    {"error": "Souvenir hors conversation (auteur / mention / reply uniquement)"},
+                    datetime.now(timezone.utc),
+                )
+            ok, chroma = await asyncio.to_thread(store.forget_user_memory, mem.id, mem.user_id)
+            if not ok:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Oubli échoué"}, datetime.now(timezone.utc),
+                )
+            if chroma:
+                await asyncio.to_thread(vectors.delete, chroma)
+            logger.info("forget_fact user %s", mem.id[:8])
+            return ToolResponseRecord(tc.id, {
+                "ok": True,
+                "memory_id": mem.id,
+                "_llm_summary": f"Souvenir oublié : {mem.content}",
+            }, datetime.now(timezone.utc))
+
+        # server / event
+        if not _is_memory_mod(msg.author):
+            return ToolResponseRecord(
+                tc.id,
+                {"error": "Réservé aux modos pour un souvenir collectif.", "refused": True},
+                datetime.now(timezone.utc),
+            )
+        ok, chroma = await asyncio.to_thread(store.forget_server_memory, mem.id, guild.id)
+        if not ok:
+            return ToolResponseRecord(
+                tc.id, {"error": "Oubli échoué"}, datetime.now(timezone.utc),
+            )
+        if chroma:
+            await asyncio.to_thread(vectors.delete, chroma)
+        logger.info("forget_fact server %s", mem.id[:8])
+        return ToolResponseRecord(tc.id, {
+            "ok": True,
+            "memory_id": mem.id,
+            "_llm_summary": f"Souvenir oublié : {mem.content}",
+        }, datetime.now(timezone.utc))
+
     return [
         Tool(
             name="search_memory",
@@ -493,7 +597,10 @@ def build_memory_tools(
                     "description": (
                         "Un seul fait PRÉCIS, sans préfixe pseudo "
                         "(membre : « anniversaire le 22 juillet 1999 » ; "
-                        "toi : « préfère le café noir », « déteste le foot »)."
+                        "toi : « préfère le café noir », « déteste le foot »). "
+                        "Date relative (« demain », « la semaine prochaine », « dans 3 jours ») "
+                        "→ résous-la en date absolue avec la date du jour (DATE/HEURE du prompt) "
+                        "avant d'écrire le fait : sinon « demain » reste vrai pour toujours."
                     ),
                 },
                 "user_id": {
@@ -523,5 +630,25 @@ def build_memory_tools(
             },
             optional_props=["user_id", "about_self", "self_source", "stable", "memory_id"],
             function=_tool_remember_fact,
+        ),
+        Tool(
+            name="forget_fact",
+            description=(
+                "Supprime définitivement un souvenir (pas de remplacement). "
+                "À utiliser quand on te dit qu'un fait retenu est FAUX et qu'il n'y a rien "
+                "de valide à mettre à la place (sinon préfère remember_fact avec memory_id "
+                "pour corriger directement). Cherche l'id via search_memory avant d'appeler. "
+                "Membre : réservé à l'auteur / une mention / la personne citée en reply. "
+                "Souvenir collectif (server/event) : réservé aux modos. "
+                "Goût sur toi : réservé au créateur."
+            ),
+            properties={
+                "memory_id": {
+                    "type": "string",
+                    "description": "Id du souvenir à oublier (renvoyé par search_memory).",
+                },
+            },
+            optional_props=[],
+            function=_tool_forget_fact,
         ),
     ]

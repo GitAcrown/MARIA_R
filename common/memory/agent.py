@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Optional
 
 from common.memory.store import Memory, STATUS_PENDING
+from common.timezones import PARIS_TZ
 
 logger = logging.getLogger("MARIA.Memory.Agent")
 
@@ -84,6 +86,11 @@ RÈGLE D'OR — PRÉCISION OU RIEN :
   « main Jett en ranked Valorant », « Running gag : kebab commandé à 4h du mat ».
 - N'invente aucun détail absent du lot. Mieux vaut [] qu'un fait flou.
 
+DATES RELATIVES → toujours résoudre en date absolue avant d'écrire le fait (AUJOURD'HUI = {current_date}).
+« demain », « après-demain », « ce week-end », « lundi prochain », « dans 3 jours »… lus tels quels
+deviendraient faux dès le lendemain. Calcule la date réelle et écris-la (ex. « demain » un jeudi 12/03
+→ « voyage prévu le 13/03 »). Fait avec date relative non résolue → n'extrais PAS plutôt que de la garder.
+
 DIRECT vs PASSIF (critique pour le perso) :
 - Lignes marquées `[→ MARIA]` = l'humain parle À MARIA (mention / reply au bot).
   Fait perso précis ici → PRIORITAIRE, à retenir volontiers (toujours avec détail).
@@ -145,7 +152,9 @@ async def extract_memories(
             )
         existing_block = "\n".join(lines)
 
-    system = _SYSTEM_PROMPT.format(bot_name=bot_name or "MARIA")
+    now = datetime.now(PARIS_TZ)
+    current_date = f"{now.strftime('%A %d/%m/%Y')} {now.strftime('%H:%M')}"
+    system = _SYSTEM_PROMPT.format(bot_name=bot_name or "MARIA", current_date=current_date)
     if max_actions != 8:
         system = system.replace("Max 8 actions.", f"Max {max_actions} actions.")
 
