@@ -16,8 +16,8 @@ MAX_MESSAGES = 40
 # à ~800 caractères chacun ≈ 2500 tokens rien que pour l'argument JSON — d'où la marge.
 MAX_TOKENS = 4000
 
-# Debounce des réponses (regroupe les messages rapprochés en un seul appel)
-DEBOUNCE_SECONDS: float = 0.5
+# Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
+DEBOUNCE_SECONDS: float = 0.33
 
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).

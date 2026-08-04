@@ -255,8 +255,12 @@ class Chat(commands.Cog):
         )
 
         self._processed: deque = deque(maxlen=100)
-        self._pending_responses: dict[int, asyncio.Task] = {}
-        self._first_triggers: dict[int, discord.Message] = {}
+        # Clé (channel_id, author_id) : le debounce ne doit fusionner que les messages
+        # successifs d'UNE MÊME personne (ex. "attends" puis "en fait je voulais dire X"),
+        # jamais deux questions distinctes de deux personnes différentes qui parlent en
+        # même temps — sinon la première question disparaît sans réponse.
+        self._pending_responses: dict[tuple[int, int], asyncio.Task] = {}
+        self._first_triggers: dict[tuple[int, int], discord.Message] = {}
 
     async def cog_load(self) -> None:
         self._rappels_worker = RappelWorker(self.rappels, self._exec_rappel)
@@ -689,19 +693,22 @@ class Chat(commands.Cog):
                     await message.reply(reply)
                     return
 
-        # Debounce : annule la tâche en attente et replanifie avec ce message
+        # Debounce : annule la tâche en attente et replanifie avec ce message.
+        # Clé par (salon, auteur) : ne fusionne que les messages successifs d'une
+        # même personne, jamais deux questions distinctes de deux personnes.
         channel_id = message.channel.id
-        pending = self._pending_responses.pop(channel_id, None)
+        debounce_key = (channel_id, message.author.id)
+        pending = self._pending_responses.pop(debounce_key, None)
         if pending:
             pending.cancel()
         else:
             # Premier trigger de cette fenêtre
-            self._first_triggers[channel_id] = message
+            self._first_triggers[debounce_key] = message
 
         async def _delayed(msg: discord.Message, task_ref: "list[asyncio.Task]") -> None:
             try:
                 await asyncio.sleep(DEBOUNCE_SECONDS)
-                first = self._first_triggers.pop(channel_id, msg)
+                first = self._first_triggers.pop(debounce_key, msg)
                 await self._send_response(msg, use_reply=(first.id == msg.id))
             except asyncio.CancelledError:
                 # Une tâche plus récente prend le relais : ne pas toucher au state partagé
@@ -710,13 +717,13 @@ class Chat(commands.Cog):
                 logger.error(f"Réponse échouée ({channel_id}): {e}", exc_info=True)
             finally:
                 # Ne retirer l'entrée que si elle pointe toujours sur CETTE tâche
-                if self._pending_responses.get(channel_id) is task_ref[0]:
-                    self._pending_responses.pop(channel_id, None)
+                if self._pending_responses.get(debounce_key) is task_ref[0]:
+                    self._pending_responses.pop(debounce_key, None)
 
         task_holder: list[asyncio.Task] = []
         task = asyncio.create_task(_delayed(message, task_holder))
         task_holder.append(task)
-        self._pending_responses[channel_id] = task
+        self._pending_responses[debounce_key] = task
 
     # ------------------------------------------------------------------
     # Slash commands
