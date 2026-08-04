@@ -618,16 +618,27 @@ class Chat(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         # Le chat conversationnel est volontairement limité aux serveurs.
-        if message.author.bot or not message.guild:
+        if not message.guild:
+            return
+        # Nos propres messages sont déjà injectés directement dans le contexte
+        # (session._run côté assistant) — les réingérer ici les dupliquerait.
+        if self.bot.user and message.author.id == self.bot.user.id:
             return
         key = (message.channel.id, message.id)
         if key in self._processed:
             return
         self._processed.append(key)
 
-        should_respond = self._should_respond(message)
+        # Les autres bots (flux d'actu, webhooks…) restent visibles en contexte passif
+        # (texte, embeds, LayoutView) pour que MARIA puisse en parler si on l'interroge —
+        # mais ils ne déclenchent jamais de réponse ni d'extraction mémoire.
+        other_bot = message.author.bot
+        should_respond = False if other_bot else self._should_respond(message)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
+
+        if other_bot:
+            return
 
         mem_content = _build_memory_ingest_text(message, bot_user=self.bot.user)
         if self._memory_worker and mem_content:
