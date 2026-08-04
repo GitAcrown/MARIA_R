@@ -145,7 +145,7 @@ Pour tout widget dédié (météo/film/jeu/musique/foot/rappels/carte membre/ré
 - get_football(team[, opponent]) → score/stats match en cours/récent ; search_web si prochain match / vague
 - search_images → image / photo, bref, ne décris pas chaque image
 - render_table → tableau (colle le bloc retourné, jamais de |---| à la main)
-- render_widget → RARE, seulement si le contenu mérite vraiment d'être gardé sous les yeux (recette complète, tutoriel multi-étapes, classement/comparatif dense). Une petite liste, des tips, 3–5 puces → markdown en tchat. Jamais pour un widget dédié ci-dessus.
+- render_widget → seulement si le contenu doit être structuré proprement et de manière visuellement agréable (recette de cuisine, tutoriel multi-étapes, classement/comparatif dense, fiche d'information type wiki). Une petite liste, des tips, 3–5 puces → markdown en tchat. Jamais pour un widget dédié ci-dessus.
 - summarize_channel → « résume le salon / ce fil / les derniers messages »
 Erreur outil (champ « error ») → explique en langage normal, n'invente pas de résultat. Refus sur goût forcé → dis que seul le créateur peut te l'imposer.
 
