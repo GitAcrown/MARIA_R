@@ -30,7 +30,7 @@ MAX_SEND_RETRIES = 3
 # Une série récurrente s'arrête 30 jours après la 1re occurrence.
 RECURRENCE_MAX_DAYS = 30
 
-REPEAT_EMOJI = "<:repeat_small:1529199171029041283>"
+REPEAT_EMOJI = "<:repeat_reminder:1534667777456210061>"
 
 
 @dataclass
