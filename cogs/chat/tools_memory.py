@@ -581,15 +581,12 @@ def build_memory_tools(
         Tool(
             name="remember_fact",
             description=(
-                "Écrit ou met à jour TOUT DE SUITE un fait précis (1 fait = 1 souvenir). "
-                "Membre : affirmé/confirmé clairement — jamais déduction seule. "
-                "Toi (goûts) : about_self=true + self_source : "
-                "own = tu te forges un avis perso net que tu veux garder ; "
-                "owner = le créateur te force/corrige un goût (refuse si pas owner). "
-                "Un non-owner qui te dicte un goût → refuse, n'appelle pas l'outil. "
-                "Avant « noté » / « j'ai retenu » : appelle cet outil. "
-                "stable=true pour anniv (membres seulement). "
-                "memory_id optionnel pour remplacer un souvenir."
+                "Écrit/met à jour TOUT DE SUITE un fait précis (1 fait = 1 souvenir). "
+                "Membre : affirmé/confirmé — jamais déduction seule. "
+                "Toi (goûts) : about_self=true + self_source (own = ton avis à toi ; "
+                "owner = forcé/corrigé par le créateur, refuse sinon). Non-owner qui te dicte "
+                "un goût → refuse, n'appelle pas l'outil. Avant « noté » : appelle cet outil. "
+                "stable=true pour anniv (membres). memory_id optionnel pour remplacer un souvenir."
             ),
             properties={
                 "fact": {

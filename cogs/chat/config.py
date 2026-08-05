@@ -8,9 +8,16 @@ Centralise les valeurs qui étaient auparavant éparpillées et incohérentes en
 MODEL_MAIN = "gpt-5.6-luna"
 
 # Fenêtre de contexte / budget de la session de chat
-CONTEXT_WINDOW = 8000
+# CONTEXT_WINDOW est la vraie limite (en tokens) ; MAX_MESSAGES=0 = pas de plafond
+# de comptage — seul le budget tokens décide, en retirant des messages ENTIERS
+# (jamais de troncature au milieu d'un message, cf. ConversationContext.trim()).
+# Repère : 40 messages de tchat normal ≈ 600-1200 tokens ; un render_widget bien
+# rempli (12 blocs) peut peser ~2500 tokens à lui seul. 3000 laisse la place pour
+# un gros tool call + quelques messages autour, sans traîner un historique inutile
+# le reste du temps (le tchat pur n'en consomme jamais qu'une fraction).
+CONTEXT_WINDOW = 3000
 CONTEXT_AGE_HOURS = 1
-MAX_MESSAGES = 40
+MAX_MESSAGES = 0
 # Plafond, pas un coût fixe (une réponse courte ne consomme que ce qu'elle écrit).
 # Doit couvrir le pire cas d'un tool call render_widget rempli à fond : 12 blocs
 # à ~800 caractères chacun ≈ 2500 tokens rien que pour l'argument JSON — d'où la marge.

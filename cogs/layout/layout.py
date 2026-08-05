@@ -113,20 +113,15 @@ class Layout(commands.Cog):
             Tool(
                 name="render_widget",
                 description=(
-                    "Compose et affiche un widget visuel libre dans le salon (catalogue fermé de blocs : "
-                    "text, separator, stat_row, thumbnail, gallery, footer). "
-                    "À utiliser RAREMENT — seulement pour un contenu dense à garder sous les yeux : "
-                    "recette complète, tutoriel multi-étapes, classement/comparatif substantiel. "
-                    "PAS pour une petite liste, des tips, 3–5 puces, une checklist courte : "
-                    "réponds en markdown dans le tchat. "
-                    "Ne PAS utiliser pour une réponse tchat courte (avis, blague, oui/non, une phrase). "
-                    "Ne remplace JAMAIS les widgets dédiés (météo/film/jeu/foot/rappels). "
-                    "Blocs thumbnail/gallery : UNIQUEMENT une URL d'image déjà fiable dans le contexte "
-                    "(avatar Discord, pochette/affiche d'un résultat d'outil dédié). "
-                    "Ne va PAS chercher une image via search_images pour ces blocs : les images trouvées sur "
-                    "le web s'affichent souvent cassées dans Discord (protection anti-hotlink, liens temporaires). "
-                    "Sans URL fiable, ignore l'image plutôt que d'en risquer une cassée. "
-                    "Reste sobre : peu de blocs, footer qui source l'info si pertinent.\n\n"
+                    "Compose et affiche un widget visuel libre (blocs : text, separator, stat_row, "
+                    "thumbnail, gallery, footer). RARE — seulement contenu dense à garder sous les yeux "
+                    "(recette complète, tutoriel multi-étapes, classement/comparatif substantiel). Jamais "
+                    "pour une liste courte, des tips, un avis/blague/une phrase (markdown en tchat), ni pour "
+                    "remplacer un widget dédié (météo/film/jeu/foot/rappels). "
+                    "thumbnail/gallery : uniquement une URL déjà fiable en contexte (avatar Discord, "
+                    "pochette d'un outil dédié) — jamais via search_images (images web souvent cassées sur "
+                    "Discord, anti-hotlink/liens temporaires) ; sans URL fiable, ignore l'image. "
+                    "Reste sobre, footer sourcé si pertinent.\n\n"
                     + WIDGET_CANON_EXAMPLES
                 ),
                 properties={

@@ -195,15 +195,12 @@ WIDGET_SPEC_SCHEMA = {
 
 # Exemples canon (few-shot) — à réutiliser tels quels dans la description des outils
 # qui exposent ce catalogue, pour garder un style cohérent malgré la composition libre.
+# Volontairement réduit à 2 exemples (couvrent tous les types de bloc courants) :
+# ce texte est envoyé à CHAQUE appel LLM via la description de l'outil, pas juste
+# quand il est utilisé — chaque exemple en plus a un coût réel en tokens.
 WIDGET_CANON_EXAMPLES = """Exemples canon (respecte ce style : titres courts, footer sourcé) :
 
-1) Classement / stats :
-{"title": "Classement", "emoji": "🏆", "blocks": [
-  {"type": "stat_row", "items": [{"label": "1er", "value": "Alice — 42 pts"}, {"label": "2e", "value": "Bob — 35 pts"}]},
-  {"type": "footer", "text": "Basé sur les scores du salon"}
-]}
-
-2) Comparatif A vs B :
+1) Comparatif A vs B :
 {"title": "PS5 vs Xbox Series X", "emoji": "🎮", "blocks": [
   {"type": "text", "content": "**PS5** : exclusivités fortes, DualSense."},
   {"type": "separator"},
@@ -211,17 +208,10 @@ WIDGET_CANON_EXAMPLES = """Exemples canon (respecte ce style : titres courts, fo
   {"type": "footer", "text": "Avis MARIA"}
 ]}
 
-3) Fiche personne avec vignette :
-{"title": "Carte de membre", "emoji": "🪪", "blocks": [
-  {"type": "thumbnail", "url": "https://exemple.com/avatar.png", "text": "Membre actif, aime les RPG."},
-  {"type": "footer", "text": "D'après la mémoire de MARIA"}
-]}
-
-4) Recette / tutoriel :
+2) Recette / tutoriel (avec stats + thumbnail) :
 {"title": "Pâtes carbonara", "emoji": "🍝", "blocks": [
   {"type": "stat_row", "items": [{"label": "Temps", "value": "25 min"}, {"label": "Pers.", "value": "2"}]},
-  {"type": "text", "content": "**Ingrédients**\\n• 200 g spaghetti\\n• 100 g guanciale\\n• 2 jaunes\\n• 40 g pecorino"},
-  {"type": "separator"},
+  {"type": "thumbnail", "url": "https://exemple.com/plat.jpg", "text": "**Ingrédients**\\n• 200 g spaghetti\\n• 100 g guanciale\\n• 2 jaunes\\n• 40 g pecorino"},
   {"type": "text", "content": "**Étapes**\\n1. Dorer le guanciale.\\n2. Cuire les pâtes.\\n3. Lier hors du feu avec jaunes + pecorino."},
   {"type": "footer", "text": "Recette classique"}
 ]}"""

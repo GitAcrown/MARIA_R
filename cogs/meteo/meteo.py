@@ -451,15 +451,12 @@ class Meteo(commands.Cog):
             Tool(
                 name="get_weather",
                 description=(
-                    "Récupère et affiche la météo d'une ville. "
-                    "type='current' → météo maintenant. type='forecast' → prévisions. "
-                    "Pour un jour précis ('demain', 'jeudi'…) : type='forecast' + target_date='demain'/'lundi'/etc. "
-                    "Question de suivi de LA MÊME personne, sans ville explicite ('et demain ?', 'et la "
-                    "semaine ?', 'pour lundi ?') → réutiliser la ville du dernier appel get_weather visible "
-                    "en contexte. "
-                    "« chez moi / chez toi » → ville de LA PERSONNE QUI PARLE MAINTENANT (son profil, PAS "
-                    "la ville du dernier appel get_weather si c'était pour quelqu'un d'autre). Adresse "
-                    "absente du profil → ne PAS deviner ni réutiliser une autre ville : dis-le simplement."
+                    "Récupère et affiche la météo d'une ville. type='current' = maintenant, "
+                    "type='forecast' = prévisions (+ target_date pour un jour précis, ex. 'demain'/'lundi'). "
+                    "Suivi de LA MÊME personne sans ville explicite ('et demain ?') → réutilise la ville "
+                    "du dernier appel visible en contexte. "
+                    "« chez moi/toi » → ville du PROFIL de qui parle MAINTENANT, jamais celle d'un appel "
+                    "précédent pour quelqu'un d'autre ; adresse absente du profil → dis-le, n'invente rien."
                 ),
                 properties={
                     "city": {
