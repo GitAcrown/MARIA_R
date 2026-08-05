@@ -351,7 +351,9 @@ def _build_summary_payload(
     if from_cache:
         footer += " · cache"
 
-    content = summary[:800]
+    # Pas de coupure brute ici : render_free_widget (_text_block) tronque déjà
+    # proprement (fin de phrase/mot) si le résumé dépasse la place disponible.
+    content = summary
     spec = {
         "title": f"Résumé — #{name}",
         "emoji": RESUME,

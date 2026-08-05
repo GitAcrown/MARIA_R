@@ -17,11 +17,31 @@ from common.discord_ui import section_with_thumbnail
 _MAX_BLOCKS = 12
 _MAX_STAT_ITEMS = 6
 _MAX_GALLERY = 4
-_MAX_TEXT = 800
+# Discord accepte largement plus par TextDisplay (~4000) ; 1900 laisse de la marge
+# tout en couvrant les blocs denses (résumé, recette) sans couper en plein mot.
+_MAX_TEXT = 1900
+
+
+def _truncate_clean(text: str, limit: int) -> str:
+    """Coupe à `limit` caractères sans trancher un mot/une phrase en plein milieu.
+
+    Cherche le dernier saut de ligne ou point-espace avant la limite ; sinon
+    replie sur le dernier espace. Ajoute une ellipse si une coupure a eu lieu.
+    """
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind("\n"), cut.rfind(". "))
+    if boundary < limit * 0.6:
+        boundary = cut.rfind(" ")
+    if boundary <= 0:
+        boundary = limit
+    return cut[:boundary].rstrip(" .,;:—-") + "…"
 
 
 def _text_block(content: str) -> discord.ui.TextDisplay:
-    return discord.ui.TextDisplay(str(content)[:_MAX_TEXT])
+    return discord.ui.TextDisplay(_truncate_clean(content, _MAX_TEXT))
 
 
 def _stat_row_block(items) -> Optional[discord.ui.TextDisplay]:
