@@ -195,21 +195,36 @@ class ChannelSession:
         self._prompt_context: Optional[dict] = None
         # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence).
         # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
+        # `_ingested_records` garde une référence au MessageRecord produit, pour vérifier qu'il
+        # est ENCORE dans le contexte courant (trim() peut l'avoir évincé entre-temps) avant de
+        # se contenter d'un renvoi court type « [Suite de : X] » sans contenu.
         self._ingested_ids: set[int] = set()
         self._ingested_order: deque[int] = deque(maxlen=INGESTED_IDS_MAX)
+        self._ingested_records: dict[int, MessageRecord] = {}
         # Notes système injectées récemment (résultats d'outils, widgets affichés…).
         # Surfacées dans le [FOCUS] pour que le LLM sache immédiatement le contexte actif.
         self._recent_system_notes: deque[tuple[datetime, str]] = deque(maxlen=6)
 
-    def _remember_ingested(self, message_id: int) -> None:
-        """Mémorise un ID ingéré en évinçant le plus ancien au-delà de la borne."""
+    def _remember_ingested(self, message_id: int, record: MessageRecord) -> None:
+        """Mémorise un ID ingéré (+ son record) en évinçant le plus ancien au-delà de la borne."""
         if message_id in self._ingested_ids:
+            self._ingested_records[message_id] = record
             return
         if len(self._ingested_order) >= INGESTED_IDS_MAX:
             oldest = self._ingested_order.popleft()
             self._ingested_ids.discard(oldest)
+            self._ingested_records.pop(oldest, None)
         self._ingested_order.append(message_id)
         self._ingested_ids.add(message_id)
+        self._ingested_records[message_id] = record
+
+    def _still_in_context(self, message_id: int) -> bool:
+        """True si le message référencé est encore visible dans le contexte courant
+        (pas évincé par trim()) — sinon un simple « [Suite de : X] » serait aveugle."""
+        record = self._ingested_records.get(message_id)
+        if record is None:
+            return False
+        return any(m is record for m in self.context.get_messages())
 
     async def ingest_message(self, message: discord.Message, is_context_only: bool = False) -> MessageRecord:
         """Ingère un message dans le contexte GPT. Acquiert le lock pour éviter les
@@ -260,8 +275,8 @@ class ChannelSession:
             else:
                 label = ref_name
 
-            if ref_id and ref_id in self._ingested_ids:
-                # Message déjà dans le contexte de cette session : pas de doublon
+            if ref_id and self._still_in_context(ref_id):
+                # Message encore réellement visible dans le contexte courant : pas de doublon
                 parts.append(TextComponent(f"[Suite de : {label}]"))
             else:
                 # Message hors contexte (avant restart, autre session…)
@@ -384,7 +399,7 @@ class ChannelSession:
         record = self.context.add_user_message(components=parts, name=api_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
-        self._remember_ingested(message.id)
+        self._remember_ingested(message.id, record)
         return record
 
     async def run_completion(
@@ -577,6 +592,7 @@ class ChannelSession:
         self.context.clear()
         self._ingested_ids.clear()
         self._ingested_order.clear()
+        self._ingested_records.clear()
         self._recent_system_notes.clear()
         self.trigger_message = None
 

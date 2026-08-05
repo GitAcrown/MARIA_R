@@ -11,11 +11,14 @@ MODEL_MAIN = "gpt-5.6-luna"
 # CONTEXT_WINDOW est la vraie limite (en tokens) ; MAX_MESSAGES=0 = pas de plafond
 # de comptage — seul le budget tokens décide, en retirant des messages ENTIERS
 # (jamais de troncature au milieu d'un message, cf. ConversationContext.trim()).
-# Repère : 40 messages de tchat normal ≈ 600-1200 tokens ; un render_widget bien
-# rempli (12 blocs) peut peser ~2500 tokens à lui seul. 3000 laisse la place pour
-# un gros tool call + quelques messages autour, sans traîner un historique inutile
-# le reste du temps (le tchat pur n'en consomme jamais qu'une fraction).
-CONTEXT_WINDOW = 3000
+# ATTENTION : trim() déduit le prompt développeur ENTIER (instructions + contexte
+# salon + profils + mémoire, souvent 1800-2500 tokens une fois tout injecté) de ce
+# budget avant de calculer la place pour l'historique. Une valeur trop basse (testé
+# à 3000) ne laissait quasi plus rien pour la conversation dès qu'un render_widget
+# un peu chargé (~2500 tokens) apparaissait dans l'historique récent → amnésie et
+# réponses à côté. 6000 restaure une vraie marge pour l'historique tout en restant
+# bien en dessous de l'ancien 8000 (le dev prompt et les tools ont été compactés).
+CONTEXT_WINDOW = 6000
 CONTEXT_AGE_HOURS = 1
 MAX_MESSAGES = 0
 # Plafond, pas un coût fixe (une réponse courte ne consomme que ce qu'elle écrit).
