@@ -500,7 +500,7 @@ class Chat(commands.Cog):
                     prefer_collective=bool(profile_ctx),
                     exclude_contents=exclude_contents,
                 )
-                memory_ctx = format_memory_ctx(memories, name_by_user_id=name_by_id)
+                memory_ctx = format_memory_ctx(memories, name_by_user_id=name_by_id, bot_name=bot_label)
             except Exception as e:
                 logger.warning("RAG mémoire échoué: %s", e)
 

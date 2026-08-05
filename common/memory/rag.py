@@ -183,19 +183,29 @@ def format_memory_ctx(
     memories: list[Memory],
     *,
     name_by_user_id: Optional[dict[int, str]] = None,
+    bot_name: str = "MARIA",
 ) -> str:
     if not memories:
         return ""
     names = name_by_user_id or {}
+    name = (bot_name or "MARIA").strip() or "MARIA"
     lines = [
         "MEMOIRE PERTINENTE (complément — allusion OK si pertinent au fil, "
         "sinon ignore ; ne récite pas, n'invente aucun détail) :"
     ]
     for m in memories:
+        content = m.content
+        if m.category == CATEGORY_SELF:
+            # Stocké « MARIA : fait » — jamais répéter ce préfixe dans le contexte,
+            # ça lui fait prendre l'habitude de commencer ses réponses par son nom.
+            for prefix in (f"{name} :", f"{name}:"):
+                if content.lower().startswith(prefix.lower()):
+                    content = content[len(prefix):].strip()
+                    break
         if m.user_id:
             label = names.get(m.user_id) or "?"
             who = f" {label} ({m.user_id})"
         else:
             who = ""
-        lines.append(f"- [{m.category}]{who} {m.content}")
+        lines.append(f"- [{m.category}]{who} {content}")
     return "\n".join(lines)
