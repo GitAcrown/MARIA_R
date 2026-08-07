@@ -44,13 +44,60 @@ _LEAKED_TOKEN_RE = re.compile(
     r"|\s*\[widget\]\s*",
     re.IGNORECASE | re.DOTALL,
 )
+# Scripts « exotiques » parfois collés en fin de réponse par gpt-5.6-luna
+# (cyrillique / CJK / hébreu / arabe…). On ne touche QUE un court blob final
+# isolé après une phrase majoritairement latine — une vraie réponse en russe
+# (corps déjà cyrillique) n'est pas concernée.
+_FOREIGN_SCRIPT_RE = re.compile(
+    r"[\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F"  # cyrillique
+    r"\u0590-\u05FF"  # hébreu
+    r"\u0600-\u06FF\u0750-\u077F"  # arabe
+    r"\u0900-\u097F"  # dévanâgarî
+    r"\u3040-\u30FF\u3400-\u9FFF\uF900-\uFAFF"  # CJK / kana
+    r"\uAC00-\uD7AF]+"  # hangul
+)
+_TRAILING_FOREIGN_JUNK_RE = re.compile(
+    r"(?P<body>.*[.!?…])"  # phrase déjà terminée
+    r"(?P<close>[\"'»”)\]*_`]*)"  # fermetures markdown / guillemets
+    r"(?P<trail>\s+" + _FOREIGN_SCRIPT_RE.pattern + r")\s*$",
+    re.DOTALL,
+)
+_LATIN_LETTER_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿŒœÆæ]")
+
+
+def _strip_trailing_foreign_junk(text: str) -> str:
+    """Retire un mini-blob de script non-latin collé APRÈS une phrase latine.
+
+    Garde intact :
+    - une réponse majoritairement dans ce script (ex. vrai russe) ;
+    - un mot étranger intégré avant la fin de phrase (« ça se dit привет. »).
+    """
+    m = _TRAILING_FOREIGN_JUNK_RE.match(text)
+    if not m:
+        return text
+    body = m.group("body") + m.group("close")
+    trail = m.group("trail")
+    # Blob trop long → probablement du vrai contenu, pas une fuite.
+    foreign_chars = _FOREIGN_SCRIPT_RE.findall(trail)
+    trail_len = sum(len(x) for x in foreign_chars)
+    if trail_len < 2 or trail_len > 24:
+        return text
+    latin = len(_LATIN_LETTER_RE.findall(body))
+    foreign_in_body = sum(len(x) for x in _FOREIGN_SCRIPT_RE.findall(body))
+    if latin < 8:
+        return text
+    # Corps déjà bilingue / non-latin → on ne touche pas.
+    if foreign_in_body > 0 and foreign_in_body >= max(3, latin // 10):
+        return text
+    return body.rstrip()
 
 
 def _strip_leaked_tokens(text: str) -> str:
     # Remplacer par un espace (pas une chaîne vide) pour ne pas coller les mots
     # entourant le fragment retiré ; on nettoie ensuite les espaces doublés.
     cleaned = _LEAKED_TOKEN_RE.sub(" ", text)
-    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return _strip_trailing_foreign_junk(cleaned)
 # Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
 INGESTED_IDS_MAX = 500
 
