@@ -147,14 +147,24 @@ def build_memory_tools(
             }
             for m in memories
         ]
+        # _llm_summary DOIT contenir id + contenu de chaque item : c'est le seul texte
+        # que le modèle voit (cf. ToolResponseRecord), et l'id est indispensable pour
+        # enchaîner remember_fact(memory_id=...) / forget_fact.
+        if items:
+            lines = [f"{len(items)} souvenir(s) trouvé(s) :"]
+            for it in items:
+                who = f" user={it['user_id']}" if it["user_id"] else ""
+                lines.append(
+                    f"- id={it['id']} [{it['category']}]{who} "
+                    f"(conf={it['confidence']}) {it['content']}"
+                )
+            summary = "\n".join(lines)
+        else:
+            summary = "Aucun souvenir correspondant."
         return ToolResponseRecord(tc.id, {
             "count": len(items),
             "memories": items,
-            "_llm_summary": (
-                f"{len(items)} souvenir(s) trouvé(s)."
-                if items
-                else "Aucun souvenir correspondant."
-            ),
+            "_llm_summary": summary,
         }, datetime.now(timezone.utc))
 
     async def _tool_remember_fact(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
