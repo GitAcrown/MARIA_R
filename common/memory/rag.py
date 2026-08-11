@@ -50,9 +50,11 @@ def build_self_ctx(
         return "", seen
 
     header = (
-        f"TES GOÛTS / TOI ({name}) — sois constante : réutilise ces préférences "
-        "quand tu donnes un avis perso ; ne les contredis pas sans qu'on te le demande ; "
-        "ne récite pas la liste :"
+        f"TES GOÛTS / TOI ({name}) — trait de fond, PAS un sujet à amener toi-même : "
+        "ne les mentionne QUE si on te demande explicitement ton avis sur CE sujet précis, "
+        "et reste cohérente avec quand tu le fais. Sinon ignore complètement cette liste — "
+        "ne la récite pas, ne la glisse pas dans une réponse sans rapport, jamais deux fois "
+        "de suite sur le même point même si le sujet revient :"
     )
     return header + "\n- " + " · ".join(facts), seen
 
