@@ -1,4 +1,4 @@
-"""Cog Auto — transcription audio à la demande (réaction 🎙️) et automatique."""
+"""Cog Auto — transcription audio à la demande (réaction custom) et automatique."""
 
 import io
 import logging
@@ -7,6 +7,7 @@ import time
 import discord
 from discord.ext import commands
 
+from common.emojis import TRANSCRIPT
 from common.llm import MariaLLMClient
 
 logger = logging.getLogger("MARIA.Auto")
@@ -15,7 +16,7 @@ AUTO_TRANSCRIBE_MAX_SECS = 120
 
 
 class Auto(commands.Cog):
-    """Transcription audio — réaction 🎙️ sur message audio pour transcrire."""
+    """Transcription audio — réaction custom sur message audio pour transcrire."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -94,7 +95,10 @@ class Auto(commands.Cog):
                 return
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
-        suffix = f"\n-# Transcription demandée par {requester_name}" if requester_name else "\n-# Transcription automatique"
+        suffix = (
+            f"\n-# {TRANSCRIPT} Transcription demandée par {requester_name}"
+            if requester_name else f"\n-# {TRANSCRIPT} Transcription automatique"
+        )
         await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
 
     @commands.Cog.listener()
@@ -112,11 +116,11 @@ class Auto(commands.Cog):
 
         has_audio = any(self._is_audio(a) for a in message.attachments)
         if has_audio:
-            await message.add_reaction("🎙️")
+            await message.add_reaction(TRANSCRIPT)
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
-        if user.bot or str(reaction.emoji) != "🎙️":
+        if user.bot or str(reaction.emoji) != TRANSCRIPT:
             return
         msg = reaction.message
         audio_att = next((a for a in msg.attachments if self._is_audio(a)), None)

@@ -363,9 +363,10 @@ def _build_summary_payload(
         ],
     }
     note = (
-        f"Résumé de #{name} (cache, {useful} msgs)."
-        if from_cache
-        else f"Résumé de #{name} affiché ({useful} msgs)."
+        f"Widget résumé de #{name} affiché ({useful} msgs"
+        + (", cache" if from_cache else "")
+        + "). Le contenu est DANS le widget : une demi-phrase d'intro max, "
+        "ne reformule rien, ne recopie rien."
     )
     return {
         "_tool": "summarize_channel",
@@ -500,7 +501,8 @@ def build_channel_summary_tools(
                 "en widget. Pour « résume le salon », « c'était quoi ce fil », "
                 "« récap des derniers messages », « résume la journée ». Défaut : salon actuel. "
                 "Pour une journée : hours=24 (le volume est géré automatiquement, lots + synthèse). "
-                "Ne pas utiliser pour un simple avis en tchat."
+                "Après l'appel : une demi-phrase d'intro tout au plus — ne pas reformuler "
+                "le résumé, le widget le contient déjà. Ne pas utiliser pour un simple avis en tchat."
             ),
             properties={
                 "channel_id": {
