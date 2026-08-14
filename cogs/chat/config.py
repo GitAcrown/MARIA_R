@@ -28,6 +28,12 @@ MAX_TOKENS = 4000
 # Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
 DEBOUNCE_SECONDS: float = 0.33
 
+# Streaming Discord (édition progressive du message)
+# Discord limite ~5 PATCH / 5 s par message : 1,2 s laisse une marge, plus l'edit final.
+STREAM_EDIT_INTERVAL: float = 1.2
+# Ne pas poster le premier message à la première lettre (évite un flash "M").
+STREAM_MIN_FIRST_CHARS: int = 8
+
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).
 # Flush hybride : lecture passive plus lente ; dialogue avec MARIA flush plus tôt.

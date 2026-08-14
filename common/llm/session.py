@@ -6,7 +6,7 @@ import logging
 import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import discord
 
@@ -455,12 +455,25 @@ class ChannelSession:
         *,
         model: Optional[str] = None,
         prompt_context: Optional[dict] = None,
+        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> AssistantRecord:
         async with self._lock:
             self._prompt_context = prompt_context
-            return await self._run(trigger_message, 0, model=model)
+            return await self._run(
+                trigger_message, 0, model=model,
+                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+            )
 
-    async def _run(self, trigger: Optional[discord.Message], depth: int, *, model: Optional[str] = None) -> AssistantRecord:
+    async def _run(
+        self,
+        trigger: Optional[discord.Message],
+        depth: int,
+        *,
+        model: Optional[str] = None,
+        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> AssistantRecord:
         if depth >= MAX_RECURSION:
             return self.context.add_assistant_message(
                 components=[TextComponent("Limite d'outils atteinte. Reformule ta demande.")],
@@ -516,18 +529,36 @@ class ChannelSession:
             messages = messages + [{"role": "user", "content": hint, "name": "system"}]
 
         tools = self.tool_registry.get_compiled() if len(self.tool_registry) > 0 else []
+        stream = on_text_delta is not None
+
+        async def _delta(raw: str) -> None:
+            if on_text_delta is None:
+                return
+            cleaned = _strip_leaked_tokens(raw) if raw else raw
+            if cleaned:
+                await on_text_delta(cleaned)
 
         try:
             completion = await self.client.chat(
                 messages=messages,
                 tools=tools if tools else None,
                 model=model,
+                stream=stream,
+                on_text_delta=_delta if stream else None,
+                on_text_reset=on_text_reset if stream else None,
             )
         except MariaOpenAIError as e:
             if "invalid_image_url" in str(e):
                 self.context.filter_images()
                 messages = self.context.prepare_payload()
-                completion = await self.client.chat(messages=messages, tools=tools if tools else None, model=model)
+                completion = await self.client.chat(
+                    messages=messages,
+                    tools=tools if tools else None,
+                    model=model,
+                    stream=stream,
+                    on_text_delta=_delta if stream else None,
+                    on_text_reset=on_text_reset if stream else None,
+                )
             else:
                 raise
 
@@ -569,13 +600,29 @@ class ChannelSession:
         )
 
         if tool_calls:
+            if on_text_reset is not None:
+                try:
+                    await on_text_reset()
+                except Exception:
+                    logger.exception("on_text_reset")
             await self._execute_tools(tool_calls)
-            return await self._run(None, depth + 1, model=model)
+            return await self._run(
+                None, depth + 1, model=model,
+                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+            )
 
         if not cleaned_content or not cleaned_content.strip():
+            if on_text_reset is not None:
+                try:
+                    await on_text_reset()
+                except Exception:
+                    logger.exception("on_text_reset")
             self.context._messages.pop()
             self.context.add_user_message(components=[TextComponent("[SYSTEM] Réponds maintenant.")], name="system")
-            return await self._run(None, depth + 1, model=model)
+            return await self._run(
+                None, depth + 1, model=model,
+                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+            )
 
         return assistant
 

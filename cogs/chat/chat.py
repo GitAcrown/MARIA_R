@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -57,6 +58,8 @@ from cogs.chat.config import (
     MEMORY_SEMANTIC_DEDUP_DISTANCE,
     MEMORY_TOP_K,
     MODEL_MAIN,
+    STREAM_EDIT_INTERVAL,
+    STREAM_MIN_FIRST_CHARS,
 )
 from cogs.chat.tools_reminders import build_reminder_tools, build_reminders_view
 from cogs.chat.tools_discord import build_discord_tools
@@ -96,7 +99,7 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "math_eval", "list_reminders", "show_reminders", "search_memory",
-    "remember_fact", "about_me",
+    "remember_fact", "forget_fact", "about_me",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table", "render_widget",
     "summarize_channel", "search_track",
@@ -193,6 +196,117 @@ async def send_long(
             await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
+_STREAM_CURSOR = " ▌"
+_NO_MENTIONS = discord.AllowedMentions.none()
+
+
+class StreamPublisher:
+    """Publie une réponse en l'éditant progressivement, sans spammer l'API Discord.
+
+    Premier POST dès qu'il y a assez de texte, puis au plus un PATCH toutes
+    `STREAM_EDIT_INTERVAL` secondes. L'edit final (sans curseur) est toujours
+    envoyé, même s'il arrive juste après le précédent.
+    """
+
+    def __init__(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        reply_to: Optional[discord.Message] = None,
+    ):
+        self.channel = channel
+        self.reply_to = reply_to
+        self.message: Optional[discord.Message] = None
+        self._last_edit = 0.0
+        self._last_sent = ""
+        self._abandoned = False
+        self._lock = asyncio.Lock()
+
+    async def update(self, text: str) -> None:
+        async with self._lock:
+            if self._abandoned or not (text or "").strip():
+                return
+            visible = text[: 2000 - len(_STREAM_CURSOR)]
+            now = time.monotonic()
+            if self.message is None:
+                if len(visible) < STREAM_MIN_FIRST_CHARS:
+                    return
+                await self._send(visible + _STREAM_CURSOR)
+                return
+            if now - self._last_edit < STREAM_EDIT_INTERVAL:
+                return
+            payload = visible + _STREAM_CURSOR
+            if payload == self._last_sent:
+                return
+            await self._edit(payload)
+
+    async def finish(self, text: str) -> None:
+        async with self._lock:
+            if self._abandoned:
+                return
+            chunks = _split_text(text, 2000) if text else []
+            first = chunks[0] if chunks else "…"
+            rest = chunks[1:]
+            if self.message is None:
+                await self._send(first)
+            elif first != self._last_sent:
+                await self._edit(first)
+            self._abandoned = True
+        for chunk in rest:
+            await self.channel.send(chunk, allowed_mentions=_NO_MENTIONS)
+
+    async def abandon(self) -> None:
+        """Supprime le message streamé (ex. un widget va le remplacer)."""
+        async with self._lock:
+            await self._abandon_locked()
+
+    async def reset(self) -> None:
+        """Annule un stream partiel (tool call / retry) pour recommencer."""
+        async with self._lock:
+            await self._abandon_locked()
+            self._abandoned = False
+            self._last_sent = ""
+            self._last_edit = 0.0
+
+    async def _abandon_locked(self) -> None:
+        if self._abandoned:
+            return
+        self._abandoned = True
+        msg = self.message
+        self.message = None
+        if msg is None:
+            return
+        try:
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+
+    async def _send(self, content: str) -> None:
+        try:
+            if self.reply_to is not None:
+                self.message = await self.reply_to.reply(
+                    content, mention_author=False, allowed_mentions=_NO_MENTIONS,
+                )
+            else:
+                self.message = await self.channel.send(
+                    content, allowed_mentions=_NO_MENTIONS,
+                )
+            self._last_sent = content
+            self._last_edit = time.monotonic()
+        except discord.HTTPException as e:
+            logger.warning("Stream send échoué : %s", e)
+
+    async def _edit(self, content: str) -> None:
+        if self.message is None:
+            return
+        try:
+            self.message = await self.message.edit(content=content)
+            self._last_sent = content
+            self._last_edit = time.monotonic()
+        except discord.HTTPException as e:
+            logger.warning("Stream edit échoué : %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -203,7 +317,10 @@ class Chat(commands.Cog):
         self.data = CogData("chat")
         self.data.set_builders(
             discord.Guild,
-            DictTableBuilder("guild_config", {"chatbot_mode": "strict"}),
+            DictTableBuilder("guild_config", {
+                "chatbot_mode": "strict",
+                "chatbot_stream": True,
+            }),
         )
         self.data.set_builders(
             discord.TextChannel,
@@ -511,12 +628,25 @@ class Chat(commands.Cog):
             "memory_ctx": memory_ctx,
         }
 
+        streamer: Optional[StreamPublisher] = None
+        if message.guild:
+            stream_on = self.data.get(message.guild).settings("guild_config").get(
+                "chatbot_stream", True, cast=bool,
+            )
+            if stream_on:
+                streamer = StreamPublisher(
+                    message.channel,
+                    reply_to=message if use_reply else None,
+                )
+
         async with message.channel.typing():
             resp = await self.gpt_api.run_completion(
                 message.channel,
                 trigger_message=message,
                 model=MODEL_MAIN,
                 prompt_context=prompt_context,
+                on_text_delta=streamer.update if streamer else None,
+                on_text_reset=streamer.reset if streamer else None,
             )
 
         text = resp.text
@@ -579,6 +709,8 @@ class Chat(commands.Cog):
             view = build_widget(tool_name, rd, commentary=commentary)
             if view is None:
                 continue
+            if streamer and not sent_tools:
+                await streamer.abandon()
             if use_reply and not sent_tools:
                 await message.reply(view=view)
             else:
@@ -588,7 +720,10 @@ class Chat(commands.Cog):
             sent_tools.append(tool_name)
 
         if not sent_tools:
-            await send_long(message.channel, text, reply_to=message if use_reply else None)
+            if streamer:
+                await streamer.finish(text)
+            else:
+                await send_long(message.channel, text, reply_to=message if use_reply else None)
 
     # ------------------------------------------------------------------
     # Événements
@@ -880,13 +1015,17 @@ class Chat(commands.Cog):
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         session = self.gpt_api.session_manager.get(interaction.channel_id)
         mode = "strict"
+        stream_on = False
         if interaction.guild:
-            mode = self.data.get(interaction.guild).settings("guild_config").get("chatbot_mode", "strict")
+            cfg = self.data.get(interaction.guild).settings("guild_config")
+            mode = cfg.get("chatbot_mode", "strict")
+            stream_on = cfg.get("chatbot_stream", True, cast=bool)
         await interaction.response.send_message(
             view=InfoView(
                 session.get_stats() if session else None,
                 interaction.channel,
                 mode=mode,
+                stream=stream_on,
             ),
             ephemeral=True,
         )
@@ -916,6 +1055,17 @@ class Chat(commands.Cog):
             return await interaction.response.send_message("Pas dans un serveur.", ephemeral=True)
         self.data.get(interaction.guild).settings("guild_config")["chatbot_mode"] = mode.value
         await interaction.response.send_message(f"Mode: **{mode.name}**", ephemeral=True)
+
+    @chatbot.command(name="stream", description="Active ou désactive le streaming des réponses")
+    @app_commands.describe(actif="Éditer le message au fil de la génération (plus lent, plus vivant)")
+    async def chatbot_stream(self, interaction: discord.Interaction, actif: bool) -> None:
+        if not interaction.guild:
+            return await interaction.response.send_message("Pas dans un serveur.", ephemeral=True)
+        self.data.get(interaction.guild).settings("guild_config")["chatbot_stream"] = actif
+        state = "activé" if actif else "désactivé"
+        await interaction.response.send_message(
+            f"Streaming des réponses **{state}** sur ce serveur.", ephemeral=True
+        )
 
     @chatbot.command(name="forget", description="Vide l'historique de conversation de ce salon")
     async def chatbot_forget(self, interaction: discord.Interaction) -> None:
