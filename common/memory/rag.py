@@ -13,6 +13,13 @@ logger = logging.getLogger("MARIA.Memory.RAG")
 
 MIN_CONFIDENCE = 0.3
 
+# Faits d'identité à garder en tête de profil (sinon noyés par les goûts).
+_IDENTITY_RE = re.compile(
+    r"\b(habite|habitant|ville|adresse|vit à|demeure|anniv|naissance|né[e]?|"
+    r"âge|ans\b|prénom|s'appelle)\b",
+    re.I,
+)
+
 # Normalise le contenu pour dédup profil ↔ RAG (casse / ponctuation légère).
 _DEDUP_RE = re.compile(r"\s+")
 
@@ -77,9 +84,14 @@ def build_profile_ctx(
     lines: list[str] = []
     seen_contents: set[str] = set()
     for uid, name in people:
-        memories = store.list_for_user(guild_id, uid, limit=facts_per_user)
-        if not memories:
+        # On tire plus large que le quota pour pouvoir prioriser ville/âge/anniv.
+        pool = store.list_for_user(guild_id, uid, limit=max(facts_per_user * 3, 15))
+        if not pool:
             continue
+        identity = [m for m in pool if _IDENTITY_RE.search(m.content or "")]
+        seen_ids = {m.id for m in identity}
+        others = [m for m in pool if m.id not in seen_ids]
+        memories = (identity + others)[:facts_per_user]
         label = (name or "?").strip() or "?"
         facts: list[str] = []
         for m in memories:

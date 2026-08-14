@@ -455,8 +455,10 @@ class Meteo(commands.Cog):
                     "type='forecast' = prévisions (+ target_date pour un jour précis, ex. 'demain'/'lundi'). "
                     "Suivi de LA MÊME personne sans ville explicite ('et demain ?') → réutilise la ville "
                     "du dernier appel visible en contexte. "
-                    "« chez moi/toi » → ville du PROFIL de qui parle MAINTENANT, jamais celle d'un appel "
-                    "précédent pour quelqu'un d'autre ; adresse absente du profil → dis-le, n'invente rien."
+                    "« chez moi/toi » / météo sans ville → ville du PROFIL ou de la "
+                    "mémoire de qui parle MAINTENANT, jamais celle d'un appel précédent "
+                    "pour quelqu'un d'autre. Ville pas dans le prompt → search_memory "
+                    "puis cet outil, ne dis pas que tu n'as pas l'adresse."
                 ),
                 properties={
                     "city": {
