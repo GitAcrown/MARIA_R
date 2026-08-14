@@ -23,6 +23,11 @@ def unregister_widget(tool_name: str) -> None:
     _BUILDERS.pop(tool_name, None)
 
 
+def has_widget(tool_name: str) -> bool:
+    """True si un builder de widget est enregistré pour cet outil."""
+    return tool_name in _BUILDERS
+
+
 def build_widget(tool_name: str, data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
     """Construit un LayoutView à partir du nom d'outil et des données retournées."""
     builder = _BUILDERS.get(tool_name)

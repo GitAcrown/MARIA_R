@@ -11,6 +11,7 @@ from typing import Awaitable, Callable, Optional
 import discord
 
 from common.timezones import PARIS_TZ as _PARIS_TZ
+from common.widgets import has_widget
 
 from .client import MariaLLMClient, MariaOpenAIError
 from .context import (
@@ -606,9 +607,13 @@ class ChannelSession:
                 except Exception:
                     logger.exception("on_text_reset")
             await self._execute_tools(tool_calls)
+            # Un widget va porter le commentaire : ne pas streamer le texte
+            # (sinon le message s'affiche puis se fait remplacer).
+            widget_coming = any(has_widget(tc.function_name) for tc in tool_calls)
             return await self._run(
                 None, depth + 1, model=model,
-                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+                on_text_delta=None if widget_coming else on_text_delta,
+                on_text_reset=None if widget_coming else on_text_reset,
             )
 
         if not cleaned_content or not cleaned_content.strip():
