@@ -6,7 +6,7 @@ import logging
 
 from discord.ext import commands, tasks
 
-from common.dyn_widgets import TabButton, sweep_expired
+from common.dyn_widgets import TabButton, TabSelect, sweep_expired
 
 logger = logging.getLogger("MARIA.Dyn")
 
@@ -17,13 +17,13 @@ class Dyn(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        self.bot.add_dynamic_items(TabButton)
+        self.bot.add_dynamic_items(TabButton, TabSelect)
         self.sweep.start()
         logger.info("DynamicItems onglets enregistrés")
 
     async def cog_unload(self) -> None:
         self.sweep.cancel()
-        self.bot.remove_dynamic_items(TabButton)
+        self.bot.remove_dynamic_items(TabButton, TabSelect)
 
     @tasks.loop(seconds=30)
     async def sweep(self) -> None:

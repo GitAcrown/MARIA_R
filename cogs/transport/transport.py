@@ -3,7 +3,7 @@
 Un outil :
 - arrêt IDF → prochains passages (PRIM)
 - ligne IDF → trafic
-- origin + destination → prochains trains SNCF
+- origin + destination → itinéraire (PRIM en IDF, SNCF hors IDF)
 - gare hors IDF / « train à … » → départs SNCF
 
 Clés .env : PRIM_API_KEY, SNCF_API_KEY
@@ -17,6 +17,7 @@ import html
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -50,6 +51,12 @@ _SNCF_HINT = re.compile(
     re.I,
 )
 _IDF_HINT = re.compile(r"\b(m[ée]tro|rer|tram|bus)\b", re.I)
+_NATIONAL = re.compile(
+    r"\b(lyon|marseille|lille|bordeaux|nantes|toulouse|strasbourg|rennes|nice|"
+    r"montpellier|grenoble|dijon|tours|angers|avignon|toulon|limoges|"
+    r"part[- ]dieu|saint[- ]charles|tgv|ouigo|inou[iï]|intercit|lyria|eurostar)\b",
+    re.I,
+)
 _ACCESSIBILITY = re.compile(r"\b(ascenseur|escalier|escalator)\b", re.I)
 
 
@@ -109,6 +116,74 @@ def _physical_mode(info: dict) -> str:
         or info.get("network")
         or ""
     ).strip()
+
+
+def _fold(text: str) -> str:
+    s = unicodedata.normalize("NFKD", text or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().replace("'", " ").replace("’", " ").replace("-", " ")
+    return " ".join(s.split())
+
+
+def _place_queries(query: str) -> list[str]:
+    q = " ".join((query or "").split())
+    if not q:
+        return []
+    out = [q]
+    elided = re.sub(r"\bl ([aeiouh])", r"l'\1", q, flags=re.I)
+    if elided not in out:
+        out.append(elided)
+    hyphen = re.sub(r"\s+", "-", elided)
+    if hyphen not in out:
+        out.append(hyphen)
+    return out[:3]
+
+
+def _place_name_bonus(query: str, name: str) -> int:
+    q = _fold(query)
+    n = _fold((name or "").split("(")[0])
+    if not q or not n:
+        return 0
+    if q == n:
+        return 80
+    if n.startswith(q) or q.startswith(n):
+        extra = len(set(n.split()) - set(q.split()))
+        return 40 - 8 * extra
+    return 0
+
+
+def _stop_name(node: dict) -> str:
+    if not node:
+        return "?"
+    name = (node.get("name") or "").strip()
+    if not name:
+        nested = node.get("stop_point") or node.get("stop_area") or {}
+        name = (nested.get("name") or "").strip()
+    if not name:
+        return "?"
+    short = name.split("(")[0].strip()
+    return short or name
+
+
+def _leg_head(info: dict) -> str:
+    mode = _physical_mode(info)
+    code = (info.get("code") or info.get("label") or "").strip()
+    ml = mode.lower()
+    if code:
+        if "transilien" in ml:
+            return f"Transilien {code}"
+        if "rer" in ml:
+            return f"RER {code}"
+        if ml in ("métro", "metro") or "métro" in ml or "metro" in ml:
+            return f"Métro {code}"
+        if "tram" in ml:
+            return f"Tram {code}"
+        if "bus" in ml:
+            return f"Bus {code}"
+        if mode and code.lower() not in ml:
+            return f"{mode} {code}"
+        return code
+    return mode or "Trajet"
 
 
 def _source_label(data: dict) -> str:
@@ -186,15 +261,21 @@ def _disruption_copy(messages: list) -> str:
     return body
 
 
+_LINE_PREFIX = re.compile(
+    r"^(RER\s*\S+|M[ée]tro\s*\S+|Ligne\s*\S+|Tram\s*\S+|Bus\s*\S+)\s*[:–\-]\s*",
+    re.I,
+)
+
+
 def _note_label(note: str) -> str:
     first = (note.split("\n", 1)[0] if note else "").replace("*", "").strip()
     first = " ".join(first.split())
+    first = _LINE_PREFIX.sub("", first).strip()
     if not first:
         return "Info"
-    if len(first) <= 22:
+    if len(first) <= 90:
         return first
-    cut = first[:22].rsplit(" ", 1)[0]
-    return (cut or first[:22]).rstrip(" .,;:—-") + "…"
+    return _clip(first, 90)
 
 
 def traffic_tab_labels(payload: dict) -> list[str]:
@@ -204,7 +285,7 @@ def traffic_tab_labels(payload: dict) -> list[str]:
         lab = _note_label(note)
         n = seen.get(lab, 0) + 1
         seen[lab] = n
-        labels.append(lab if n == 1 else f"{lab.rstrip('…')[:18]} {n}")
+        labels.append(lab if n == 1 else f"{_clip(lab, 80)} {n}")
     return labels
 
 
@@ -214,6 +295,27 @@ def traffic_tab_body(payload: dict, index: int) -> discord.ui.Item:
     data = dict(payload)
     data["notes"] = [note] if note else []
     return _traffic_container(data)
+
+
+def journey_tab_labels(payload: dict) -> list[str]:
+    labels: list[str] = []
+    seen: dict[str, int] = {}
+    for row in payload.get("rows") or []:
+        lab = row.get("dep") or "?"
+        n = seen.get(lab, 0) + 1
+        seen[lab] = n
+        if n == 1:
+            labels.append(lab)
+        else:
+            extra = row.get("duration") or str(n)
+            labels.append(f"{lab} · {extra}")
+    return labels
+
+
+def journey_tab_body(payload: dict, index: int) -> discord.ui.Item:
+    rows = payload.get("rows") or []
+    row = rows[index] if 0 <= index < len(rows) else {}
+    return _one_journey_container(payload, row)
 
 
 def build_transport_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -242,7 +344,19 @@ def build_transport_view(data: dict, commentary: str = "") -> Optional[discord.u
                     return view
             container = _traffic_container(data)
         elif kind == "journeys":
-            container = _journeys_container(data)
+            rows = data.get("rows") or []
+            slim = {
+                "kind": "journeys",
+                "origin": data.get("origin"),
+                "destination": data.get("destination"),
+                "rows": rows,
+                "source": data.get("source"),
+            }
+            if len(rows) >= 2:
+                view = make_tabbed_view("transport_journeys", slim, commentary, 0)
+                if view is not None:
+                    return view
+            container = _one_journey_container(slim, rows[0] if rows else {})
         else:
             return None
     except Exception as e:
@@ -309,33 +423,31 @@ def _traffic_container(data: dict) -> discord.ui.Container:
     return discord.ui.Container(*children)
 
 
-def _journeys_container(data: dict) -> discord.ui.Container:
+def _one_journey_container(data: dict, row: dict) -> discord.ui.Container:
     origin = data.get("origin") or "?"
     dest = data.get("destination") or "?"
-    rows = data.get("rows") or []
+    dep = row.get("dep") or "?"
+    arr = row.get("arr") or "?"
+    dur = row.get("duration") or ""
+    sub = f"-# {dep} → {arr}"
+    if dur:
+        sub = f"{sub}  ·  {dur}"
     children: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"## {TRAIN} {origin} → {dest}"),
-        discord.ui.TextDisplay("-# Prochains trains"),
+        discord.ui.TextDisplay(sub),
         discord.ui.Separator(),
     ]
-    if not rows:
-        children.append(discord.ui.TextDisplay("-# Aucun train proche."))
+    legs = row.get("legs") or []
+    if not legs:
+        children.append(discord.ui.TextDisplay("-# Aucun itinéraire."))
     else:
         lines = []
-        for row in rows:
-            mode = row.get("mode") or "Train"
-            num = row.get("code") or ""
-            head = f"**{mode}**"
-            if num and num.lower() not in mode.lower():
-                head = f"{head} {num}"
-            dep = row.get("dep") or "?"
-            arr = row.get("arr") or "?"
-            dur = row.get("duration") or ""
-            bit = f"{head}  {dep} → {arr}"
-            if dur:
-                bit = f"{bit}  ·  {dur}"
-            if row.get("note"):
-                bit = f"{bit}\n-# {row['note']}"
+        for leg in legs:
+            head = leg.get("head") or "Trajet"
+            bit = (
+                f"**{head}**  {leg.get('dep')} {leg.get('from')}"
+                f" → {leg.get('arr')} {leg.get('to')}"
+            )
             lines.append(bit)
         children.append(discord.ui.TextDisplay("\n".join(lines)))
     children += [
@@ -412,36 +524,40 @@ class Transport(commands.Cog):
         now = time.monotonic()
         if cached and now - cached[0] < _PLACE_TTL:
             return cached[1]
-        payload = self._get(
-            backend,
-            f"{backend.coverage}/places",
-            {"q": query, "count": 8},
-        )
-        if "error" in payload:
-            return payload
         best = None
-        best_score = -1
-        for place in payload.get("places") or []:
-            kind = place.get("embedded_type") or ""
-            embedded = (
-                place.get("stop_area")
-                or place.get("stop_point")
-                or (place.get("administrative_region") if allow_admin else None)
+        best_score = -10**9
+        last_error = None
+        for q in _place_queries(query):
+            payload = self._get(
+                backend,
+                f"{backend.coverage}/places",
+                {"q": q, "count": 8},
             )
-            if not embedded:
+            if "error" in payload:
+                last_error = payload
                 continue
-            score = int(place.get("quality") or 0)
-            kind_bonus = {"stop_area": 20, "stop_point": 10, "administrative_region": 5}.get(kind, 0)
-            rank = score * 10 + kind_bonus
-            if rank > best_score:
-                best_score = rank
-                best = {
-                    "id": embedded.get("id") or place.get("id"),
-                    "name": embedded.get("name") or place.get("name") or query,
-                    "kind": kind or "stop_area",
-                }
+            for place in payload.get("places") or []:
+                kind = place.get("embedded_type") or ""
+                embedded = (
+                    place.get("stop_area")
+                    or place.get("stop_point")
+                    or (place.get("administrative_region") if allow_admin else None)
+                )
+                if not embedded:
+                    continue
+                name = embedded.get("name") or place.get("name") or query
+                score = int(place.get("quality") or 0)
+                kind_bonus = {"stop_area": 20, "stop_point": 10, "administrative_region": 5}.get(kind, 0)
+                rank = score * 10 + kind_bonus + _place_name_bonus(query, name)
+                if rank > best_score:
+                    best_score = rank
+                    best = {
+                        "id": embedded.get("id") or place.get("id"),
+                        "name": name,
+                        "kind": kind or "stop_area",
+                    }
         if not best or not best.get("id"):
-            return {"error": f"Lieu introuvable ({backend.label}) : {query!r}"}
+            return last_error or {"error": f"Lieu introuvable ({backend.label}) : {query!r}"}
         self._place_cache[key] = (now, best)
         return best
 
@@ -655,17 +771,54 @@ class Transport(commands.Cog):
             "source": self._prim.label,
         }
 
-    def _journeys_payload(self, origin: str, destination: str) -> dict:
-        src = self._search_place(self._sncf, origin, allow_admin=True)
+    def _rows_from_journeys(self, raw: dict) -> list[dict]:
+        rows = []
+        for j in raw.get("journeys") or []:
+            if (j.get("status") or "").upper() == "NO_SERVICE":
+                continue
+            sections = [
+                s for s in (j.get("sections") or [])
+                if s.get("type") == "public_transport"
+            ]
+            if not sections:
+                continue
+            first = sections[0]
+            last = sections[-1]
+            dep = _parse_navitia_dt(j.get("departure_date_time") or first.get("departure_date_time") or "")
+            arr = _parse_navitia_dt(j.get("arrival_date_time") or last.get("arrival_date_time") or "")
+            legs = []
+            for s in sections:
+                info = s.get("display_informations") or {}
+                ldep = _parse_navitia_dt(s.get("departure_date_time") or "")
+                larr = _parse_navitia_dt(s.get("arrival_date_time") or "")
+                legs.append({
+                    "head": _leg_head(info),
+                    "from": _stop_name(s.get("from") or {}),
+                    "to": _stop_name(s.get("to") or {}),
+                    "dep": _hhmm(ldep),
+                    "arr": _hhmm(larr),
+                })
+            rows.append({
+                "dep": _hhmm(dep),
+                "arr": _hhmm(arr),
+                "duration": _fmt_duration(int(j.get("duration") or 0)),
+                "legs": legs,
+            })
+            if len(rows) >= _MAX_JOURNEYS:
+                break
+        return rows
+
+    def _journeys_on(self, backend: _Backend, origin: str, destination: str) -> dict:
+        src = self._search_place(backend, origin, allow_admin=(backend.name == "sncf"))
         if "error" in src:
             return src
-        dst = self._search_place(self._sncf, destination, allow_admin=True)
+        dst = self._search_place(backend, destination, allow_admin=(backend.name == "sncf"))
         if "error" in dst:
             return dst
         now = datetime.now(PARIS_TZ)
         raw = self._get(
-            self._sncf,
-            f"{self._sncf.coverage}/journeys",
+            backend,
+            f"{backend.coverage}/journeys",
             {
                 "from": src["id"],
                 "to": dst["id"],
@@ -676,44 +829,25 @@ class Transport(commands.Cog):
         )
         if "error" in raw:
             return raw
-        rows = []
-        for j in raw.get("journeys") or []:
-            sections = [
-                s for s in (j.get("sections") or [])
-                if s.get("type") == "public_transport"
-            ]
-            if not sections:
-                continue
-            first = sections[0]
-            last = sections[-1]
-            info = first.get("display_informations") or {}
-            dep = _parse_navitia_dt(j.get("departure_date_time") or first.get("departure_date_time") or "")
-            arr = _parse_navitia_dt(j.get("arrival_date_time") or last.get("arrival_date_time") or "")
-            note = ""
-            if len(sections) > 1:
-                via = (sections[0].get("to") or {}).get("name") or ""
-                if not via:
-                    via = ((sections[0].get("to") or {}).get("stop_point") or {}).get("name") or ""
-                note = f"correspondance" + (f" via {via}" if via else "")
-            if (j.get("status") or "").upper() == "NO_SERVICE":
-                continue
-            rows.append({
-                "mode": _physical_mode(info) or "Train",
-                "code": info.get("headsign") or info.get("trip_short_name") or info.get("code") or "",
-                "dep": _hhmm(dep),
-                "arr": _hhmm(arr),
-                "duration": _fmt_duration(int(j.get("duration") or 0)),
-                "note": note,
-            })
-            if len(rows) >= _MAX_JOURNEYS:
-                break
         return {
             "kind": "journeys",
             "origin": src["name"],
             "destination": dst["name"],
-            "rows": rows,
-            "source": self._sncf.label,
+            "rows": self._rows_from_journeys(raw),
+            "source": backend.label,
         }
+
+    def _journeys_payload(self, origin: str, destination: str) -> dict:
+        blob = f"{origin} {destination}"
+        national = bool(_NATIONAL.search(blob))
+        first, second = (self._sncf, self._prim) if national else (self._prim, self._sncf)
+        data = self._journeys_on(first, origin, destination)
+        if "error" not in data and data.get("rows"):
+            return data
+        fallback = self._journeys_on(second, origin, destination)
+        if "error" not in fallback and fallback.get("rows"):
+            return fallback
+        return data if "error" not in data else fallback
 
     def _llm_summary(self, data: dict) -> str:
         kind = data.get("kind")
@@ -732,9 +866,16 @@ class Transport(commands.Cog):
             dest = data.get("destination") or "?"
             rows = data.get("rows") or []
             if not rows:
-                return f"Aucun train {origin} → {dest}. Widget affiché."
-            bits = [f"{r.get('mode')} {r.get('dep')}→{r.get('arr')}" for r in rows[:3]]
-            return f"Trains {origin} → {dest} : {'; '.join(bits)}. Widget affiché."
+                return f"Aucun itinéraire {origin} → {dest}. Widget affiché."
+            r0 = rows[0]
+            chain = " → ".join(
+                leg.get("head") for leg in (r0.get("legs") or []) if leg.get("head")
+            )
+            extra = f", {chain}" if chain else ""
+            return (
+                f"Itinéraire {origin} → {dest} : {r0.get('dep')}–{r0.get('arr')} "
+                f"({r0.get('duration')}){extra}. Widget affiché."
+            )
         title = data.get("title") or "Trafic"
         status = data.get("status") or ""
         notes = data.get("notes") or []
@@ -778,7 +919,10 @@ class Transport(commands.Cog):
                     "Transports : Île-de-France (PRIM) + trains SNCF (TGV, TER, Intercités). "
                     "stop = arrêt/gare → prochains passages (IDF d'abord, SNCF si gare/train). "
                     "line seule (RER B, 11…) → trafic IDF. "
-                    "origin + destination = prochains trains SNCF (ex. Paris → Lyon). "
+                    "origin + destination = itinéraire : IDF (métro/RER/Transilien/bus) via PRIM, "
+                    "hors IDF (Paris → Lyon, TGV…) via SNCF. "
+                    "« comment aller à X depuis chez moi » → origin = arrêt/gare en mémoire, "
+                    "pas seulement la ville. "
                     "« train pour Lyon » sans départ → origin depuis le PROFIL/mémoire "
                     "(ville/gare habituelle), sinon demande-la. "
                     "Arrêt métro habituel en mémoire si « mon métro »."
@@ -794,11 +938,11 @@ class Transport(commands.Cog):
                     },
                     "origin": {
                         "type": "string",
-                        "description": "Gare/ville de départ (trajet SNCF)",
+                        "description": "Départ (arrêt, gare ou ville)",
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Gare/ville d'arrivée (trajet SNCF)",
+                        "description": "Arrivée (arrêt, gare ou ville)",
                     },
                 },
                 optional_props=["stop", "line", "origin", "destination"],
@@ -811,8 +955,10 @@ async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Transport(bot))
     register_widget("get_transport", build_transport_view)
     register_tabs("transport_traffic", traffic_tab_labels, traffic_tab_body)
+    register_tabs("transport_journeys", journey_tab_labels, journey_tab_body)
 
 
 async def teardown(bot: commands.Bot) -> None:
     unregister_widget("get_transport")
     unregister_tabs("transport_traffic")
+    unregister_tabs("transport_journeys")

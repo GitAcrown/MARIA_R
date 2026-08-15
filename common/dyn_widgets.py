@@ -27,7 +27,8 @@ TTL = timedelta(minutes=10)
 PURGE_AFTER = timedelta(hours=1)
 VIEW_ATTR = "_maria_dyn_id"
 _ROW = 5
-_MAX_TABS = 10
+_MAX_TABS = 25
+_BTN_LABEL_MAX = 16
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 LabelsFn = Callable[[dict], list[str]]
@@ -202,7 +203,7 @@ def _labels(kind: str, payload: dict) -> list[str]:
         return []
     out: list[str] = []
     for lab in labels[:_MAX_TABS]:
-        text = " ".join(str(lab).split())[:80]
+        text = " ".join(str(lab).split())[:100]
         out.append(text or "·")
     return out
 
@@ -218,6 +219,11 @@ def _body(kind: str, payload: dict, index: int) -> Optional[discord.ui.Item]:
         return None
 
 
+def _use_select(labels: list[str]) -> bool:
+    """Select dès qu'un libellé ne tient pas dans un bouton (dates courtes → boutons)."""
+    return any(len(lab) > _BTN_LABEL_MAX for lab in labels)
+
+
 def _tab_rows(wid: str, labels: list[str], selected: int) -> list[discord.ui.ActionRow]:
     rows: list[discord.ui.ActionRow] = []
     for start in range(0, len(labels), _ROW):
@@ -228,6 +234,12 @@ def _tab_rows(wid: str, labels: list[str], selected: int) -> list[discord.ui.Act
         ]
         rows.append(discord.ui.ActionRow(*buttons))
     return rows
+
+
+def _tab_controls(wid: str, labels: list[str], selected: int) -> list[discord.ui.ActionRow]:
+    if _use_select(labels):
+        return [discord.ui.ActionRow(TabSelect(wid, labels, selected))]
+    return _tab_rows(wid, labels, selected)
 
 
 def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView]:
@@ -250,7 +262,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
     if live and len(labels) >= 2 and isinstance(body, discord.ui.Container):
         old = list(body.children)
         body.clear_items()
-        for row in _tab_rows(rec.id, labels, index):
+        for row in _tab_controls(rec.id, labels, index):
             body.add_item(row)
         body.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         for item in old:
@@ -261,7 +273,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
         view.add_item(discord.ui.TextDisplay(rec.commentary))
         view.add_item(discord.ui.Separator())
     if live and len(labels) >= 2 and not tabs_in_card:
-        for row in _tab_rows(rec.id, labels, index):
+        for row in _tab_controls(rec.id, labels, index):
             view.add_item(row)
         view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
     view.add_item(body)
@@ -335,6 +347,35 @@ async def sweep_expired(bot: discord.Client) -> None:
     _purge(now)
 
 
+async def _pick_tab(interaction: discord.Interaction, wid: str, idx: int) -> None:
+    rec = _get(wid)
+    if rec is None or rec.stripped or rec.expires_at <= _now():
+        if rec is not None:
+            view = render_record(rec, live=False)
+            if view is not None:
+                try:
+                    await interaction.response.edit_message(view=view)
+                except discord.HTTPException:
+                    pass
+                _mark_stripped(rec.id)
+                return
+            _mark_stripped(rec.id)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Les onglets ont expiré.", ephemeral=True,
+            )
+        return
+    labels = _labels(rec.kind, rec.payload)
+    if not labels:
+        return
+    rec.selected = idx if 0 <= idx < len(labels) else 0
+    _set_selected(rec.id, rec.selected)
+    view = render_record(rec, live=True)
+    if view is None:
+        return
+    await interaction.response.edit_message(view=view)
+
+
 class TabButton(discord.ui.DynamicItem[discord.ui.Button], template=r"maria:tab:(?P<wid>[0-9a-f]{8}):(?P<idx>[0-9]+)"):
     def __init__(self, wid: str, idx: int, *, label: str = "·", selected: bool = False) -> None:
         super().__init__(
@@ -358,32 +399,55 @@ class TabButton(discord.ui.DynamicItem[discord.ui.Button], template=r"maria:tab:
         return cls(match["wid"], int(match["idx"]), label=item.label or "·")
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        rec = _get(self.wid)
-        if rec is None or rec.stripped or rec.expires_at <= _now():
-            if rec is not None:
-                view = render_record(rec, live=False)
-                if view is not None:
-                    try:
-                        await interaction.response.edit_message(view=view)
-                    except discord.HTTPException:
-                        pass
-                    _mark_stripped(rec.id)
-                    return
-                _mark_stripped(rec.id)
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "Les onglets ont expiré.", ephemeral=True,
-                )
-            return
-        labels = _labels(rec.kind, rec.payload)
-        if not labels:
-            return
-        rec.selected = self.idx if 0 <= self.idx < len(labels) else 0
-        _set_selected(rec.id, rec.selected)
-        view = render_record(rec, live=True)
-        if view is None:
-            return
-        await interaction.response.edit_message(view=view)
+        await _pick_tab(interaction, self.wid, self.idx)
+
+
+class TabSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"maria:pick:(?P<wid>[0-9a-f]{8})"):
+    def __init__(self, wid: str, labels: list[str], selected: int = 0) -> None:
+        options = [
+            discord.SelectOption(
+                label=(lab or "·")[:100],
+                value=str(i),
+                default=(i == selected),
+            )
+            for i, lab in enumerate(labels[:25])
+        ]
+        if not options:
+            options = [discord.SelectOption(label="·", value="0")]
+        super().__init__(
+            discord.ui.Select(
+                placeholder="Choisir…",
+                min_values=1,
+                max_values=1,
+                options=options,
+                custom_id=f"maria:pick:{wid}",
+            )
+        )
+        self.wid = wid
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Select,
+        match: re.Match[str],
+        /,
+    ):
+        labels = [opt.label for opt in (item.options or [])]
+        selected = 0
+        for i, opt in enumerate(item.options or []):
+            if opt.default:
+                selected = i
+                break
+        return cls(match["wid"], labels, selected)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        raw = (self.item.values or ["0"])[0]
+        try:
+            idx = int(raw)
+        except ValueError:
+            idx = 0
+        await _pick_tab(interaction, self.wid, idx)
 
 
 _init_db()
