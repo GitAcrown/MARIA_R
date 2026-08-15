@@ -17,7 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from common.dataio import CogData, DictTableBuilder
-from common.emojis import SMALL_TASK, SMALL_WEB
+from common.emojis import SMALL_BRAIN, SMALL_TASK, SMALL_WEB
 from common.llm import MariaGptApi, Tool, resolve_message_reference
 from common.memory import (
     MemoryStore,
@@ -101,8 +101,8 @@ _EASTER_EGGS: list[tuple[frozenset[str], str]] = [
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
-    "run_python", "manage_task", "show_tasks", "search_memory",
-    "remember_fact", "forget_fact", "about_me",
+    "run_python", "manage_task", "show_tasks",
+    "about_me",
     "get_weather", "search_media", "search_game",
     "get_football", "render_table", "render_widget",
     "summarize_channel", "search_track",
@@ -838,6 +838,21 @@ class Chat(commands.Cog):
                     f"{SMALL_TASK} **Tâche #{tid} · {action}**"
                     if tid else f"{SMALL_TASK} **Tâche · {action or 'gestion'}**"
                 )
+            elif name == "search_memory":
+                q = (args.get("query") or "").strip()
+                label = (
+                    f'{SMALL_BRAIN} **Mémoire** — "{q}"' if q else f"{SMALL_BRAIN} **Mémoire**"
+                )
+            elif name == "remember_fact":
+                fact = (args.get("fact") or "").strip()
+                if len(fact) > 80:
+                    fact = fact[:79] + "…"
+                label = (
+                    f'{SMALL_BRAIN} **Souvenir retenu** — "{fact}"'
+                    if fact else f"{SMALL_BRAIN} **Souvenir retenu**"
+                )
+            elif name == "forget_fact":
+                label = f"{SMALL_BRAIN} **Souvenir oublié**"
             else:
                 label = f"**{name.replace('_', ' ').capitalize()}**"
             if label not in visible_parts:
