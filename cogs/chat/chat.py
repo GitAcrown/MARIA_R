@@ -164,7 +164,8 @@ CONSIGNE (rien d'autre) :
 {instruction}
 
 - Une phrase, deux max. Uniquement ce qui est demandé. Pas de small talk, pas d'avis, pas de question, pas de follow-up, pas de fait perso hors consigne.
-- Ping <@{user_id}>. Interdit de reprogrammer, snooze, « je te rappellerai », mémoire.
+- Ne ping pas, n'ajoute pas de mention : le message sera un reply Discord au message de demande.
+- Interdit de reprogrammer, snooze, « je te rappellerai », mémoire.
 - Outil seulement si la consigne l'exige (météo, web, calcul, film…). Ville absente → ville du PROFIL du destinataire. Ne recopie pas le widget.
 - Tutoiement, sans emoji, sans commencer par ton nom.
 
@@ -515,18 +516,48 @@ class Chat(commands.Cog):
         )
         text = (resp.text or "").strip()
         mention = f"<@{task.user_id}>"
-        if not text:
-            text = f"{mention} {_spoken_task_line(action)}"
-        elif mention not in text and f"<@!{task.user_id}>" not in text:
-            text = f"{mention} {text}"
-        footer = f"-# Tâche #{task.id} · {mention} · <t:{int(task.execute_at.timestamp())}:R>"
+        origin = None
+        if task.message_id:
+            try:
+                origin = await channel.fetch_message(task.message_id)
+            except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+                origin = None
+        if origin is not None:
+            text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
+            if not text:
+                text = _spoken_task_line(action)
+            footer = f"-# Tâche #{task.id} · <t:{int(task.execute_at.timestamp())}:R>"
+        else:
+            if not text:
+                text = f"{mention} {_spoken_task_line(action)}"
+            elif mention not in text and f"<@!{task.user_id}>" not in text:
+                text = f"{mention} {text}"
+            footer = f"-# Tâche #{task.id} · {mention} · <t:{int(task.execute_at.timestamp())}:R>"
         if footer not in text:
             text = f"{text}\n{footer}"
 
         sent_tools: list[str] = []
         sent_messages: list[discord.Message] = []
         tool_notes: list[str] = []
-        mentions = discord.AllowedMentions(users=True)
+        ping_fallback = discord.AllowedMentions(users=True)
+        silent = discord.AllowedMentions.none()
+        reply_mentions = discord.AllowedMentions(replied_user=True, users=False)
+
+        async def _post(*, content: str = "", view=None, first: bool) -> discord.Message:
+            kwargs: dict = {}
+            if content:
+                kwargs["content"] = content
+            if view is not None:
+                kwargs["view"] = view
+            if first and origin is not None:
+                return await origin.reply(
+                    mention_author=True, allowed_mentions=reply_mentions, **kwargs,
+                )
+            return await channel.send(
+                allowed_mentions=ping_fallback if first else silent,
+                **kwargs,
+            )
+
         for tr in resp.tool_responses:
             rd = getattr(tr, "response_data", None)
             if not isinstance(rd, dict):
@@ -538,7 +569,7 @@ class Chat(commands.Cog):
             view = build_widget(tool_name, rd, commentary=commentary)
             if view is None:
                 continue
-            sent_messages.append(await channel.send(view=view, allowed_mentions=mentions))
+            sent_messages.append(await _post(view=view, first=not sent_messages))
             note = rd.get("_llm_summary")
             if isinstance(note, str) and note.strip():
                 tool_notes.append(note.strip())
@@ -546,10 +577,7 @@ class Chat(commands.Cog):
         if not sent_tools:
             chunks = _split_text(text, 2000)
             for i, chunk in enumerate(chunks):
-                sent_messages.append(await channel.send(
-                    chunk,
-                    allowed_mentions=mentions if i == 0 else discord.AllowedMentions.none(),
-                ))
+                sent_messages.append(await _post(content=chunk, first=(i == 0)))
         await self.gpt_api.record_assistant_post(
             channel,
             text,
