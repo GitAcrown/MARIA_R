@@ -217,7 +217,7 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "Je vois surtout le fil du salon + ce que la mémoire ressort."
             ),
             "tools": (
-                "Web, météo, films/séries, jeux, foot, images, "
+                "Web, météo, transports IDF/SNCF, films/séries, jeux, foot, images, "
                 "tableaux, tâches planifiées, infos membres/salons, mémoire, et about_me "
                 "(moi-même + ping/stats machine). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "

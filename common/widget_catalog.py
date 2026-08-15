@@ -1,6 +1,6 @@
 """Catalogue de blocs pour les widgets composés librement par l'IA (`render_widget`).
 
-Les widgets « canon » (météo, TMDB, Steam, foot, tâches) gardent leur mise en page
+Les widgets « canon » (météo, TMDB, Steam, foot, tâches, transports) gardent leur mise en page
 figée côté code — ce catalogue ne sert qu'aux widgets ad hoc, pour les cas sans
 outil dédié (comparatif, classement, carte de membre…). Catalogue volontairement
 fermé (pas de HTML/CSS libre) pour rester dans le cadre sûr de Discord Components v2.

@@ -104,14 +104,14 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "run_python", "manage_task", "show_tasks",
     "about_me",
     "get_weather", "search_media", "search_game",
-    "get_football", "render_table", "render_widget",
+    "get_football", "get_transport", "render_table", "render_widget",
     "summarize_channel", "search_track",
 })
 
 _TASK_TOOL_WHITELIST: tuple[str, ...] = (
     "run_python", "search_web", "read_web_page", "search_images",
     "get_weather", "search_media", "search_game", "search_track",
-    "get_football", "render_table",
+    "get_football", "get_transport", "render_table",
 )
 
 def _fmt_delay(minutes: int) -> str:
@@ -144,8 +144,9 @@ MÉMOIRE (ordre) :
 7. Fait retenu signalé comme FAUX → search_memory pour trouver l'id, puis corrige (remember_fact avec memory_id + le bon fait) si un fait de rechange existe, sinon supprime (forget_fact). Ne laisse jamais un fait connu comme faux traîner en mémoire.
 
 OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le tout de suite. N'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute, sujet flou, trop récent, ou mémoire insuffisante → outil d'abord ; sinon dis que tu ne sais pas. Défaut : France.
-Chaîner plusieurs outils dans le même tour est normal. Widget dédié (météo/film/jeu/musique/foot/tâches/résumé) : appelle l'outil, commente sans répéter son contenu.
+Chaîner plusieurs outils dans le même tour est normal. Widget dédié (météo/film/jeu/musique/foot/tâches/résumé/transports) : appelle l'outil, commente sans répéter son contenu.
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
+- get_transport : IDF (métro/RER/bus/tram) + trains SNCF. Arrêt → stop= ; ligne IDF → line= ; « train pour Lyon » → origin + destination (départ = PROFIL/mémoire, sinon demande). Hors de ces réseaux → dis-le, n'invente pas.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
 - schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (wed,fri) + time HH:MM ; until optionnel. Max 5 tâches par personne. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
 - render_table : colle le bloc retourné, jamais de |---| à la main.
