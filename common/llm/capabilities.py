@@ -30,6 +30,7 @@ _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 _VID_EXT = (".mp4", ".mov", ".webm", ".mkv", ".avi")
 _LAYOUT_RE = re.compile(
     r"\b(?:recettes?|recipes?|tutoriels?|tutos?|comparatifs?)\b"
+    r"|\b(?:fiche\s+)?layout\b"
     r"|comment (?:faire|pr[ée]parer|cuisiner|r[ée]aliser)",
     re.I,
 )
@@ -42,7 +43,7 @@ _HINTS: tuple[tuple[str, str], ...] = (
     ("audio", "- Audio : base-toi sur la transcription fournie, ne prétends pas l'avoir écouté."),
     ("text_file", "- Fichier texte : le contenu est déjà dans le message."),
     ("file", "- Fichier : tu ne l'ouvres pas (nom seulement, pas le contenu)."),
-    ("layout", "- Recette / tuto / comparatif : render_widget obligatoire, pas un pavé markdown. Le widget EST la réponse."),
+    ("layout", "- Fiche layout = render_widget (il n'y a pas d'autre format recette). Envoie le contenu dense dans spec, pas un pavé markdown ni un widget d'excuse. Le widget EST la réponse."),
 )
 
 
