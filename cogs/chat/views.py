@@ -140,7 +140,7 @@ def _upsert_vector(vectors: VectorStore, mem: Memory) -> None:
 def _sorted_memories(memories: list[Memory]) -> list[Memory]:
     return sorted(
         memories,
-        key=lambda m: (0 if m.status == STATUS_PENDING else 1, -float(m.confidence or 0)),
+        key=lambda m: (0 if m.status != STATUS_PENDING else 1, -float(m.confidence or 0)),
     )
 
 
@@ -172,8 +172,8 @@ def _format_memory_catalog(items: list[Memory]) -> str:
             lines.append(f"**{_mem_conf(m)}** · {_clip(m.content, 160)}")
         blocks.append("\n".join(lines))
 
-    _block("En attente", pending)
     _block("Confirmés", active)
+    _block("En attente", pending)
     return "\n\n".join(blocks) if blocks else "-# Aucun souvenir."
 
 
@@ -793,6 +793,10 @@ def _build_memory_catalog_view(
         ]
 
     rows: list[discord.ui.ActionRow] = []
+    if shown and shown[0].id:
+        rows.append(discord.ui.ActionRow(
+            _PickMemorySelect(shown, **select_kw, page=page),
+        ))
     top: list[discord.ui.Button] = list(extra_buttons)
     if len(pages) > 1:
         if page > 0:
@@ -801,10 +805,6 @@ def _build_memory_catalog_view(
             top.append(_MemPageButton("Suivant", 1, rebuild))
     if top:
         rows.append(discord.ui.ActionRow(*top[:5]))
-    if shown and shown[0].id:
-        rows.append(discord.ui.ActionRow(
-            _PickMemorySelect(shown, **select_kw, page=page),
-        ))
     _append_controls(children, note=note, rows=rows)
     return children
 
