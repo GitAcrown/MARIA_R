@@ -51,6 +51,8 @@ TASK_MIN_MINUTES = 2
 TASK_MAX_DAYS = 365
 TASK_INSTRUCTION_MAX = 500
 TASK_TITLE_MAX = 80
+TASK_RUN_KEEP = 45
+TASK_RUN_SUMMARY_MAX = 280
 
 
 @dataclass
@@ -280,6 +282,20 @@ def _init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_tasks_status_at ON tasks(status, execute_at)"
         )
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_runs (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id  INTEGER NOT NULL,
+                ran_at   TEXT NOT NULL,
+                summary  TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (task_id) REFERENCES tasks(id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, ran_at)"
+        )
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
         )
         # Crash pendant une exécution → remettre en file.
@@ -496,6 +512,49 @@ class TaskStore:
             ).fetchone()
         return row[0] if row else 0
 
+    def list_runs(self, task_id: int, *, limit: int = TASK_RUN_KEEP) -> list[tuple[datetime, str]]:
+        """Exécutions passées, plus anciennes d'abord."""
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT ran_at, summary FROM task_runs
+                WHERE task_id=?
+                ORDER BY ran_at DESC
+                LIMIT ?
+                """,
+                (task_id, max(1, min(limit, TASK_RUN_KEEP))),
+            ).fetchall()
+        out: list[tuple[datetime, str]] = []
+        for r in reversed(rows):
+            dt = _parse_optional_dt(r["ran_at"])
+            if dt is None:
+                continue
+            summary = (r["summary"] or "").strip()
+            if summary:
+                out.append((dt, summary))
+        return out
+
+    def append_run(self, task_id: int, summary: str) -> None:
+        text = (summary or "").strip()[:TASK_RUN_SUMMARY_MAX]
+        if not text:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO task_runs (task_id, ran_at, summary) VALUES (?,?,?)",
+                (task_id, now_iso, text),
+            )
+            rows = conn.execute(
+                "SELECT id FROM task_runs WHERE task_id=? ORDER BY ran_at DESC, id DESC",
+                (task_id,),
+            ).fetchall()
+            extra = [r["id"] for r in rows[TASK_RUN_KEEP:]]
+            if extra:
+                conn.execute(
+                    f"DELETE FROM task_runs WHERE id IN ({','.join('?' * len(extra))})",
+                    extra,
+                )
+
     def claim_due(self) -> Optional[ScheduledTask]:
         """Passe la plus ancienne tâche due en running. None si rien."""
         now = datetime.now(timezone.utc).isoformat()
@@ -607,6 +666,10 @@ class TaskStore:
             if not title:
                 sets.append("title=?")
                 params.append(instruction.strip()[:TASK_TITLE_MAX])
+        instr_changed = (
+            instruction is not None
+            and instruction.strip() != (current.instruction or "").strip()
+        )
         if title is not None:
             sets.append("title=?")
             params.append(title.strip()[:TASK_TITLE_MAX])
@@ -674,6 +737,8 @@ class TaskStore:
                 f"UPDATE tasks SET {', '.join(sets)} WHERE id=? AND user_id=?",
                 params,
             )
+            if cur.rowcount > 0 and instr_changed:
+                conn.execute("DELETE FROM task_runs WHERE task_id=?", (task_id,))
             return cur.rowcount > 0
 
     def pause(self, task_id: int, user_id: int) -> bool:
