@@ -495,10 +495,13 @@ class ChannelSession:
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
         on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
         skip_focus: bool = False,
+        allow_tools: bool = True,
+        widget_done: bool = False,
     ) -> AssistantRecord:
         if depth >= MAX_RECURSION:
+            logger.warning("Boucle d'outils plafonnée (depth=%s)", depth)
             return self.context.add_assistant_message(
-                components=[TextComponent("Limite d'outils atteinte. Reformule ta demande.")],
+                components=[MetadataComponent("EMPTY")],
             )
 
         # Ne pas écraser le trigger entre tours d'outils (depth>0 passe souvent None).
@@ -567,7 +570,22 @@ class ChannelSession:
                 hint = f"{hint}\n{ctx_hint}"
             messages = messages + [{"role": "user", "content": hint, "name": "system"}]
 
-        tools = self.tool_registry.get_compiled() if len(self.tool_registry) > 0 else []
+        if widget_done:
+            messages = messages + [{
+                "role": "user",
+                "content": (
+                    "[SYSTEM] Un widget est déjà affiché. "
+                    "Commente en une phrase, ou ne dis rien. N'appelle plus d'outil."
+                ),
+                "name": "system",
+            }]
+
+        use_tools = (
+            allow_tools
+            and depth < MAX_RECURSION - 1
+            and len(self.tool_registry) > 0
+        )
+        tools = self.tool_registry.get_compiled() if use_tools else []
         stream = on_text_delta is not None
 
         async def _delta(raw: str) -> None:
@@ -624,6 +642,8 @@ class ChannelSession:
                         arguments=arguments,
                     )
                 )
+        if not use_tools:
+            tool_calls = []
 
         cleaned_content = _strip_leaked_tokens(msg.content) if msg.content else msg.content
         components = []
@@ -648,14 +668,20 @@ class ChannelSession:
             # Un widget va porter le commentaire : ne pas streamer le texte
             # (sinon le message s'affiche puis se fait remplacer).
             widget_coming = any(has_widget(tc.function_name) for tc in tool_calls)
+            next_widget = widget_done or widget_coming
             return await self._run(
                 None, depth + 1, model=model,
-                on_text_delta=None if widget_coming else on_text_delta,
-                on_text_reset=None if widget_coming else on_text_reset,
+                on_text_delta=None if next_widget else on_text_delta,
+                on_text_reset=None if next_widget else on_text_reset,
                 skip_focus=skip_focus,
+                allow_tools=allow_tools and not next_widget,
+                widget_done=next_widget,
             )
 
         if not cleaned_content or not cleaned_content.strip():
+            # Widget déjà là : le vide est une réponse valide, pas un prétexte à relancer.
+            if widget_done or depth + 1 >= MAX_RECURSION:
+                return assistant
             if on_text_reset is not None:
                 try:
                     await on_text_reset()
@@ -674,6 +700,8 @@ class ChannelSession:
                 None, depth + 1, model=model,
                 on_text_delta=on_text_delta, on_text_reset=on_text_reset,
                 skip_focus=skip_focus,
+                allow_tools=allow_tools,
+                widget_done=widget_done,
             )
 
         return assistant
