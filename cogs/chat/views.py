@@ -1109,7 +1109,21 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     ordered = _sorted_tasks(tasks)
     if not ordered:
         return [[]]
-    return [ordered[i:i + _MEM_PAGE] for i in range(0, len(ordered), _MEM_PAGE)]
+    pages: list[list[ScheduledTask]] = []
+    current: list[ScheduledTask] = []
+    size = 0
+    budget = 3500
+    for t in ordered:
+        add = len(_task_line(t)) + 2
+        if current and (len(current) >= _MEM_PAGE or size + add > budget):
+            pages.append(current)
+            current = []
+            size = 0
+        current.append(t)
+        size += add
+    if current:
+        pages.append(current)
+    return pages
 
 
 def _task_line(t: ScheduledTask) -> str:
@@ -1118,7 +1132,8 @@ def _task_line(t: ScheduledTask) -> str:
     if t.schedule_kind != SCHEDULE_ONCE:
         bits.append(f"{REPEAT_REMINDER} {format_schedule(t)}")
     bits.append(f"<t:{ts}:R>")
-    return f"{' · '.join(bits)}\n› {_clip(t.instruction, 140)}"
+    instr = (t.instruction or "").strip()
+    return f"{' · '.join(bits)}\n› {instr}" if instr else " · ".join(bits)
 
 
 def _format_task_catalog(items: list[ScheduledTask]) -> str:
@@ -1127,14 +1142,17 @@ def _format_task_catalog(items: list[ScheduledTask]) -> str:
         ("En pause", [t for t in items if t.status == STATUS_PAUSED]),
         ("Échecs", [t for t in items if t.status == STATUS_FAILED]),
     ]
+    nonempty = [(title, group) for title, group in groups if group]
+    if not nonempty:
+        return "-# Aucune tâche."
+    if len(nonempty) == 1:
+        return "\n".join(_task_line(t) for t in nonempty[0][1])
     blocks: list[str] = []
-    for title, group in groups:
-        if not group:
-            continue
+    for title, group in nonempty:
         lines = [f"### {title} · {len(group)}"]
         lines.extend(_task_line(t) for t in group)
         blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) if blocks else "-# Aucune tâche."
+    return "\n\n".join(blocks)
 
 
 def _format_task_body(t: ScheduledTask) -> str:
