@@ -298,18 +298,7 @@ def traffic_tab_body(payload: dict, index: int) -> discord.ui.Item:
 
 
 def journey_tab_labels(payload: dict) -> list[str]:
-    labels: list[str] = []
-    seen: dict[str, int] = {}
-    for row in payload.get("rows") or []:
-        lab = row.get("dep") or "?"
-        n = seen.get(lab, 0) + 1
-        seen[lab] = n
-        if n == 1:
-            labels.append(lab)
-        else:
-            extra = row.get("duration") or str(n)
-            labels.append(f"{lab} · {extra}")
-    return labels
+    return [row.get("dep") or "?" for row in payload.get("rows") or []]
 
 
 def journey_tab_body(payload: dict, index: int) -> discord.ui.Item:
@@ -798,15 +787,32 @@ class Transport(commands.Cog):
                     "dep": _hhmm(ldep),
                     "arr": _hhmm(larr),
                 })
+            secs = int(j.get("duration") or 0)
             rows.append({
                 "dep": _hhmm(dep),
                 "arr": _hhmm(arr),
-                "duration": _fmt_duration(int(j.get("duration") or 0)),
+                "duration": _fmt_duration(secs),
                 "legs": legs,
+                "_secs": secs,
             })
-            if len(rows) >= _MAX_JOURNEYS:
+        best: dict[str, dict] = {}
+        for row in rows:
+            key = row["dep"]
+            prev = best.get(key)
+            if prev is None or (len(row["legs"]), row["_secs"]) < (len(prev["legs"]), prev["_secs"]):
+                best[key] = row
+        out = []
+        seen: set[str] = set()
+        for row in rows:
+            if row["dep"] in seen:
+                continue
+            seen.add(row["dep"])
+            picked = best[row["dep"]]
+            picked.pop("_secs", None)
+            out.append(picked)
+            if len(out) >= _MAX_JOURNEYS:
                 break
-        return rows
+        return out
 
     def _journeys_on(self, backend: _Backend, origin: str, destination: str) -> dict:
         src = self._search_place(backend, origin, allow_admin=(backend.name == "sncf"))
