@@ -37,6 +37,7 @@ from common.tasks import (
     WEEKDAYS_FR,
 )
 from common.timezones import PARIS_TZ
+from common.dyn_widgets import bind as bind_dyn_widget
 from common.widgets import build_widget, register_widget, unregister_widget
 
 from cogs.chat.config import (
@@ -587,7 +588,9 @@ class Chat(commands.Cog):
             view = build_widget(tool_name, rd, commentary=commentary)
             if view is None:
                 continue
-            sent_messages.append(await _post(view=view, first=not sent_messages))
+            posted = await _post(view=view, first=not sent_messages)
+            await bind_dyn_widget(view, posted)
+            sent_messages.append(posted)
             note = rd.get("_llm_summary")
             if isinstance(note, str) and note.strip():
                 tool_notes.append(note.strip())
@@ -895,9 +898,10 @@ class Chat(commands.Cog):
             if streamer and not sent_tools:
                 await streamer.abandon()
             if use_reply and not sent_tools:
-                await message.reply(view=view)
+                posted = await message.reply(view=view)
             else:
-                await message.channel.send(view=view)
+                posted = await message.channel.send(view=view)
+            await bind_dyn_widget(view, posted)
             note = rd.get("_llm_summary") or "Résultat affiché dans le salon."
             await self.gpt_api.inject_context_note_async(message.channel, note)
             sent_tools.append(tool_name)

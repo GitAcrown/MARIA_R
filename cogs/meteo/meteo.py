@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary
+from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
 from common.widgets import register_widget, unregister_widget
@@ -77,6 +78,43 @@ def _parse_target_date(target_date: str) -> Optional[date]:
     return None
 
 
+def _forecast_day_keys(raw: dict) -> list[str]:
+    keys: list[str] = []
+    for item in raw.get("list") or []:
+        dt = datetime.fromtimestamp(item["dt"], tz=PARIS_TZ)
+        key = dt.strftime("%Y-%m-%d")
+        if key not in keys:
+            keys.append(key)
+        if len(keys) >= 5:
+            break
+    return keys
+
+
+def weather_tab_labels(payload: dict) -> list[str]:
+    labels = []
+    for key in payload.get("days") or []:
+        try:
+            d = date.fromisoformat(key)
+        except ValueError:
+            continue
+        labels.append(d.strftime("%d/%m"))
+    return labels
+
+
+def weather_tab_body(payload: dict, index: int) -> discord.ui.Item:
+    days = payload.get("days") or []
+    city = payload.get("city") or "?"
+    raw = payload.get("raw") or {}
+    if not days:
+        return _forecast_container(city, raw)
+    key = days[index] if 0 <= index < len(days) else days[0]
+    try:
+        target = date.fromisoformat(key)
+    except ValueError:
+        return _forecast_container(city, raw)
+    return _day_container(city, raw, target)
+
+
 # ---------------------------------------------------------------------------
 # Builders de vue
 # ---------------------------------------------------------------------------
@@ -96,6 +134,23 @@ def build_weather_view(data: dict, commentary: str = "") -> Optional[discord.ui.
 
     try:
         if weather_type == "forecast":
+            days = _forecast_day_keys(raw)
+            selected = 0
+            if target_date_str:
+                target = _parse_target_date(target_date_str)
+                if target:
+                    tkey = target.isoformat()
+                    if tkey in days:
+                        selected = days.index(tkey)
+            if len(days) >= 2:
+                view = make_tabbed_view(
+                    "weather",
+                    {"city": city, "raw": raw, "days": days},
+                    commentary,
+                    selected,
+                )
+                if view is not None:
+                    return view
             if target_date_str:
                 target = _parse_target_date(target_date_str)
                 container = _day_container(city, raw, target) if target else _forecast_container(city, raw)
@@ -487,7 +542,9 @@ class Meteo(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Meteo(bot))
     register_widget("get_weather", build_weather_view)
+    register_tabs("weather", weather_tab_labels, weather_tab_body)
 
 
 async def teardown(bot: commands.Bot) -> None:
     unregister_widget("get_weather")
+    unregister_tabs("weather")

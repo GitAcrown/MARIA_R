@@ -27,6 +27,7 @@ import requests
 from discord.ext import commands
 
 from common.discord_ui import layout_with_commentary
+from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
 from common.emojis import TRAIN
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
@@ -118,15 +119,102 @@ def _uri(ident: str) -> str:
     return quote(ident or "", safe=":")
 
 
-def _plain_text(raw: str) -> str:
-    text = re.sub(r"(?i)<br\s*/?>", " ", raw or "")
+_SKIP_CHANNELS = {"pids", "cbiv"}
+_TITLE_CHANNELS = {"title", "titre", "notification"}
+_NOTE_LIMIT = 1600
+
+
+def _plain_text(raw: str, *, breaks: bool = False) -> str:
+    text = raw or ""
+    if breaks:
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</p\s*>", "\n", text)
+        text = re.sub(r"(?i)<p[^>]*>", "", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text)
+        lines = [" ".join(ln.split()) for ln in text.splitlines()]
+        compact: list[str] = []
+        for ln in lines:
+            if ln:
+                compact.append(ln)
+            elif compact and compact[-1]:
+                compact.append("")
+        return "\n".join(compact).strip()
+    text = re.sub(r"(?i)<br\s*/?>", " ", text)
     text = re.sub(r"<[^>]+>", " ", text)
     return " ".join(html.unescape(text).split())
 
 
-# ---------------------------------------------------------------------------
-# Widget
-# ---------------------------------------------------------------------------
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind("\n"), cut.rfind(". "))
+    if boundary < limit * 0.5:
+        boundary = cut.rfind(" ")
+    if boundary <= 0:
+        boundary = limit
+    return cut[:boundary].rstrip(" .,;:—-") + "…"
+
+
+def _disruption_copy(messages: list) -> str:
+    title = ""
+    body = ""
+    body_len = 0
+    for m in messages or []:
+        ch = m.get("channel") or {}
+        types = {str(t).lower() for t in (ch.get("types") or [])}
+        name = (ch.get("name") or "").strip().lower()
+        if types & _SKIP_CHANNELS or name in _SKIP_CHANNELS:
+            continue
+        text = _plain_text(m.get("text") or "", breaks=True)
+        if not text:
+            continue
+        is_title = bool(types & {"title"}) or name in _TITLE_CHANNELS
+        if is_title:
+            if not title:
+                title = " ".join(text.split())
+            continue
+        if len(text) > body_len:
+            body_len = len(text)
+            body = text
+    if not body:
+        return title
+    body = _clip(body, _NOTE_LIMIT)
+    if title and title.casefold() not in body[: len(title) + 40].casefold():
+        return f"**{title}**\n{body}"
+    return body
+
+
+def _note_label(note: str) -> str:
+    first = (note.split("\n", 1)[0] if note else "").replace("*", "").strip()
+    first = " ".join(first.split())
+    if not first:
+        return "Info"
+    if len(first) <= 22:
+        return first
+    cut = first[:22].rsplit(" ", 1)[0]
+    return (cut or first[:22]).rstrip(" .,;:—-") + "…"
+
+
+def traffic_tab_labels(payload: dict) -> list[str]:
+    labels: list[str] = []
+    seen: dict[str, int] = {}
+    for note in payload.get("notes") or []:
+        lab = _note_label(note)
+        n = seen.get(lab, 0) + 1
+        seen[lab] = n
+        labels.append(lab if n == 1 else f"{lab.rstrip('…')[:18]} {n}")
+    return labels
+
+
+def traffic_tab_body(payload: dict, index: int) -> discord.ui.Item:
+    notes = payload.get("notes") or []
+    note = notes[index] if 0 <= index < len(notes) else ""
+    data = dict(payload)
+    data["notes"] = [note] if note else []
+    return _traffic_container(data)
+
 
 def build_transport_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
     if not isinstance(data, dict) or "error" in data:
@@ -136,6 +224,22 @@ def build_transport_view(data: dict, commentary: str = "") -> Optional[discord.u
         if kind == "departures":
             container = _departures_container(data)
         elif kind == "traffic":
+            notes = data.get("notes") or []
+            if len(notes) >= 2:
+                view = make_tabbed_view(
+                    "transport_traffic",
+                    {
+                        "kind": "traffic",
+                        "title": data.get("title"),
+                        "status": data.get("status"),
+                        "notes": notes,
+                        "source": data.get("source"),
+                    },
+                    commentary,
+                    0,
+                )
+                if view is not None:
+                    return view
             container = _traffic_container(data)
         elif kind == "journeys":
             container = _journeys_container(data)
@@ -192,7 +296,10 @@ def _traffic_container(data: dict) -> discord.ui.Container:
         children.append(discord.ui.TextDisplay(status))
     children.append(discord.ui.Separator())
     if notes:
-        children.append(discord.ui.TextDisplay("\n\n".join(f"- {n}" for n in notes)))
+        for i, n in enumerate(notes):
+            if i:
+                children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            children.append(discord.ui.TextDisplay(n))
     else:
         children.append(discord.ui.TextDisplay("Trafic normal."))
     children += [
@@ -482,12 +589,7 @@ class Transport(commands.Cog):
                     line_hit = True
             if line_id and d.get("impacted_objects") and not line_hit:
                 continue
-            msg = ""
-            for m in d.get("messages") or []:
-                text = _plain_text(m.get("text") or "")
-                if text:
-                    msg = text
-                    break
+            msg = _disruption_copy(d.get("messages") or [])
             if not msg:
                 msg = _plain_text(d.get("cause") or "")
             if not msg:
@@ -498,8 +600,6 @@ class Transport(commands.Cog):
             if _ACCESSIBILITY.search(msg):
                 continue
             seen.add(msg.lower())
-            if len(msg) > 280:
-                msg = msg[:279].rstrip() + "…"
             if line_hit or not line_id:
                 primary.append(msg)
             else:
@@ -710,7 +810,9 @@ class Transport(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Transport(bot))
     register_widget("get_transport", build_transport_view)
+    register_tabs("transport_traffic", traffic_tab_labels, traffic_tab_body)
 
 
 async def teardown(bot: commands.Bot) -> None:
     unregister_widget("get_transport")
+    unregister_tabs("transport_traffic")
