@@ -28,6 +28,11 @@ _SKIP_HOSTS = frozenset({
 })
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 _VID_EXT = (".mp4", ".mov", ".webm", ".mkv", ".avi")
+_LAYOUT_RE = re.compile(
+    r"\b(?:recettes?|recipes?|tutoriels?|tutos?|comparatifs?)\b"
+    r"|comment (?:faire|pr[ée]parer|cuisiner|r[ée]aliser)",
+    re.I,
+)
 
 _HINTS: tuple[tuple[str, str], ...] = (
     ("youtube", "- YouTube : tu ne peux pas regarder ni résumer la vidéo. Dis-le. Pas de summarize_channel pour ça."),
@@ -37,6 +42,7 @@ _HINTS: tuple[tuple[str, str], ...] = (
     ("audio", "- Audio : base-toi sur la transcription fournie, ne prétends pas l'avoir écouté."),
     ("text_file", "- Fichier texte : le contenu est déjà dans le message."),
     ("file", "- Fichier : tu ne l'ouvres pas (nom seulement, pas le contenu)."),
+    ("layout", "- Recette / tuto / comparatif : render_widget obligatoire, pas un pavé markdown. Le widget EST la réponse."),
 )
 
 
@@ -115,6 +121,9 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("youtube")
         if _has_real_image(msg):
             flags.add("image")
+        text = getattr(msg, "clean_content", None) or msg.content or ""
+        if _LAYOUT_RE.search(text):
+            flags.add("layout")
         for url in _urls_in(msg):
             host = _host(url)
             ext = _path_ext(url)
