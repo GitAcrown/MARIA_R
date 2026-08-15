@@ -113,14 +113,13 @@ class Layout(commands.Cog):
             Tool(
                 name="render_widget",
                 description=(
-                    "Compose et affiche un widget visuel libre (blocs : text, separator, stat_row, "
-                    "thumbnail, gallery, footer). C'est LA fiche layout — pas un autre format. "
-                    "Obligatoire pour une recette, un tutoriel multi-étapes, un comparatif, "
-                    "ou si on te demande une fiche/layout. Le widget EST la réponse "
-                    "(contenu complet dans spec : titre, stats, étapes — rien de coupé). "
-                    "Jamais pour une liste courte, une excuse, une question, un avis "
-                    "(markdown en tchat), ni pour remplacer un widget dédié "
-                    "(météo/film/jeu/foot/tâches). "
+                    "Compose un widget visuel libre (blocs : text, separator, stat_row, "
+                    "thumbnail, gallery, footer). Défaut = tchat, pas cet outil. "
+                    "À appeler seulement pour une recette complète, un tuto multi-étapes, "
+                    "un comparatif dense, ou une demande explicite de fiche/layout. "
+                    "Le widget EST alors la réponse (contenu complet dans spec). "
+                    "Jamais pour une question directe, un avis, une définition, une liste courte, "
+                    "ni pour remplacer un widget dédié (météo/film/jeu/foot/tâches/transports). "
                     "thumbnail/gallery : uniquement une URL déjà fiable en contexte (avatar Discord, "
                     "pochette d'un outil dédié) — jamais via search_images (images web souvent cassées sur "
                     "Discord, anti-hotlink/liens temporaires) ; sans URL fiable, ignore l'image. "
