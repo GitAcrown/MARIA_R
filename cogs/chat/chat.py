@@ -1001,15 +1001,6 @@ class Chat(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="rappels", description="Tes tâches planifiées (alias de /taches)")
-    async def cmd_rappels(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        tasks = await asyncio.to_thread(self.tasks.get_user_tasks, interaction.user.id)
-        await interaction.followup.send(
-            view=TasksView(self.tasks, interaction.user.id, tasks),
-            ephemeral=True,
-        )
-
     @app_commands.command(name="moi", description="Ta mémoire perso chez MARIA")
     async def cmd_moi(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
@@ -1048,14 +1039,14 @@ class Chat(commands.Cog):
             )
         await interaction.response.defer(ephemeral=True)
         memories = await asyncio.to_thread(
-            self.memory_store.list_server,
-            interaction.guild.id,
-            limit=40,
+            lambda: self.memory_store.list_server(
+                interaction.guild.id, limit=80, include_pending=True,
+            ),
         )
         summary = await summarize_memories(
             self.gpt_api.client,
             model=MODEL_MAIN,
-            memories=memories,
+            memories=[m for m in memories if m.status == "active"],
             scope="server",
             display_name=interaction.guild.name,
         )

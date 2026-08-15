@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Optional
 
 import discord
 
 from common.emojis import REPEAT_REMINDER
 from common.memory.store import (
+    CATEGORY_EVENT,
+    CATEGORY_SERVER,
     CATEGORY_USER,
     MEMORY_CONTENT_MAX,
     STATUS_ACTIVE,
@@ -40,7 +42,7 @@ from common.timezones import PARIS_TZ
 from cogs.chat.config import MODEL_MAIN
 
 _VIEW_TIMEOUT = 300
-_PAGE_BUDGET = 3500
+_MEM_PAGE = 25
 
 
 # ---------------------------------------------------------------------------
@@ -115,30 +117,6 @@ def _append_controls(
             children.append(row)
 
 
-def _paginate(items: list, format_fn: Callable, budget: int = _PAGE_BUDGET) -> list[list]:
-    pages: list[list] = []
-    current: list = []
-    size = 0
-    for item in items:
-        line = format_fn(item)
-        add = len(line) + 2
-        if current and size + add > budget:
-            pages.append(current)
-            current = []
-            size = 0
-        current.append(item)
-        size += add
-    if current:
-        pages.append(current)
-    return pages or [[]]
-
-
-def _memory_line(m: Memory) -> str:
-    content = (m.content or "").strip()
-    status = "en attente · " if m.status == STATUS_PENDING else ""
-    return f"-# {status}› {content} · {m.confidence:.0%}"
-
-
 def _is_memory_mod(member: discord.Member | discord.User) -> bool:
     if not isinstance(member, discord.Member):
         return False
@@ -150,9 +128,60 @@ def _upsert_vector(vectors: VectorStore, mem: Memory) -> None:
     if mem.status != STATUS_ACTIVE:
         return
     vectors.upsert(
-        mem.id, mem.content,
-        category=mem.category, guild_id=mem.guild_id,
-        user_id=mem.user_id, confidence=mem.confidence,
+        mem.id,
+        mem.content,
+        category=mem.category,
+        guild_id=mem.guild_id,
+        user_id=mem.user_id,
+        confidence=mem.confidence,
+    )
+
+
+def _sorted_memories(memories: list[Memory]) -> list[Memory]:
+    return sorted(
+        memories,
+        key=lambda m: (0 if m.status == STATUS_PENDING else 1, -float(m.confidence or 0)),
+    )
+
+
+def _mem_status_label(m: Memory) -> str:
+    return "en attente" if m.status == STATUS_PENDING else "confirmé"
+
+
+def _mem_conf(m: Memory) -> str:
+    return f"{m.confidence:.0%}"
+
+
+def _clip(text: str, n: int) -> str:
+    raw = (text or "").strip().replace("\n", " ")
+    if len(raw) <= n:
+        return raw
+    return raw[: n - 1] + "…"
+
+
+def _format_memory_catalog(items: list[Memory]) -> str:
+    pending = [m for m in items if m.status == STATUS_PENDING]
+    active = [m for m in items if m.status != STATUS_PENDING]
+    blocks: list[str] = []
+
+    def _block(title: str, group: list[Memory]) -> None:
+        if not group:
+            return
+        lines = [f"### {title} · {len(group)}"]
+        for m in group:
+            lines.append(f"**{_mem_conf(m)}** · {_clip(m.content, 160)}")
+        blocks.append("\n".join(lines))
+
+    _block("En attente", pending)
+    _block("Confirmés", active)
+    return "\n\n".join(blocks) if blocks else "-# Aucun souvenir."
+
+
+def _memory_option(m: Memory) -> discord.SelectOption:
+    return discord.SelectOption(
+        label=_clip(m.content, 100) or "(vide)",
+        value=m.id,
+        description=f"{_mem_status_label(m)} · {_mem_conf(m)}"[:100],
     )
 
 
@@ -323,7 +352,7 @@ class EditMemoryModal(discord.ui.Modal, title="Modifier le souvenir"):
         scope: str,
         guild_name: str = "",
         can_manage: bool = False,
-        filter_key: str = "actifs",
+        page: int = 0,
     ):
         super().__init__()
         self.store = store
@@ -335,7 +364,7 @@ class EditMemoryModal(discord.ui.Modal, title="Modifier le souvenir"):
         self.scope = scope
         self.guild_name = guild_name
         self.can_manage = can_manage
-        self.filter_key = filter_key
+        self.page = page
         self.fact = discord.ui.TextInput(
             label="Souvenir",
             style=discord.TextStyle.paragraph,
@@ -346,6 +375,9 @@ class EditMemoryModal(discord.ui.Modal, title="Modifier le souvenir"):
         self.add_item(self.fact)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.scope, self.user_id)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
         content = self.fact.value.strip()
         if not content:
             return await interaction.response.send_message("Info vide.", ephemeral=True)
@@ -353,21 +385,274 @@ class EditMemoryModal(discord.ui.Modal, title="Modifier le souvenir"):
         mem = await asyncio.to_thread(self.store.replace_content, self.memory.id, content)
         if mem:
             _upsert_vector(self.vectors, mem)
-        if self.scope == "me":
-            view = await _rebuild_me_view(
-                interaction,
-                store=self.store, vectors=self.vectors,
-                guild_id=self.guild_id, user_id=self.user_id,
-                display_name=self.display_name, note="Souvenir modifié.",
-            )
-        else:
-            view = await _rebuild_global_view(
-                interaction,
-                store=self.store, vectors=self.vectors,
-                guild_id=self.guild_id, guild_name=self.guild_name,
-                note="Souvenir modifié.", filter_key=self.filter_key,
-            )
+        view = await _rebuild_memory_list(
+            interaction,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+            display_name=self.display_name, guild_name=self.guild_name,
+            scope=self.scope, note="Souvenir modifié.", page=self.page,
+        )
         await interaction.edit_original_response(view=view)
+
+
+def _memory_deny(interaction: discord.Interaction, scope: str, user_id: int) -> Optional[str]:
+    if scope == "me" and interaction.user.id != user_id:
+        return "C'est pas ta mémoire."
+    if scope == "global" and not _is_memory_mod(interaction.user):
+        return "Réservé aux modos du serveur."
+    return None
+
+
+def _memory_pages(memories: list[Memory]) -> list[list[Memory]]:
+    ordered = _sorted_memories(memories)
+    if not ordered:
+        return [[]]
+    return [ordered[i:i + _MEM_PAGE] for i in range(0, len(ordered), _MEM_PAGE)]
+
+
+def _memory_cat_label(m: Memory) -> str:
+    return {
+        CATEGORY_USER: "perso",
+        CATEGORY_SERVER: "serveur",
+        CATEGORY_EVENT: "event",
+    }.get(m.category, m.category)
+
+
+async def _forget_one(
+    store: MemoryStore,
+    vectors: VectorStore,
+    mem: Memory,
+    *,
+    scope: str,
+    user_id: int,
+    guild_id: int,
+) -> bool:
+    if scope == "me":
+        ok, chroma = await asyncio.to_thread(store.forget_user_memory, mem.id, user_id)
+    else:
+        ok, chroma = await asyncio.to_thread(store.forget_server_memory, mem.id, guild_id)
+    if chroma:
+        vectors.delete(chroma)
+    return ok
+
+
+async def _rebuild_memory_list(
+    interaction: discord.Interaction,
+    *,
+    store: MemoryStore,
+    vectors: VectorStore,
+    guild_id: int,
+    user_id: int,
+    display_name: str,
+    scope: str,
+    guild_name: str = "",
+    note: str = "",
+    page: int = 0,
+) -> discord.ui.LayoutView:
+    if scope == "me":
+        return await _rebuild_me_view(
+            interaction,
+            store=store, vectors=vectors,
+            guild_id=guild_id, user_id=user_id,
+            display_name=display_name, note=note, page=page,
+        )
+    return await _rebuild_global_view(
+        interaction,
+        store=store, vectors=vectors,
+        guild_id=guild_id, guild_name=guild_name or display_name,
+        note=note, page=page,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sous-menu souvenir (un select → actions contextuelles)
+# ---------------------------------------------------------------------------
+
+class _MemBackButton(discord.ui.Button):
+    def __init__(self, **kw):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Retour")
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.kw["scope"], self.kw["user_id"])
+        if err and self.kw["scope"] == "me":
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.defer()
+        view = await _rebuild_memory_list(interaction, **self.kw)
+        await interaction.edit_original_response(view=view)
+
+
+class _MemConfirmButton(discord.ui.Button):
+    def __init__(self, mem: Memory, **kw):
+        super().__init__(style=discord.ButtonStyle.success, label="Confirmer")
+        self.mem = mem
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.kw["scope"], self.kw["user_id"])
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.defer()
+        mem = await asyncio.to_thread(self.kw["store"].promote_direct, self.mem.id)
+        if mem:
+            _upsert_vector(self.kw["vectors"], mem)
+        view = await _rebuild_memory_list(
+            interaction, **self.kw, note="Souvenir confirmé.",
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _MemRejectButton(discord.ui.Button):
+    def __init__(self, mem: Memory, **kw):
+        super().__init__(style=discord.ButtonStyle.danger, label="Rejeter")
+        self.mem = mem
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.kw["scope"], self.kw["user_id"])
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.defer()
+        ok = await _forget_one(
+            self.kw["store"], self.kw["vectors"], self.mem,
+            scope=self.kw["scope"], user_id=self.kw["user_id"],
+            guild_id=self.kw["guild_id"],
+        )
+        view = await _rebuild_memory_list(
+            interaction, **self.kw,
+            note="Souvenir rejeté." if ok else "Souvenir introuvable.",
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _MemForgetButton(discord.ui.Button):
+    def __init__(self, mem: Memory, **kw):
+        super().__init__(style=discord.ButtonStyle.danger, label="Oublier")
+        self.mem = mem
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.kw["scope"], self.kw["user_id"])
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.defer()
+        ok = await _forget_one(
+            self.kw["store"], self.kw["vectors"], self.mem,
+            scope=self.kw["scope"], user_id=self.kw["user_id"],
+            guild_id=self.kw["guild_id"],
+        )
+        view = await _rebuild_memory_list(
+            interaction, **self.kw,
+            note="Souvenir oublié." if ok else "Souvenir introuvable.",
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _MemEditButton(discord.ui.Button):
+    def __init__(self, mem: Memory, **kw):
+        super().__init__(style=discord.ButtonStyle.primary, label="Modifier")
+        self.mem = mem
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _memory_deny(interaction, self.kw["scope"], self.kw["user_id"])
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await interaction.response.send_modal(EditMemoryModal(
+            self.kw["store"], self.kw["vectors"], self.mem,
+            guild_id=self.kw["guild_id"], user_id=self.kw["user_id"],
+            display_name=self.kw["display_name"], scope=self.kw["scope"],
+            guild_name=self.kw.get("guild_name") or "",
+            can_manage=True, page=self.kw.get("page") or 0,
+        ))
+
+
+class MemoryDetailView(discord.ui.LayoutView):
+    """Fiche d'un souvenir — actions selon statut (attente / confirmé)."""
+
+    def __init__(
+        self,
+        mem: Memory,
+        *,
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+        display_name: str,
+        scope: str,
+        guild_name: str = "",
+        can_manage: bool = False,
+        page: int = 0,
+        note: str = "",
+    ):
+        super().__init__(timeout=_VIEW_TIMEOUT)
+        kw = dict(
+            store=store, vectors=vectors, guild_id=guild_id, user_id=user_id,
+            display_name=display_name, scope=scope, guild_name=guild_name,
+            page=page,
+        )
+        pending = mem.status == STATUS_PENDING
+        meta = f"{_mem_status_label(mem)} · {_mem_conf(mem)}"
+        if scope == "global":
+            meta += f" · {_memory_cat_label(mem)}"
+        children: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("## Souvenir"),
+            discord.ui.TextDisplay(f"-# {meta}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay((mem.content or "").strip() or "-# (vide)"),
+        ]
+        rows: list[discord.ui.ActionRow] = []
+        actions: list[discord.ui.Button] = []
+        if can_manage:
+            if pending:
+                actions += [
+                    _MemConfirmButton(mem, **kw),
+                    _MemRejectButton(mem, **kw),
+                    _MemEditButton(mem, **kw),
+                ]
+            else:
+                actions += [
+                    _MemEditButton(mem, **kw),
+                    _MemForgetButton(mem, **kw),
+                ]
+        actions.append(_MemBackButton(**kw))
+        rows.append(discord.ui.ActionRow(*actions))
+        _append_controls(children, note=note, rows=rows)
+        self.add_item(discord.ui.Container(*children))
+
+
+class _PickMemorySelect(discord.ui.Select):
+    def __init__(self, items: list[Memory], **kw):
+        super().__init__(
+            placeholder="Ouvrir un souvenir…",
+            options=[_memory_option(m) for m in items[:_MEM_PAGE]],
+        )
+        self.items = {m.id: m for m in items}
+        self.kw = kw
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.kw["scope"] == "me" and interaction.user.id != self.kw["user_id"]:
+            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
+        mem = self.items.get(self.values[0])
+        if mem is None:
+            return await interaction.response.send_message("Souvenir introuvable.", ephemeral=True)
+        can_manage = (
+            self.kw["scope"] == "me"
+            or _is_memory_mod(interaction.user)
+        )
+        await interaction.response.edit_message(
+            view=MemoryDetailView(mem, can_manage=can_manage, **self.kw),
+        )
+
+
+class _MemPageButton(discord.ui.Button):
+    def __init__(self, label: str, delta: int, rebuild):
+        super().__init__(style=discord.ButtonStyle.secondary, label=label)
+        self.delta = delta
+        self.rebuild = rebuild
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(view=self.rebuild(self.delta))
 
 
 class _AddPersonalMemoryButton(discord.ui.Button):
@@ -470,122 +755,58 @@ class ConfirmResetMeView(discord.ui.LayoutView):
         ))
 
 
-class _MemoryPageButton(discord.ui.Button):
-    def __init__(self, label: str, delta: int, rebuild):
-        super().__init__(style=discord.ButtonStyle.secondary, label=label)
-        self.delta = delta
-        self.rebuild = rebuild
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(view=self.rebuild(self.delta))
-
-
-class _ForgetPersonalSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, user_id, display_name, memories: list[Memory]):
-        options = []
-        for m in memories[:25]:
-            prefix = "Attente · " if m.status == STATUS_PENDING else ""
-            options.append(discord.SelectOption(
-                label=(prefix + m.content)[:100],
-                value=m.id,
-                description=f"conf. {m.confidence:.0%}"[:100],
-            ))
-        super().__init__(placeholder="Oublier un souvenir de cette page…", options=options)
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.user_id = user_id
-        self.display_name = display_name
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
-        await interaction.response.defer()
-        mid = self.values[0]
-        ok, chroma = await asyncio.to_thread(self.store.forget_user_memory, mid, self.user_id)
-        if chroma:
-            self.vectors.delete(chroma)
-        view = await _rebuild_me_view(
-            interaction,
-            store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, user_id=self.user_id,
-            display_name=self.display_name,
-            note="Souvenir oublié." if ok else "Souvenir introuvable.",
-        )
-        await interaction.edit_original_response(view=view)
-
-
-class _EditPersonalSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, user_id, display_name, memories: list[Memory]):
-        options = [
-            discord.SelectOption(label=m.content[:100], value=m.id)
-            for m in memories[:25]
+def _build_memory_catalog_view(
+    *,
+    title: str,
+    subtitle: str,
+    summary: str,
+    memories: list[Memory],
+    page: int,
+    note: str,
+    select_kw: dict,
+    extra_buttons: list[discord.ui.Button],
+    rebuild,
+) -> list[discord.ui.Item]:
+    pages = _memory_pages(memories)
+    page = max(0, min(page, len(pages) - 1))
+    shown = pages[page]
+    pending_n = sum(1 for m in memories if m.status == STATUS_PENDING)
+    children: list[discord.ui.Item] = [
+        discord.ui.TextDisplay(f"## {title}"),
+        discord.ui.TextDisplay(subtitle),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(summary),
+    ]
+    if memories:
+        children += [
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(_format_memory_catalog(shown)),
+            discord.ui.TextDisplay(
+                f"-# Page {page + 1}/{len(pages)} · {len(memories)} souvenir(s)"
+                + (f" · {pending_n} en attente" if pending_n else "")
+            ),
         ]
-        super().__init__(placeholder="Modifier un souvenir de cette page…", options=options)
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.user_id = user_id
-        self.display_name = display_name
-        self._by_id = {m.id: m for m in memories}
+    else:
+        children += [
+            discord.ui.Separator(),
+            discord.ui.TextDisplay("-# Aucun souvenir pour l'instant."),
+        ]
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
-        mem = self._by_id.get(self.values[0])
-        if mem is None:
-            return await interaction.response.send_message("Souvenir introuvable.", ephemeral=True)
-        await interaction.response.send_modal(EditMemoryModal(
-            self.store, self.vectors, mem,
-            guild_id=self.guild_id, user_id=self.user_id,
-            display_name=self.display_name, scope="me",
+    rows: list[discord.ui.ActionRow] = []
+    top: list[discord.ui.Button] = list(extra_buttons)
+    if len(pages) > 1:
+        if page > 0:
+            top.append(_MemPageButton("Precedent", -1, rebuild))
+        if page < len(pages) - 1:
+            top.append(_MemPageButton("Suivant", 1, rebuild))
+    if top:
+        rows.append(discord.ui.ActionRow(*top[:5]))
+    if shown and shown[0].id:
+        rows.append(discord.ui.ActionRow(
+            _PickMemorySelect(shown, **select_kw, page=page),
         ))
-
-
-class _PendingPersonalSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, user_id, display_name, pending: list[Memory]):
-        options = []
-        for m in pending[:12]:
-            options.append(discord.SelectOption(
-                label=("OK · " + m.content)[:100],
-                value=f"c:{m.id}",
-                description="Confirmer",
-            ))
-            options.append(discord.SelectOption(
-                label=("Non · " + m.content)[:100],
-                value=f"r:{m.id}",
-                description="Rejeter",
-            ))
-        super().__init__(placeholder="Confirmer ou rejeter un souvenir en attente…", options=options[:25])
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.user_id = user_id
-        self.display_name = display_name
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("C'est pas ta mémoire.", ephemeral=True)
-        await interaction.response.defer()
-        raw = self.values[0]
-        action, mid = raw.split(":", 1)
-        if action == "c":
-            mem = await asyncio.to_thread(self.store.promote_direct, mid)
-            if mem:
-                _upsert_vector(self.vectors, mem)
-            note = "Souvenir confirmé."
-        else:
-            ok, chroma = await asyncio.to_thread(self.store.forget_user_memory, mid, self.user_id)
-            if chroma:
-                self.vectors.delete(chroma)
-            note = "Souvenir rejeté." if ok else "Souvenir introuvable."
-        view = await _rebuild_me_view(
-            interaction,
-            store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, user_id=self.user_id,
-            display_name=self.display_name, note=note,
-        )
-        await interaction.edit_original_response(view=view)
+    _append_controls(children, note=note, rows=rows)
+    return children
 
 
 class MeMemoryView(discord.ui.LayoutView):
@@ -606,62 +827,37 @@ class MeMemoryView(discord.ui.LayoutView):
     ):
         super().__init__(timeout=_VIEW_TIMEOUT)
         personal = [m for m in memories if m.category == "user" or m.user_id == user_id]
-        pages = _paginate(personal, _memory_line)
-        page = max(0, min(page, len(pages) - 1))
-        shown = pages[page]
-        pending = [m for m in personal if m.status == STATUS_PENDING]
+        pending_n = sum(1 for m in personal if m.status == STATUS_PENDING)
+        subtitle = (
+            f"-# Classé par statut, puis confiance"
+            + (f" · {pending_n} à confirmer" if pending_n else "")
+        )
 
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## Mémoire · {display_name}"),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(summary),
-        ]
-        if personal:
-            footer = f"-# Page {page + 1}/{len(pages)} · {len(personal)} souvenir(s)"
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("\n".join(_memory_line(m) for m in shown)),
-                discord.ui.TextDisplay(footer),
-            ]
-        else:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("-# Aucun souvenir perso pour l'instant."),
-            ]
+        def rebuild(delta: int) -> MeMemoryView:
+            return MeMemoryView(
+                display_name, summary, memories,
+                store=store, vectors=vectors,
+                guild_id=guild_id, user_id=user_id,
+                note=note, page=page + delta,
+            )
 
-        rows: list[discord.ui.ActionRow] = [
-            discord.ui.ActionRow(
+        children = _build_memory_catalog_view(
+            title=f"Mémoire · {display_name}",
+            subtitle=subtitle,
+            summary=summary,
+            memories=personal,
+            page=page,
+            note=note,
+            select_kw=dict(
+                store=store, vectors=vectors, guild_id=guild_id,
+                user_id=user_id, display_name=display_name, scope="me",
+            ),
+            extra_buttons=[
                 _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
                 _ResetPersonalButton(store, vectors, guild_id, user_id, display_name),
-            ),
-        ]
-        if len(pages) > 1:
-            def rebuild(delta: int) -> MeMemoryView:
-                return MeMemoryView(
-                    display_name, summary, memories,
-                    store=store, vectors=vectors,
-                    guild_id=guild_id, user_id=user_id,
-                    note=note, page=page + delta,
-                )
-            nav = []
-            if page > 0:
-                nav.append(_MemoryPageButton("Precedent", -1, rebuild))
-            if page < len(pages) - 1:
-                nav.append(_MemoryPageButton("Suivant", 1, rebuild))
-            if nav:
-                rows.append(discord.ui.ActionRow(*nav))
-        if shown:
-            rows.append(discord.ui.ActionRow(
-                _ForgetPersonalSelect(store, vectors, guild_id, user_id, display_name, shown),
-            ))
-            rows.append(discord.ui.ActionRow(
-                _EditPersonalSelect(store, vectors, guild_id, user_id, display_name, shown),
-            ))
-        if pending:
-            rows.append(discord.ui.ActionRow(
-                _PendingPersonalSelect(store, vectors, guild_id, user_id, display_name, pending),
-            ))
-        _append_controls(children, note=note, rows=rows)
+            ],
+            rebuild=rebuild,
+        )
         self.add_item(discord.ui.Container(*children))
 
 
@@ -789,95 +985,6 @@ class ConfirmResetAllView(discord.ui.LayoutView):
         ))
 
 
-class _ForgetServerSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, guild_name, memories, filter_key):
-        options = [
-            discord.SelectOption(label=m.content[:100], value=m.id)
-            for m in memories[:25]
-        ]
-        super().__init__(placeholder="Oublier un souvenir de cette page…", options=options)
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.guild_name = guild_name
-        self.filter_key = filter_key
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not _is_memory_mod(interaction.user):
-            return await interaction.response.send_message(
-                "Réservé aux modos du serveur.", ephemeral=True,
-            )
-        await interaction.response.defer()
-        mid = self.values[0]
-        ok, chroma = await asyncio.to_thread(self.store.forget_server_memory, mid, self.guild_id)
-        if chroma:
-            self.vectors.delete(chroma)
-        view = await _rebuild_global_view(
-            interaction,
-            store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, guild_name=self.guild_name,
-            note="Souvenir oublié." if ok else "Souvenir introuvable.",
-            filter_key=self.filter_key,
-        )
-        await interaction.edit_original_response(view=view)
-
-
-class _EditServerSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, guild_name, memories, filter_key):
-        options = [
-            discord.SelectOption(label=m.content[:100], value=m.id)
-            for m in memories[:25]
-        ]
-        super().__init__(placeholder="Modifier un souvenir de cette page…", options=options)
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.guild_name = guild_name
-        self.filter_key = filter_key
-        self._by_id = {m.id: m for m in memories}
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not _is_memory_mod(interaction.user):
-            return await interaction.response.send_message(
-                "Réservé aux modos du serveur.", ephemeral=True,
-            )
-        mem = self._by_id.get(self.values[0])
-        if mem is None:
-            return await interaction.response.send_message("Souvenir introuvable.", ephemeral=True)
-        await interaction.response.send_modal(EditMemoryModal(
-            self.store, self.vectors, mem,
-            guild_id=self.guild_id, user_id=interaction.user.id,
-            display_name=self.guild_name, scope="global",
-            guild_name=self.guild_name, can_manage=True,
-            filter_key=self.filter_key,
-        ))
-
-
-class _GlobalFilterSelect(discord.ui.Select):
-    def __init__(self, store, vectors, guild_id, guild_name, can_manage, current: str):
-        options = [
-            discord.SelectOption(label="Actifs", value="actifs", default=current == "actifs"),
-            discord.SelectOption(label="Recents", value="recents", default=current == "recents"),
-            discord.SelectOption(label="En attente", value="pending", default=current == "pending"),
-        ]
-        super().__init__(placeholder="Filtre…", options=options)
-        self.store = store
-        self.vectors = vectors
-        self.guild_id = guild_id
-        self.guild_name = guild_name
-        self.can_manage = can_manage
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        view = await _rebuild_global_view(
-            interaction,
-            store=self.store, vectors=self.vectors,
-            guild_id=self.guild_id, guild_name=self.guild_name,
-            filter_key=self.values[0],
-        )
-        await interaction.edit_original_response(view=view)
-
-
 class AllMemoryView(discord.ui.LayoutView):
     """Mémoire collective — /global."""
 
@@ -893,63 +1000,39 @@ class AllMemoryView(discord.ui.LayoutView):
         can_manage: bool = False,
         note: str = "",
         page: int = 0,
-        filter_key: str = "actifs",
     ):
         super().__init__(timeout=_VIEW_TIMEOUT)
-        labels = {"actifs": "Actifs", "recents": "Recents", "pending": "En attente"}
-        pages = _paginate(memories, _memory_line)
-        page = max(0, min(page, len(pages) - 1))
-        shown = pages[page]
-
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## Mémoire · {guild_name}"),
-            discord.ui.TextDisplay(f"-# Filtre : {labels.get(filter_key, filter_key)}"),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(summary),
-        ]
-        if memories:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("\n".join(_memory_line(m) for m in shown)),
-                discord.ui.TextDisplay(f"-# Page {page + 1}/{len(pages)} · {len(memories)} souvenir(s)"),
-            ]
-        else:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("-# Aucun souvenir pour ce filtre."),
-            ]
-
-        rows: list[discord.ui.ActionRow] = []
+        pending_n = sum(1 for m in memories if m.status == STATUS_PENDING)
+        subtitle = (
+            "-# Classé par statut, puis confiance"
+            + (f" · {pending_n} à confirmer" if pending_n else "")
+        )
+        extra: list[discord.ui.Button] = []
         if can_manage:
-            rows.append(discord.ui.ActionRow(
-                _GlobalFilterSelect(store, vectors, guild_id, guild_name, can_manage, filter_key),
-            ))
-            rows.append(discord.ui.ActionRow(
-                _ResetServerButton(store, vectors, guild_id, guild_name),
-            ))
-        if len(pages) > 1:
-            def rebuild(delta: int) -> AllMemoryView:
-                return AllMemoryView(
-                    guild_name, summary, memories,
-                    store=store, vectors=vectors, guild_id=guild_id,
-                    can_manage=can_manage, note=note,
-                    page=page + delta, filter_key=filter_key,
-                )
-            nav = []
-            if page > 0:
-                nav.append(_MemoryPageButton("Precedent", -1, rebuild))
-            if page < len(pages) - 1:
-                nav.append(_MemoryPageButton("Suivant", 1, rebuild))
-            if nav:
-                rows.append(discord.ui.ActionRow(*nav))
-        if can_manage and shown:
-            rows.append(discord.ui.ActionRow(
-                _ForgetServerSelect(store, vectors, guild_id, guild_name, shown, filter_key),
-            ))
-            rows.append(discord.ui.ActionRow(
-                _EditServerSelect(store, vectors, guild_id, guild_name, shown, filter_key),
-            ))
-        _append_controls(children, note=note, rows=rows)
+            extra.append(_ResetServerButton(store, vectors, guild_id, guild_name))
+
+        def rebuild(delta: int) -> AllMemoryView:
+            return AllMemoryView(
+                guild_name, summary, memories,
+                store=store, vectors=vectors, guild_id=guild_id,
+                can_manage=can_manage, note=note, page=page + delta,
+            )
+
+        children = _build_memory_catalog_view(
+            title=f"Mémoire · {guild_name}",
+            subtitle=subtitle,
+            summary=summary,
+            memories=memories,
+            page=page,
+            note=note,
+            select_kw=dict(
+                store=store, vectors=vectors, guild_id=guild_id,
+                user_id=0, display_name=guild_name, scope="global",
+                guild_name=guild_name,
+            ),
+            extra_buttons=extra,
+            rebuild=rebuild,
+        )
         self.add_item(discord.ui.Container(*children))
 
 
@@ -961,19 +1044,11 @@ async def _rebuild_global_view(
     guild_id: int,
     guild_name: str,
     note: str = "",
-    filter_key: str = "actifs",
     page: int = 0,
 ) -> AllMemoryView:
-    if filter_key == "recents":
-        memories = await asyncio.to_thread(
-            lambda: store.list_recent(guild_id, category=None, limit=40, include_pending=True),
-        )
-    elif filter_key == "pending":
-        memories = await asyncio.to_thread(
-            lambda: store.list_server(guild_id, limit=40, pending_only=True),
-        )
-    else:
-        memories = await asyncio.to_thread(store.list_server, guild_id, limit=40)
+    memories = await asyncio.to_thread(
+        lambda: store.list_server(guild_id, limit=80, include_pending=True),
+    )
     active = [m for m in memories if m.status == STATUS_ACTIVE]
     if active:
         chat_cog = interaction.client.get_cog("Chat")
@@ -993,11 +1068,9 @@ async def _rebuild_global_view(
         guild_name, summary, memories,
         store=store, vectors=vectors,
         guild_id=guild_id, can_manage=_is_memory_mod(interaction.user),
-        note=note, page=page, filter_key=filter_key,
+        note=note, page=page,
     )
 
-
-# ---------------------------------------------------------------------------
 # Tâches — /taches
 # ---------------------------------------------------------------------------
 
