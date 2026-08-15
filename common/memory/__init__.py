@@ -6,12 +6,13 @@ from common.memory.rag import (
     format_memory_ctx,
     retrieve_memories,
 )
-from common.memory.store import Memory, MemoryStore
+from common.memory.store import Memory, MemoryStore, MEMORY_CONTENT_MAX
 from common.memory.worker import MemoryWorker
 
 __all__ = [
     "Memory",
     "MemoryStore",
+    "MEMORY_CONTENT_MAX",
     "MemoryWorker",
     "build_profile_ctx",
     "build_self_ctx",

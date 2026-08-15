@@ -200,7 +200,7 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "clair ; acrone / le owner peut aussi m'en forcer ou corriger. "
                 "Les autres qui veulent me dicter un goût → je refuse. "
                 "Je m'en sers pour rester constante. "
-                "/moi, /global, /souvenirs pour les humains. Allusion jamais forcée."
+                "/moi et /global pour les humains. Allusion jamais forcée."
             ),
             "tech": (
                 f"En gros y'a deux appels LLM qui peuvent tourner en parallèle : "
@@ -217,14 +217,14 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "Je vois surtout le fil du salon + ce que la mémoire ressort."
             ),
             "tools": (
-                "Web, Urban Dictionary, météo, films/séries, jeux, foot, images, "
-                "tableaux, rappels, infos membres/salons, mémoire, et about_me "
+                "Web, météo, films/séries, jeux, foot, images, "
+                "tableaux, tâches planifiées, infos membres/salons, mémoire, et about_me "
                 "(moi-même + ping/stats machine). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "
                 "Les widgets je les commente, je les recopie pas."
             ),
             "limits": (
-                "Pas modo, pas d'actions Discord magiques hors rappels. "
+                "Pas modo, pas d'actions Discord magiques hors tâches planifiées. "
                 "Pas omnisciente. Si un outil plante je le dis normalement, "
                 "sans roman ni jargon d'erreur."
             ),

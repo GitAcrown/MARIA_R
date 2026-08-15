@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -44,6 +45,10 @@ HITS_TO_PROMOTE = 2
 # 21j : laisse le temps à un signal qui revient (ex. météo d'une ville) de se confirmer
 # une 2e fois sans traîner indéfiniment en base.
 PENDING_EXPIRE_DAYS = 21
+# Plafond unique (worker, outils LLM, modal UI).
+MEMORY_CONTENT_MAX = 220
+
+_FTS_AVAILABLE = False
 
 
 @dataclass
@@ -93,6 +98,60 @@ def _init_db() -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
         if "hits" not in cols:
             conn.execute("ALTER TABLE memories ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
+        _init_fts(conn)
+
+
+def _init_fts(conn: sqlite3.Connection) -> None:
+    """Index FTS5 pour la recherche lexicale (hybride avec Chroma). Soft-fail si absent."""
+    global _FTS_AVAILABLE
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts "
+            "USING fts5(id UNINDEXED, content, tokenize='unicode61')"
+        )
+        n = conn.execute("SELECT COUNT(*) FROM memories_fts").fetchone()[0]
+        if n == 0:
+            conn.execute(
+                """
+                INSERT INTO memories_fts(id, content)
+                SELECT id, content FROM memories
+                WHERE status IN (?, ?)
+                """,
+                (STATUS_ACTIVE, STATUS_PENDING),
+            )
+        _FTS_AVAILABLE = True
+    except sqlite3.OperationalError as e:
+        _FTS_AVAILABLE = False
+        logger.warning("FTS5 mémoire indisponible (%s) — fallback LIKE", e)
+
+
+def _fts_upsert(conn: sqlite3.Connection, memory_id: str, content: str, status: str) -> None:
+    if not _FTS_AVAILABLE:
+        return
+    try:
+        conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
+        if status in (STATUS_ACTIVE, STATUS_PENDING) and content:
+            conn.execute(
+                "INSERT INTO memories_fts(id, content) VALUES (?, ?)",
+                (memory_id, content),
+            )
+    except sqlite3.OperationalError as e:
+        logger.debug("FTS upsert ignoré: %s", e)
+
+
+def _fts_delete(conn: sqlite3.Connection, memory_id: str) -> None:
+    if not _FTS_AVAILABLE:
+        return
+    try:
+        conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
+    except sqlite3.OperationalError:
+        pass
+
+
+def _fts_query_string(query: str) -> str:
+    tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]{2,}", query or "")
+    parts = [f'"{t.replace(chr(34), "")}"' for t in tokens[:12]]
+    return " OR ".join(parts)
 
 
 @contextmanager
@@ -212,17 +271,22 @@ class MemoryStore:
         *,
         limit: int = 40,
         include_server: bool = False,
+        include_pending: bool = False,
     ) -> list[Memory]:
         """Souvenirs perso d'un membre (globaux) (+ optionnellement serveur local)."""
+        statuses = (STATUS_ACTIVE, STATUS_PENDING) if include_pending else (STATUS_ACTIVE,)
+        status_ph = ",".join("?" * len(statuses))
         with _db() as conn:
             user_rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM memories
-                WHERE status = ? AND user_id = ? AND category = ?
-                ORDER BY confidence DESC, confirmed_at DESC
+                WHERE status IN ({status_ph}) AND user_id = ? AND category = ?
+                ORDER BY
+                    CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                    confidence DESC, confirmed_at DESC
                 LIMIT ?
                 """,
-                (STATUS_ACTIVE, user_id, CATEGORY_USER, limit),
+                (*statuses, user_id, CATEGORY_USER, limit),
             ).fetchall()
             server_rows = []
             if include_server:
@@ -264,17 +328,28 @@ class MemoryStore:
         guild_id: int,
         *,
         limit: int = 40,
+        include_pending: bool = False,
+        pending_only: bool = False,
     ) -> list[Memory]:
         """Souvenirs collectifs du serveur (server + event, sans mémoires user)."""
+        if pending_only:
+            statuses = (STATUS_PENDING,)
+        elif include_pending:
+            statuses = (STATUS_ACTIVE, STATUS_PENDING)
+        else:
+            statuses = (STATUS_ACTIVE,)
+        status_ph = ",".join("?" * len(statuses))
         with _db() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM memories
-                WHERE guild_id = ? AND status = ? AND category IN (?, ?)
-                ORDER BY confidence DESC, confirmed_at DESC
+                WHERE guild_id = ? AND status IN ({status_ph}) AND category IN (?, ?)
+                ORDER BY
+                    CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                    confidence DESC, confirmed_at DESC
                 LIMIT ?
                 """,
-                (guild_id, STATUS_ACTIVE, CATEGORY_SERVER, CATEGORY_EVENT, limit),
+                (guild_id, *statuses, CATEGORY_SERVER, CATEGORY_EVENT, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
@@ -396,6 +471,62 @@ class MemoryStore:
                 break
         return out
 
+    def search_fts(
+        self,
+        query: str,
+        *,
+        guild_id: int,
+        user_id: Optional[int] = None,
+        limit: int = 12,
+    ) -> list[Memory]:
+        """Recherche lexicale (FTS5, fallback LIKE). Actifs uniquement."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        limit = max(1, min(limit, 30))
+        fts_q = _fts_query_string(q)
+        with _db() as conn:
+            ids: list[str] = []
+            if _FTS_AVAILABLE and fts_q:
+                try:
+                    rows = conn.execute(
+                        "SELECT id FROM memories_fts WHERE memories_fts MATCH ? LIMIT ?",
+                        (fts_q, limit * 3),
+                    ).fetchall()
+                    ids = [r[0] for r in rows]
+                except sqlite3.OperationalError as e:
+                    logger.debug("FTS MATCH échoué (%s) — fallback LIKE", e)
+            if not ids:
+                like = f"%{q.lower()}%"
+                rows = conn.execute(
+                    """
+                    SELECT id FROM memories
+                    WHERE status = ? AND lower(content) LIKE ?
+                    LIMIT ?
+                    """,
+                    (STATUS_ACTIVE, like, limit * 3),
+                ).fetchall()
+                ids = [r[0] for r in rows]
+        if not ids:
+            return []
+        by_id = {m.id: m for m in self.get_many(ids)}
+        out: list[Memory] = []
+        for mid in ids:
+            m = by_id.get(mid)
+            if m is None or m.status != STATUS_ACTIVE:
+                continue
+            if m.category == CATEGORY_USER:
+                if user_id is not None and m.user_id != user_id:
+                    continue
+            elif m.category == CATEGORY_SELF:
+                pass
+            elif m.guild_id != guild_id:
+                continue
+            out.append(m)
+            if len(out) >= limit:
+                break
+        return out
+
     def create(
         self,
         *,
@@ -437,6 +568,7 @@ class MemoryStore:
                     mem.confidence, mem.status, mem.chroma_id, mem.hits,
                 ),
             )
+            _fts_upsert(conn, mem.id, mem.content, mem.status)
         return mem
 
     def update_content(
@@ -471,6 +603,23 @@ class MemoryStore:
                     new_status, chroma_id, memory_id,
                 ),
             )
+            _fts_upsert(conn, memory_id, content.strip(), new_status)
+        return self.get(memory_id)
+
+    def replace_content(self, memory_id: str, content: str) -> Optional[Memory]:
+        """Remplace le texte (édition manuelle UI), sans toucher hits/confiance."""
+        mem = self.get(memory_id)
+        if mem is None or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
+            return None
+        new_content = (content or "").strip()
+        if not new_content:
+            return None
+        with _db() as conn:
+            conn.execute(
+                "UPDATE memories SET content = ? WHERE id = ?",
+                (new_content, memory_id),
+            )
+            _fts_upsert(conn, memory_id, new_content, mem.status)
         return self.get(memory_id)
 
     def bump_confidence(
@@ -532,6 +681,7 @@ class MemoryStore:
                     now.isoformat(), memory_id,
                 ),
             )
+            _fts_upsert(conn, memory_id, new_content, STATUS_ACTIVE)
         return self.get(memory_id)
 
     def contradict(self, memory_id: str) -> Optional[Memory]:
@@ -559,6 +709,7 @@ class MemoryStore:
                 "UPDATE memories SET status = ? WHERE id = ?",
                 (STATUS_ARCHIVED, memory_id),
             )
+            _fts_delete(conn, memory_id)
 
     def forget_user_memory(self, memory_id: str, user_id: int) -> tuple[bool, Optional[str]]:
         """Archive un souvenir perso. Renvoie (ok, chroma_id éventuel)."""

@@ -9,6 +9,5 @@ requests
 readability-lxml
 trafilatura
 lxml
-numexpr
 tabulate
 chromadb

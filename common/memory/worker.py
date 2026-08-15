@@ -22,6 +22,7 @@ from common.memory.store import (
     CONFIDENCE_PENDING,
     CONFIDENCE_STABLE,
     CONFIDENCE_UPDATE_DELTA,
+    MEMORY_CONTENT_MAX,
     STATUS_ACTIVE,
     STATUS_PENDING,
     VALID_CATEGORIES,
@@ -36,8 +37,6 @@ _META_PERSON_RE = re.compile(
     r"le\s+user|l['']user)\s+",
     re.IGNORECASE,
 )
-_MEMORY_CONTENT_MAX = 180
-# Discord snowflakes typiques (17–20 chiffres) dans « Name (id) » / content.
 _DISCORD_ID_RE = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
 _SNOWFLAKE_PARENS_RE = re.compile(r"\s*\((\d{17,20})\)")
 _MENTION_NAME_ID_RE = re.compile(r"@?([^\s@<>()]+)\((\d{17,20})\)")
@@ -588,7 +587,7 @@ class MemoryWorker:
 
         if not content:
             return
-        if len(content) > _MEMORY_CONTENT_MAX:
+        if len(content) > MEMORY_CONTENT_MAX:
             logger.debug("Mémoire rejetée (trop longue): %s", content[:60])
             return
         if is_too_vague(content):
@@ -727,7 +726,7 @@ class MemoryWorker:
                     return
             was_pending = existing.status == STATUS_PENDING
             # Vague check aussi sur update
-            if len(new_content) > _MEMORY_CONTENT_MAX or is_too_vague(new_content):
+            if len(new_content) > MEMORY_CONTENT_MAX or is_too_vague(new_content):
                 logger.debug("Update rejeté (vague/long): %s", new_content[:60])
                 return
             mem = await asyncio.to_thread(

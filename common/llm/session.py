@@ -458,12 +458,14 @@ class ChannelSession:
         prompt_context: Optional[dict] = None,
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
         on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
+        skip_focus: bool = False,
     ) -> AssistantRecord:
         async with self._lock:
             self._prompt_context = prompt_context
             return await self._run(
                 trigger_message, 0, model=model,
                 on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+                skip_focus=skip_focus,
             )
 
     async def _run(
@@ -474,16 +476,19 @@ class ChannelSession:
         model: Optional[str] = None,
         on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
         on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
+        skip_focus: bool = False,
     ) -> AssistantRecord:
         if depth >= MAX_RECURSION:
             return self.context.add_assistant_message(
                 components=[TextComponent("Limite d'outils atteinte. Reformule ta demande.")],
             )
 
-        self.trigger_message = trigger
+        # Ne pas écraser le trigger entre tours d'outils (depth>0 passe souvent None).
+        if trigger is not None:
+            self.trigger_message = trigger
 
-        # Pièces jointes du trigger
-        if trigger:
+        # Pièces jointes du trigger (une seule fois, au premier tour).
+        if depth == 0 and trigger:
             out = []
             for att in trigger.attachments:
                 comps = await process_attachment(att, self.client, self.attachment_cache)
@@ -501,8 +506,10 @@ class ChannelSession:
 
         messages = self.context.prepare_payload()
 
-        # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM
-        if depth == 0 and trigger:
+        # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM.
+        # skip_focus : tâches planifiées — le FOCUS tchat (« réponds à l'auteur »)
+        # ferait prendre la consigne pour une nouvelle demande au lieu de l'exécuter.
+        if depth == 0 and trigger and not skip_focus:
             author = f"{trigger.author.name} ({trigger.author.id})"
             content = trigger.clean_content.strip()
             if content:
@@ -614,6 +621,7 @@ class ChannelSession:
                 None, depth + 1, model=model,
                 on_text_delta=None if widget_coming else on_text_delta,
                 on_text_reset=None if widget_coming else on_text_reset,
+                skip_focus=skip_focus,
             )
 
         if not cleaned_content or not cleaned_content.strip():
@@ -623,10 +631,18 @@ class ChannelSession:
                 except Exception:
                     logger.exception("on_text_reset")
             self.context._messages.pop()
-            self.context.add_user_message(components=[TextComponent("[SYSTEM] Réponds maintenant.")], name="system")
+            retry = (
+                "[SYSTEM] Rédige maintenant le message à poster "
+                "(ping le destinataire, consigne exécutée, résultats d'outils inclus). "
+                "Ce n'est pas une demande à programmer."
+                if skip_focus
+                else "[SYSTEM] Réponds maintenant."
+            )
+            self.context.add_user_message(components=[TextComponent(retry)], name="system")
             return await self._run(
                 None, depth + 1, model=model,
                 on_text_delta=on_text_delta, on_text_reset=on_text_reset,
+                skip_focus=skip_focus,
             )
 
         return assistant

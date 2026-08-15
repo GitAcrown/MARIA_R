@@ -6,7 +6,12 @@ import logging
 import re
 from typing import Optional
 
-from common.memory.store import CATEGORY_SELF, STATUS_ACTIVE, Memory, MemoryStore
+from common.memory.store import (
+    CATEGORY_SELF,
+    STATUS_ACTIVE,
+    Memory,
+    MemoryStore,
+)
 from common.memory.vector import VectorStore
 
 logger = logging.getLogger("MARIA.Memory.RAG")
@@ -150,12 +155,27 @@ def retrieve_memories(
         user_id=author_id,
         n=max(top_k * 3, 12),
     )
-    if not hits:
+    fts_hits = store.search_fts(
+        query, guild_id=guild_id, user_id=author_id, limit=max(top_k * 2, 8),
+    )
+
+    ids: list[str] = []
+    seen_ids: set[str] = set()
+    for h in hits:
+        hid = h.get("id")
+        if hid and hid not in seen_ids:
+            ids.append(hid)
+            seen_ids.add(hid)
+    for m in fts_hits:
+        if m.id not in seen_ids:
+            ids.append(m.id)
+            seen_ids.add(m.id)
+    if not ids:
         return []
 
-    ids = [h["id"] for h in hits]
     by_id = {m.id: m for m in store.get_many(ids)}
     distance_by_id = {h["id"]: float(h.get("distance") or 1.0) for h in hits}
+    fts_ids = {m.id for m in fts_hits}
     exclude = exclude_contents or set()
 
     candidates: list[Memory] = []
@@ -171,9 +191,7 @@ def retrieve_memories(
         if m.category == "user":
             if m.user_id != author_id:
                 continue
-            # Déjà couvert par les profils → évite le doublon perso dans le RAG.
-            if prefer_collective:
-                continue
+            # Faits déjà dans le profil : exclus via exclude_contents, pas un skip total.
         elif m.category == CATEGORY_SELF:
             # Déjà injecté via TES GOÛTS — pas de doublon RAG.
             continue
@@ -182,12 +200,15 @@ def retrieve_memories(
         candidates.append(m)
 
     def sort_key(m: Memory) -> tuple:
+        # Match FTS : petit bonus de distance (le mot du message est dans le fait).
+        dist = distance_by_id.get(m.id, 1.0)
+        if m.id in fts_ids:
+            dist = max(0.0, dist - 0.15)
         if prefer_collective:
-            # server/event d'abord, puis distance, puis confiance.
             collective = 0 if m.category in ("server", "event") else 1
-            return (collective, distance_by_id.get(m.id, 1.0), -m.confidence)
+            return (collective, dist, -m.confidence)
         author_boost = 0 if m.user_id == author_id else 1
-        return (author_boost, distance_by_id.get(m.id, 1.0), -m.confidence)
+        return (author_boost, dist, -m.confidence)
 
     candidates.sort(key=sort_key)
     return candidates[:top_k]

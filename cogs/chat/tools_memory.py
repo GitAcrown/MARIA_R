@@ -16,6 +16,7 @@ from common.memory.store import (
     CATEGORY_USER,
     CONFIDENCE_DIRECT,
     CONFIDENCE_STABLE,
+    MEMORY_CONTENT_MAX,
     STATUS_ACTIVE,
     STATUS_PENDING,
     VALID_CATEGORIES,
@@ -36,7 +37,6 @@ from cogs.chat.views import _is_memory_mod
 logger = logging.getLogger("MARIA.Chat.MemoryTools")
 
 _MAX_RESULTS = 20
-_CONTENT_MAX = 180
 
 
 def _canonical_user_content(display_name: str, fact: str) -> str:
@@ -222,7 +222,7 @@ def build_memory_tools(
                     tc.id, {"error": "Bot introuvable sur ce serveur"}, datetime.now(timezone.utc),
                 )
             content = normalize_self_memory(fact, bot_name=bot_name)
-            if len(content) > _CONTENT_MAX or is_too_vague(content):
+            if len(content) > MEMORY_CONTENT_MAX or is_too_vague(content):
                 return ToolResponseRecord(
                     tc.id,
                     {
@@ -354,7 +354,7 @@ def build_memory_tools(
         )
         stable = bool(args.get("stable", False))
         content = _canonical_user_content(display_name, fact)
-        if len(content) > _CONTENT_MAX or is_too_vague(content):
+        if len(content) > MEMORY_CONTENT_MAX or is_too_vague(content):
             return ToolResponseRecord(
                 tc.id,
                 {

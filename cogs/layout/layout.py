@@ -117,7 +117,7 @@ class Layout(commands.Cog):
                     "thumbnail, gallery, footer). RARE — seulement contenu dense à garder sous les yeux "
                     "(recette complète, tutoriel multi-étapes, classement/comparatif substantiel). Jamais "
                     "pour une liste courte, des tips, un avis/blague/une phrase (markdown en tchat), ni pour "
-                    "remplacer un widget dédié (météo/film/jeu/foot/rappels). "
+                    "remplacer un widget dédié (météo/film/jeu/foot/tâches). "
                     "thumbnail/gallery : uniquement une URL déjà fiable en contexte (avatar Discord, "
                     "pochette d'un outil dédié) — jamais via search_images (images web souvent cassées sur "
                     "Discord, anti-hotlink/liens temporaires) ; sans URL fiable, ignore l'image. "

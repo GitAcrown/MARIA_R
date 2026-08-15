@@ -1,0 +1,479 @@
+"""Outils LLM liés aux tâches planifiées."""
+
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+import re
+
+import discord
+
+from common.discord_ui import layout_with_commentary
+from common.emojis import REPEAT_REMINDER
+from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.tasks import (
+    SCHEDULE_ONCE,
+    STATUS_PAUSED,
+    STATUS_PENDING,
+    TASK_INSTRUCTION_MAX,
+    TASK_MAX_DAYS,
+    TASK_MAX_PENDING,
+    TASK_MIN_MINUTES,
+    VALID_SCHEDULES,
+    ScheduledTask,
+    TaskStore,
+    format_schedule,
+    normalize_weekdays,
+)
+from common.timezones import PARIS_TZ
+
+TASK_MAX_MINUTES = TASK_MAX_DAYS * 24 * 60
+
+_META_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"rappelle(?:-moi|-toi)?"
+    r"(?:\s+(?:que|qu['']|de|d['']|à|a))?|"
+    r"rappeler(?:\s+(?:que|qu['']|de|d['']|à|a))?|"
+    r"rappel(?=\s*[:\-–—])|"
+    r"n['']?oublie\s+pas(?:\s+(?:de|d['']|que|qu['']))?|"
+    r"ne\s+pas\s+oublier(?:\s+(?:de|d['']|que|qu['']))?|"
+    r"pense\s+[àa]"
+    r")\s*[:\-–—]?\s*",
+    re.IGNORECASE,
+)
+
+
+def sanitize_task_instruction(text: str) -> str:
+    """Enlève les formulations méta ; garde la consigne à exécuter à l'heure H."""
+    desc = (text or "").strip()
+    if not desc:
+        return desc
+    for _ in range(3):
+        cleaned = _META_PREFIX_RE.sub("", desc).strip(" \t-–—:.,")
+        if cleaned == desc:
+            break
+        desc = cleaned
+    desc = re.sub(r"^c['']est\s+", "", desc, flags=re.IGNORECASE).strip()
+    if desc:
+        desc = desc[0].upper() + desc[1:]
+    return desc[:TASK_INSTRUCTION_MAX]
+
+
+def _parse_execute_at(execute_at_str: str) -> datetime:
+    execute_at = datetime.fromisoformat(execute_at_str)
+    if execute_at.tzinfo is None:
+        execute_at = execute_at.replace(tzinfo=PARIS_TZ)
+    return execute_at.astimezone(timezone.utc)
+
+
+def _validate_horizon(execute_at: datetime) -> str | None:
+    total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
+    if total < TASK_MIN_MINUTES:
+        return "Date trop proche (minimum 2 min)"
+    if total > TASK_MAX_MINUTES:
+        return f"Date trop lointaine (max {TASK_MAX_DAYS} jours)"
+    return None
+
+
+def _serialize_task(t: ScheduledTask) -> dict:
+    item = {
+        "id": t.id,
+        "title": t.title or t.instruction,
+        "instruction": t.instruction,
+        "execute_at": t.execute_at.isoformat(),
+        "execute_at_ts": int(t.execute_at.timestamp()),
+        "schedule_kind": t.schedule_kind,
+        "weekdays": t.weekdays,
+        "time_of_day": t.time_of_day,
+        "status": t.status,
+        "schedule_label": format_schedule(t),
+    }
+    if t.until_at:
+        item["until_at"] = t.until_at.isoformat()
+        item["until_at_ts"] = int(t.until_at.timestamp())
+    if t.last_error:
+        item["last_error"] = t.last_error
+    return item
+
+
+def _format_widget_line(item: dict) -> str:
+    ts = item["execute_at_ts"]
+    desc = item["instruction"]
+    tid = item["id"]
+    kind = item.get("schedule_kind") or SCHEDULE_ONCE
+    status = item.get("status") or STATUS_PENDING
+    status_bit = " · en pause" if status == STATUS_PAUSED else ""
+    if kind != SCHEDULE_ONCE:
+        until = ""
+        if item.get("until_at_ts"):
+            until = f" · jusqu'au <t:{item['until_at_ts']}:d>"
+        return (
+            f"-# **#{tid}** {REPEAT_REMINDER} · <t:{ts}:f> · "
+            f"{item.get('schedule_label', kind)}{until}{status_bit}\n› {desc}"
+        )
+    return f"-# **#{tid}** · <t:{ts}:f> (<t:{ts}:R>){status_bit}\n› {desc}"
+
+
+def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    if "error" in data or "display_name" not in data:
+        return None
+    name = data["display_name"]
+    items = data.get("tasks") or []
+    children: list[discord.ui.Item] = [
+        discord.ui.TextDisplay(f"## Tâches · {name}"),
+        discord.ui.Separator(),
+    ]
+    if not items:
+        children.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))
+    else:
+        body = "\n\n".join(_format_widget_line(it) for it in items[:15])
+        if len(items) > 15:
+            body += f"\n\n-# … et {len(items) - 15} de plus."
+        children.append(discord.ui.TextDisplay(body))
+    return layout_with_commentary(discord.ui.Container(*children), commentary)
+
+
+async def _resolve_member(ctx, args: dict) -> tuple[Optional[discord.abc.User], Optional[str]]:
+    if not ctx or not ctx.trigger_message:
+        return None, "Contexte manquant"
+    author = ctx.trigger_message.author
+    guild = ctx.trigger_message.guild
+    uid_str = (args.get("user_id") or "").strip()
+    name_q = (args.get("username") or "").strip().lower()
+    if not uid_str and not name_q:
+        return author, None
+    if not guild:
+        return None, "Cible autre membre : uniquement sur un serveur"
+    member = None
+    if uid_str:
+        try:
+            member = guild.get_member(int(uid_str))
+            if not member:
+                member = await guild.fetch_member(int(uid_str))
+        except (ValueError, discord.NotFound, discord.HTTPException):
+            pass
+    if not member and name_q:
+        member = discord.utils.find(
+            lambda m: m.name.lower() == name_q or m.display_name.lower() == name_q,
+            guild.members,
+        )
+        if not member:
+            member = discord.utils.find(
+                lambda m: name_q in m.name.lower() or name_q in m.display_name.lower(),
+                guild.members,
+            )
+    if not member:
+        return None, "Membre introuvable"
+    return member, None
+
+
+def build_task_tools(store: TaskStore) -> list[Tool]:
+    """Construit les outils de planification / gestion des tâches."""
+
+    async def _tool_schedule(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        if not ctx or not ctx.trigger_message:
+            return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
+        args = tc.arguments
+        instruction = sanitize_task_instruction(args.get("instruction") or "")
+        if not instruction:
+            return ToolResponseRecord(tc.id, {"error": "Instruction manquante"}, datetime.now(timezone.utc))
+
+        execute_at_str = (args.get("execute_at") or "").strip()
+        if execute_at_str:
+            try:
+                execute_at = _parse_execute_at(execute_at_str)
+            except ValueError:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"},
+                    datetime.now(timezone.utc),
+                )
+        else:
+            total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
+            execute_at = datetime.now(timezone.utc) + timedelta(minutes=max(total, 0))
+
+        err = _validate_horizon(execute_at)
+        if err:
+            return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
+        if store.count_active(ctx.trigger_message.author.id) >= TASK_MAX_PENDING:
+            return ToolResponseRecord(
+                tc.id, {"error": f"Max {TASK_MAX_PENDING} tâches actives"},
+                datetime.now(timezone.utc),
+            )
+
+        kind = (args.get("recurrence") or SCHEDULE_ONCE).strip().lower()
+        if kind not in VALID_SCHEDULES:
+            kind = SCHEDULE_ONCE
+        days = normalize_weekdays(args.get("weekdays") or "")
+        time_of_day = (args.get("time") or "").strip()
+        until_at = None
+        until_str = (args.get("until") or "").strip()
+        if until_str:
+            try:
+                until_at = _parse_execute_at(until_str)
+            except ValueError:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Format until invalide (ISO 8601 attendu)"},
+                    datetime.now(timezone.utc),
+                )
+
+        title = (args.get("title") or "").strip()
+        guild = ctx.trigger_message.guild
+        tid = store.add(
+            channel_id=ctx.trigger_message.channel.id,
+            user_id=ctx.trigger_message.author.id,
+            guild_id=guild.id if guild else 0,
+            instruction=instruction,
+            execute_at=execute_at,
+            title=title,
+            schedule_kind=kind,
+            weekdays=days,
+            time_of_day=time_of_day,
+            until_at=until_at,
+            message_id=ctx.trigger_message.id,
+        )
+        created = store.get(tid)
+        label = format_schedule(created) if created else kind
+        return ToolResponseRecord(tc.id, {
+            "success": True,
+            "task_id": tid,
+            "execute_at": execute_at.isoformat(),
+            "schedule": label,
+            "_llm_summary": f"Tâche #{tid} programmée ({label}).",
+        }, datetime.now(timezone.utc))
+
+    async def _tool_manage(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        if not ctx or not ctx.trigger_message:
+            return ToolResponseRecord(tc.id, {"error": "Contexte manquant"}, datetime.now(timezone.utc))
+        args = tc.arguments or {}
+        action = (args.get("action") or "list").strip().lower()
+        user_id = ctx.trigger_message.author.id
+
+        if action == "list":
+            tasks = store.get_user_tasks(user_id)
+            items = [_serialize_task(t) for t in tasks]
+            return ToolResponseRecord(tc.id, {
+                "tasks": items,
+                "_llm_summary": f"{len(items)} tâche(s) active(s)." if items else "Aucune tâche en attente.",
+            }, datetime.now(timezone.utc))
+
+        tid = args.get("task_id")
+        if not tid:
+            return ToolResponseRecord(
+                tc.id,
+                {"error": "task_id manquant. Appelle manage_task action=list pour les IDs."},
+                datetime.now(timezone.utc),
+            )
+        tid = int(tid)
+
+        if action == "cancel":
+            ok = store.cancel(tid, user_id)
+            if not ok:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Tâche introuvable ou pas la tienne."},
+                    datetime.now(timezone.utc),
+                )
+            return ToolResponseRecord(tc.id, {
+                "success": True, "task_id": tid,
+                "_llm_summary": f"Tâche #{tid} annulée.",
+            }, datetime.now(timezone.utc))
+
+        if action == "pause":
+            ok = store.pause(tid, user_id)
+            if not ok:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Impossible de mettre en pause (introuvable, déjà en pause, ou pas la tienne)."},
+                    datetime.now(timezone.utc),
+                )
+            return ToolResponseRecord(tc.id, {
+                "success": True, "task_id": tid,
+                "_llm_summary": f"Tâche #{tid} en pause.",
+            }, datetime.now(timezone.utc))
+
+        if action == "resume":
+            ok = store.resume(tid, user_id)
+            if not ok:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Impossible de reprendre (pas en pause, ou pas la tienne)."},
+                    datetime.now(timezone.utc),
+                )
+            return ToolResponseRecord(tc.id, {
+                "success": True, "task_id": tid,
+                "_llm_summary": f"Tâche #{tid} reprise.",
+            }, datetime.now(timezone.utc))
+
+        if action == "skip":
+            nxt = store.skip_next(tid, user_id)
+            if nxt is None:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Pas de prochaine occurrence (tâche unique, ou introuvable)."},
+                    datetime.now(timezone.utc),
+                )
+            return ToolResponseRecord(tc.id, {
+                "success": True, "task_id": tid, "execute_at": nxt.isoformat(),
+                "_llm_summary": f"Tâche #{tid} : prochaine occurrence sautée.",
+            }, datetime.now(timezone.utc))
+
+        if action == "edit":
+            new_instr = args.get("instruction")
+            if isinstance(new_instr, str) and new_instr.strip():
+                new_instr = sanitize_task_instruction(new_instr) or None
+            else:
+                new_instr = None
+            execute_at = None
+            execute_at_str = (args.get("execute_at") or "").strip()
+            if execute_at_str:
+                try:
+                    execute_at = _parse_execute_at(execute_at_str)
+                except ValueError:
+                    return ToolResponseRecord(
+                        tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"},
+                        datetime.now(timezone.utc),
+                    )
+                err = _validate_horizon(execute_at)
+                if err:
+                    return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
+            kind = args.get("recurrence")
+            if isinstance(kind, str):
+                kind = kind.strip().lower()
+                if kind not in VALID_SCHEDULES:
+                    kind = None
+            else:
+                kind = None
+            days_raw = args.get("weekdays")
+            days = normalize_weekdays(days_raw) if days_raw else None
+            time_of_day = args.get("time")
+            if isinstance(time_of_day, str):
+                time_of_day = time_of_day.strip() or None
+            else:
+                time_of_day = None
+            until_at = None
+            until_str = (args.get("until") or "").strip()
+            if until_str:
+                try:
+                    until_at = _parse_execute_at(until_str)
+                except ValueError:
+                    return ToolResponseRecord(
+                        tc.id, {"error": "Format until invalide"},
+                        datetime.now(timezone.utc),
+                    )
+            ok = store.edit(
+                tid, user_id,
+                instruction=new_instr,
+                execute_at=execute_at,
+                schedule_kind=kind,
+                weekdays=days,
+                time_of_day=time_of_day,
+                until_at=until_at,
+            )
+            if not ok:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Tâche introuvable, déjà passée, ou pas la tienne."},
+                    datetime.now(timezone.utc),
+                )
+            return ToolResponseRecord(tc.id, {
+                "success": True, "task_id": tid,
+                "_llm_summary": f"Tâche #{tid} modifiée.",
+            }, datetime.now(timezone.utc))
+
+        return ToolResponseRecord(
+            tc.id,
+            {"error": "action inconnue (list|edit|pause|resume|skip|cancel)"},
+            datetime.now(timezone.utc),
+        )
+
+    async def _tool_show(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
+        member, err = await _resolve_member(ctx, tc.arguments or {})
+        if err or member is None:
+            return ToolResponseRecord(tc.id, {"error": err or "Membre introuvable"}, datetime.now(timezone.utc))
+        pending = store.get_user_tasks(member.id)
+        items = [_serialize_task(t) for t in pending]
+        name = getattr(member, "display_name", None) or member.name
+        return ToolResponseRecord(tc.id, {
+            "_tool": "show_tasks",
+            "user_id": str(member.id),
+            "display_name": name,
+            "count": len(items),
+            "tasks": items,
+            "_llm_summary": (
+                f"Widget tâches de {name} affiché ({len(items)})."
+                if items else f"Aucune tâche en attente pour {name}."
+            ),
+        }, datetime.now(timezone.utc))
+
+    return [
+        Tool(
+            name="schedule_task",
+            description=(
+                "Programme une tâche que tu exécuteras à l'heure H "
+                "(rappel, météo, recherche…). "
+                f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
+                f"Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
+                "weekly : weekdays=wed,fri et time=HH:MM. until optionnel."
+            ),
+            properties={
+                "instruction": {
+                    "type": "string",
+                    "description": (
+                        "Consigne à EXÉCUTER à l'heure H, pas un méta-rappel. "
+                        "OK : « Rappelle d'aller à la salle et donne la météo à Paris ». "
+                        "KO : « Rappeler que… », « demain/ce soir »."
+                    ),
+                },
+                "title": {"type": "string", "description": "Libellé court UI (optionnel)"},
+                "execute_at": {"type": "string", "description": "Date/heure ISO 8601 (prioritaire)"},
+                "delay_minutes": {"type": "integer", "description": "Délai en minutes"},
+                "delay_hours": {"type": "integer", "description": "Délai en heures"},
+                "recurrence": {
+                    "type": "string",
+                    "enum": list(VALID_SCHEDULES),
+                    "description": "once|daily|weekly",
+                },
+                "weekdays": {
+                    "type": "string",
+                    "description": "Jours weekly, virgules : mon,tue,wed,thu,fri,sat,sun (ex. wed,fri)",
+                },
+                "time": {"type": "string", "description": "Heure Paris HH:MM pour daily/weekly"},
+                "until": {"type": "string", "description": "Fin de série ISO 8601 (optionnel)"},
+            },
+            optional_props=["title", "execute_at", "delay_minutes", "delay_hours", "recurrence", "weekdays", "time", "until"],
+            function=_tool_schedule,
+        ),
+        Tool(
+            name="manage_task",
+            description=(
+                "Gère tes tâches : list (IDs), edit, pause, resume, skip (saute la prochaine), cancel. "
+                "list si l'ID est inconnu."
+            ),
+            properties={
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "edit", "pause", "resume", "skip", "cancel"],
+                    "description": "Action à faire",
+                },
+                "task_id": {"type": "integer", "description": "ID (sauf list)"},
+                "instruction": {"type": "string", "description": "Nouvelle consigne (edit)"},
+                "execute_at": {"type": "string", "description": "Nouvelle date ISO 8601 (edit)"},
+                "recurrence": {
+                    "type": "string",
+                    "enum": list(VALID_SCHEDULES),
+                    "description": "once|daily|weekly (edit)",
+                },
+                "weekdays": {"type": "string", "description": "Jours weekly, virgules (edit)"},
+                "time": {"type": "string", "description": "HH:MM Paris (edit)"},
+                "until": {"type": "string", "description": "Fin de série ISO 8601 (edit)"},
+            },
+            optional_props=["task_id", "instruction", "execute_at", "recurrence", "weekdays", "time", "until"],
+            function=_tool_manage,
+        ),
+        Tool(
+            name="show_tasks",
+            description=(
+                "Widget lecture seule des tâches d'une personne dans le salon "
+                "(défaut = auteur). Gestion → /taches ou manage_task."
+            ),
+            properties={
+                "user_id": {"type": "string", "description": "Id Discord (optionnel, défaut = auteur)"},
+                "username": {"type": "string", "description": "Pseudo Discord (optionnel)"},
+            },
+            optional_props=["user_id", "username"],
+            function=_tool_show,
+        ),
+    ]

@@ -1,13 +1,13 @@
 """Façade publique de l'API GPT."""
 
-from typing import Awaitable, Callable, Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 import discord
 
 from .client import MariaLLMClient
-from .session import ChannelSessionManager
+from .session import ChannelSession, ChannelSessionManager
 from .tools import Tool, ToolRegistry
-from .context import AssistantRecord
+from .context import AssistantRecord, TextComponent
 
 
 class MariaResponse:
@@ -101,6 +101,98 @@ class MariaGptApi:
                 break
 
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
+
+    async def run_isolated_completion(
+        self,
+        channel: discord.abc.Messageable,
+        user_text: str,
+        *,
+        trigger_message=None,
+        developer_prompt: str,
+        allowed_tools: Optional[Sequence[str]] = None,
+        prompt_context: Optional[dict] = None,
+        model: Optional[str] = None,
+    ) -> MariaResponse:
+        """Tour LLM hors historique du salon (tâches planifiées)."""
+        registry = ToolRegistry()
+        if allowed_tools:
+            for name in allowed_tools:
+                tool = self.tool_registry.get(name)
+                if tool is not None:
+                    registry.register(tool)
+        mgr = self.session_manager
+        session = ChannelSession(
+            channel_id=0,
+            client=self.client,
+            tool_registry=registry,
+            attachment_cache=mgr.attachment_cache,
+            developer_prompt_template=lambda ctx: developer_prompt,
+            context_window=mgr._context_window,
+            context_age_hours=mgr._context_age_hours,
+            max_messages=mgr._max_messages,
+        )
+        session.context.add_user_message(
+            components=[TextComponent(user_text)],
+            name="system",
+        )
+        assistant = await session.run_completion(
+            trigger_message,
+            model=model,
+            prompt_context=prompt_context,
+            skip_focus=True,
+        )
+        tool_responses: list = []
+        used_tools: list[dict] = []
+        found = False
+        for m in reversed(session.context.get_messages()):
+            if m == assistant:
+                found = True
+                continue
+            if not found:
+                continue
+            if m.role == "tool":
+                tool_responses.insert(0, m)
+            elif m.role == "assistant":
+                if hasattr(m, "tool_calls") and m.tool_calls:
+                    seen_names = {t["name"] for t in used_tools}
+                    for tc in reversed(m.tool_calls):
+                        if tc.function_name not in seen_names:
+                            used_tools.insert(0, {"name": tc.function_name, "args": tc.arguments or {}})
+                            seen_names.add(tc.function_name)
+            elif m.role == "user":
+                if getattr(m, "name", None) == "system":
+                    continue
+                break
+        return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
+
+    async def record_assistant_post(
+        self,
+        channel: discord.abc.Messageable,
+        text: str,
+        *,
+        discord_messages: Optional[Sequence[discord.Message]] = None,
+        system_notes: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Intègre un message déjà posté (tâche) dans l'historique du salon."""
+        session = self.session_manager.get_or_create(channel)
+        body = (text or "").strip()
+        async with session._lock:
+            record = session.context.add_assistant_message(
+                components=[TextComponent(body)],
+            )
+            for msg in discord_messages or ():
+                session._remember_ingested(msg.id, record)
+                if hasattr(record, "metadata"):
+                    record.metadata["discord_message"] = msg
+            for note in system_notes or ():
+                cleaned = (note or "").strip()
+                if not cleaned:
+                    continue
+                session.context.add_user_message(
+                    components=[TextComponent(f"[SYSTEM] {cleaned}")],
+                    name="system",
+                )
+                session.record_system_note(cleaned)
 
     async def inject_context_note_async(self, channel: discord.abc.Messageable, note: str) -> None:
         """Injecte une note système en acquérant le lock de session.

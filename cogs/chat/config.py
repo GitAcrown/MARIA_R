@@ -42,7 +42,7 @@ MEMORY_FLUSH_MINUTES = 20
 MEMORY_DIRECT_FLUSH_MESSAGES = 8  # si le lot contient des msgs → MARIA
 MEMORY_BUFFER_CAP = 80
 # RAG complémentaire (le perso vient surtout des profils injectés).
-MEMORY_TOP_K = 3
+MEMORY_TOP_K = 6
 MEMORY_EXTRACT_MAX_ACTIONS = 8
 MEMORY_EXISTING_LIMIT = 30
 # Chevauchement entre lots : contexte du lot précédent, sans re-create.
