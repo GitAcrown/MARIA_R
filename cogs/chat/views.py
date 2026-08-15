@@ -1114,15 +1114,13 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     return [ordered[i:i + _TASK_PAGE] for i in range(0, len(ordered), _TASK_PAGE)]
 
 
-def _task_line(t: ScheduledTask) -> str:
+def _task_meta(t: ScheduledTask) -> str:
     ts = int(t.execute_at.timestamp())
     bits: list[str] = []
     if t.schedule_kind != SCHEDULE_ONCE:
         bits.append(f"{REPEAT_REMINDER} {format_schedule(t)}")
     bits.append(f"<t:{ts}:R>")
-    instr = (t.instruction or "").strip()
-    meta = " · ".join(bits)
-    return f"{meta}\n{instr}" if instr else meta
+    return " · ".join(bits)
 
 
 def _task_groups(items: list[ScheduledTask]) -> list[tuple[str, list[ScheduledTask]]]:
@@ -1143,7 +1141,6 @@ def _format_task_body(t: ScheduledTask) -> str:
             rec += f" · jusqu'au <t:{int(t.until_at.timestamp())}:d>"
     err = f"\n-# Dernière erreur : {t.last_error}" if t.last_error else ""
     return (
-        f"{t.instruction}\n"
         f"-# {_task_status_label(t)} · {rec}\n"
         f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>){err}"
     )
@@ -1388,12 +1385,14 @@ class TaskDetailView(discord.ui.LayoutView):
         children: list[discord.ui.Item] = [
             discord.ui.TextDisplay(f"## {SMALL_TASK} Tâche"),
             discord.ui.Separator(),
+            discord.ui.TextDisplay((task.instruction or "").strip() or "-# Sans consigne."),
             discord.ui.TextDisplay(_format_task_body(task)),
         ]
         actions: list[discord.ui.Button] = [
             _EditTaskButton(store, user_id, task, page=page),
-            _PauseTaskButton(store, user_id, task, page=page),
         ]
+        if task.schedule_kind != SCHEDULE_ONCE or task.status == STATUS_PAUSED:
+            actions.append(_PauseTaskButton(store, user_id, task, page=page))
         if task.schedule_kind != SCHEDULE_ONCE:
             actions.append(_SkipTaskButton(store, user_id, task, page=page))
         actions += [
@@ -1467,9 +1466,12 @@ class TasksView(discord.ui.LayoutView):
                 for i, t in enumerate(group):
                     if not first_section and not (show_headers and i == 0):
                         children.append(discord.ui.Separator(spacing=tight))
+                    instr = (t.instruction or "").strip()
+                    if instr:
+                        children.append(discord.ui.TextDisplay(instr))
                     children.append(
                         discord.ui.Section(
-                            discord.ui.TextDisplay(_task_line(t)),
+                            discord.ui.TextDisplay(f"-# {_task_meta(t)}"),
                             accessory=_OpenTaskButton(store, user_id, t, page=page),
                         )
                     )
