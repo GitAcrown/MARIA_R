@@ -15,6 +15,7 @@ from common.tasks import (
     TASK_INSTRUCTION_MAX,
     TASK_MAX_DAYS,
     TASK_MAX_PENDING,
+    TASK_MAX_RECURRING,
     TASK_MIN_MINUTES,
     VALID_SCHEDULES,
     ScheduledTask,
@@ -176,6 +177,17 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         kind = (args.get("recurrence") or SCHEDULE_ONCE).strip().lower()
         if kind not in VALID_SCHEDULES:
             kind = SCHEDULE_ONCE
+        if kind != SCHEDULE_ONCE:
+            n_rep = store.count_active_recurring(ctx.trigger_message.author.id)
+            if n_rep >= TASK_MAX_RECURRING:
+                return ToolResponseRecord(
+                    tc.id,
+                    {"error": (
+                        f"Limite atteinte ({TASK_MAX_RECURRING} tâches répétitives). "
+                        "Passe-en une en unique ou annule-en une."
+                    )},
+                    datetime.now(timezone.utc),
+                )
         days = normalize_weekdays(args.get("weekdays") or "")
         time_of_day = (args.get("time") or "").strip()
         until_at = None
@@ -312,6 +324,19 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     kind = None
             else:
                 kind = None
+            if kind in (SCHEDULE_DAILY, SCHEDULE_WEEKLY):
+                current = store.get(tid)
+                already = bool(current and current.schedule_kind != SCHEDULE_ONCE)
+                n_rep = store.count_active_recurring(user_id, exclude_id=tid)
+                if not already and n_rep >= TASK_MAX_RECURRING:
+                    return ToolResponseRecord(
+                        tc.id,
+                        {"error": (
+                            f"Limite atteinte ({TASK_MAX_RECURRING} tâches répétitives). "
+                            "Passe-en une en unique ou annule-en une."
+                        )},
+                        datetime.now(timezone.utc),
+                    )
             days_raw = args.get("weekdays")
             days = normalize_weekdays(days_raw) if days_raw else None
             time_of_day = args.get("time")
@@ -379,7 +404,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             description=(
                 "Programme une tâche que tu exécuteras à l'heure H "
                 "(rappel, météo, recherche…). "
-                f"Max {TASK_MAX_PENDING} tâches par personne. "
+                f"Max {TASK_MAX_PENDING} tâches par personne, dont {TASK_MAX_RECURRING} répétitives (daily/weekly). "
                 f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
                 f"Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
                 "weekly : weekdays=wed,fri et time=HH:MM. until optionnel."

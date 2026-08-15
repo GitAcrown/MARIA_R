@@ -45,7 +45,8 @@ WEEKDAYS_FR = {
 }
 
 MAX_SEND_RETRIES = 3
-TASK_MAX_PENDING = 5
+TASK_MAX_PENDING = 10
+TASK_MAX_RECURRING = 3
 TASK_MIN_MINUTES = 2
 TASK_MAX_DAYS = 365
 TASK_INSTRUCTION_MAX = 500
@@ -422,6 +423,22 @@ class TaskStore:
                 WHERE user_id=? AND status IN (?, ?)
                 """,
                 (user_id, STATUS_PENDING, STATUS_PAUSED),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def count_active_recurring(self, user_id: int, *, exclude_id: int = 0) -> int:
+        with _db() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE user_id=? AND status IN (?, ?)
+                  AND schedule_kind IN (?, ?)
+                  AND id != ?
+                """,
+                (
+                    user_id, STATUS_PENDING, STATUS_PAUSED,
+                    SCHEDULE_DAILY, SCHEDULE_WEEKLY, exclude_id,
+                ),
             ).fetchone()
         return row[0] if row else 0
 
