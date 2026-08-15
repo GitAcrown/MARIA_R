@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-import re
 
 import discord
 
@@ -27,34 +26,9 @@ from common.timezones import PARIS_TZ
 
 TASK_MAX_MINUTES = TASK_MAX_DAYS * 24 * 60
 
-_META_PREFIX_RE = re.compile(
-    r"^\s*(?:"
-    r"rappelle(?:-moi|-toi)?"
-    r"(?:\s+(?:que|qu['']|de|d['']|à|a))?|"
-    r"rappeler(?:\s+(?:que|qu['']|de|d['']|à|a))?|"
-    r"rappel(?=\s*[:\-–—])|"
-    r"n['']?oublie\s+pas(?:\s+(?:de|d['']|que|qu['']))?|"
-    r"ne\s+pas\s+oublier(?:\s+(?:de|d['']|que|qu['']))?|"
-    r"pense\s+[àa]"
-    r")\s*[:\-–—]?\s*",
-    re.IGNORECASE,
-)
-
-
 def sanitize_task_instruction(text: str) -> str:
-    """Enlève les formulations méta ; garde la consigne à exécuter à l'heure H."""
-    desc = (text or "").strip()
-    if not desc:
-        return desc
-    for _ in range(3):
-        cleaned = _META_PREFIX_RE.sub("", desc).strip(" \t-–—:.,")
-        if cleaned == desc:
-            break
-        desc = cleaned
-    desc = re.sub(r"^c['']est\s+", "", desc, flags=re.IGNORECASE).strip()
-    if desc:
-        desc = desc[0].upper() + desc[1:]
-    return desc[:TASK_INSTRUCTION_MAX]
+    """Normalise la consigne (trim + plafond), sans retirer « Rappelle… »."""
+    return (text or "").strip()[:TASK_INSTRUCTION_MAX]
 
 
 def _parse_execute_at(execute_at_str: str) -> datetime:
@@ -97,7 +71,6 @@ def _serialize_task(t: ScheduledTask) -> dict:
 def _format_widget_line(item: dict) -> str:
     ts = item["execute_at_ts"]
     desc = item["instruction"]
-    tid = item["id"]
     kind = item.get("schedule_kind") or SCHEDULE_ONCE
     status = item.get("status") or STATUS_PENDING
     status_bit = " · en pause" if status == STATUS_PAUSED else ""
@@ -106,10 +79,10 @@ def _format_widget_line(item: dict) -> str:
         if item.get("until_at_ts"):
             until = f" · jusqu'au <t:{item['until_at_ts']}:d>"
         return (
-            f"-# **#{tid}** {REPEAT_REMINDER} · <t:{ts}:f> · "
+            f"-# {REPEAT_REMINDER} · <t:{ts}:f> · "
             f"{item.get('schedule_label', kind)}{until}{status_bit}\n› {desc}"
         )
-    return f"-# **#{tid}** · <t:{ts}:f> (<t:{ts}:R>){status_bit}\n› {desc}"
+    return f"-# <t:{ts}:f> (<t:{ts}:R>){status_bit}\n› {desc}"
 
 
 def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -117,16 +90,18 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
         return None
     name = data["display_name"]
     items = data.get("tasks") or []
+    quota_n = sum(
+        1 for it in items
+        if (it.get("status") or STATUS_PENDING) in (STATUS_PENDING, STATUS_PAUSED)
+    )
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"## Tâches · {name}"),
+        discord.ui.TextDisplay(f"## Tâches · {name} · {quota_n}/{TASK_MAX_PENDING}"),
         discord.ui.Separator(),
     ]
     if not items:
         children.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))
     else:
-        body = "\n\n".join(_format_widget_line(it) for it in items[:15])
-        if len(items) > 15:
-            body += f"\n\n-# … et {len(items) - 15} de plus."
+        body = "\n\n".join(_format_widget_line(it) for it in items)
         children.append(discord.ui.TextDisplay(body))
     return layout_with_commentary(discord.ui.Container(*children), commentary)
 
@@ -194,7 +169,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
         if store.count_active(ctx.trigger_message.author.id) >= TASK_MAX_PENDING:
             return ToolResponseRecord(
-                tc.id, {"error": f"Max {TASK_MAX_PENDING} tâches actives"},
+                tc.id, {"error": f"Limite atteinte ({TASK_MAX_PENDING} tâches). Annule-en une d'abord."},
                 datetime.now(timezone.utc),
             )
 
@@ -236,7 +211,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "task_id": tid,
             "execute_at": execute_at.isoformat(),
             "schedule": label,
-            "_llm_summary": f"Tâche #{tid} programmée ({label}).",
+            "_llm_summary": f"Tâche programmée ({label}).",
         }, datetime.now(timezone.utc))
 
     async def _tool_manage(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -272,7 +247,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 )
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid,
-                "_llm_summary": f"Tâche #{tid} annulée.",
+                "_llm_summary": "Tâche annulée.",
             }, datetime.now(timezone.utc))
 
         if action == "pause":
@@ -284,7 +259,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 )
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid,
-                "_llm_summary": f"Tâche #{tid} en pause.",
+                "_llm_summary": "Tâche en pause.",
             }, datetime.now(timezone.utc))
 
         if action == "resume":
@@ -296,7 +271,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 )
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid,
-                "_llm_summary": f"Tâche #{tid} reprise.",
+                "_llm_summary": "Tâche reprise.",
             }, datetime.now(timezone.utc))
 
         if action == "skip":
@@ -308,7 +283,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 )
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid, "execute_at": nxt.isoformat(),
-                "_llm_summary": f"Tâche #{tid} : prochaine occurrence sautée.",
+                "_llm_summary": "Prochaine occurrence sautée.",
             }, datetime.now(timezone.utc))
 
         if action == "edit":
@@ -370,7 +345,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 )
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid,
-                "_llm_summary": f"Tâche #{tid} modifiée.",
+                "_llm_summary": "Tâche modifiée.",
             }, datetime.now(timezone.utc))
 
         return ToolResponseRecord(
@@ -404,6 +379,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             description=(
                 "Programme une tâche que tu exécuteras à l'heure H "
                 "(rappel, météo, recherche…). "
+                f"Max {TASK_MAX_PENDING} tâches par personne. "
                 f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
                 f"Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
                 "weekly : weekdays=wed,fri et time=HH:MM. until optionnel."

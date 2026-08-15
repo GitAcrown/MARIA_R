@@ -33,6 +33,7 @@ from common.tasks import (
     STATUS_PAUSED,
     STATUS_PENDING as TASK_PENDING,
     TASK_INSTRUCTION_MAX,
+    TASK_MAX_PENDING,
     ScheduledTask,
     TaskStore,
     format_schedule,
@@ -44,6 +45,7 @@ from cogs.chat.config import MODEL_MAIN
 
 _VIEW_TIMEOUT = 300
 _MEM_PAGE = 25
+_TASK_PAGE = 5
 
 
 # ---------------------------------------------------------------------------
@@ -1109,50 +1111,27 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     ordered = _sorted_tasks(tasks)
     if not ordered:
         return [[]]
-    pages: list[list[ScheduledTask]] = []
-    current: list[ScheduledTask] = []
-    size = 0
-    budget = 3500
-    for t in ordered:
-        add = len(_task_line(t)) + 2
-        if current and (len(current) >= _MEM_PAGE or size + add > budget):
-            pages.append(current)
-            current = []
-            size = 0
-        current.append(t)
-        size += add
-    if current:
-        pages.append(current)
-    return pages
+    return [ordered[i:i + _TASK_PAGE] for i in range(0, len(ordered), _TASK_PAGE)]
 
 
 def _task_line(t: ScheduledTask) -> str:
     ts = int(t.execute_at.timestamp())
-    bits = [f"**#{t.id}**"]
+    bits: list[str] = []
     if t.schedule_kind != SCHEDULE_ONCE:
         bits.append(f"{REPEAT_REMINDER} {format_schedule(t)}")
     bits.append(f"<t:{ts}:R>")
     instr = (t.instruction or "").strip()
-    return f"{' · '.join(bits)}\n› {instr}" if instr else " · ".join(bits)
+    meta = " · ".join(bits)
+    return f"{meta}\n{instr}" if instr else meta
 
 
-def _format_task_catalog(items: list[ScheduledTask]) -> str:
+def _task_groups(items: list[ScheduledTask]) -> list[tuple[str, list[ScheduledTask]]]:
     groups = [
         ("Actives", [t for t in items if _task_rank(t) == 0]),
         ("En pause", [t for t in items if t.status == STATUS_PAUSED]),
         ("Échecs", [t for t in items if t.status == STATUS_FAILED]),
     ]
-    nonempty = [(title, group) for title, group in groups if group]
-    if not nonempty:
-        return "-# Aucune tâche."
-    if len(nonempty) == 1:
-        return "\n".join(_task_line(t) for t in nonempty[0][1])
-    blocks: list[str] = []
-    for title, group in nonempty:
-        lines = [f"### {title} · {len(group)}"]
-        lines.extend(_task_line(t) for t in group)
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+    return [(title, group) for title, group in groups if group]
 
 
 def _format_task_body(t: ScheduledTask) -> str:
@@ -1167,14 +1146,6 @@ def _format_task_body(t: ScheduledTask) -> str:
         f"{t.instruction}\n"
         f"-# {_task_status_label(t)} · {rec}\n"
         f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>){err}"
-    )
-
-
-def _task_option(t: ScheduledTask) -> discord.SelectOption:
-    return discord.SelectOption(
-        label=f"#{t.id} · {_clip(t.title or t.instruction, 90)}"[:100],
-        value=str(t.id),
-        description=f"{_task_status_label(t)} · {format_schedule(t)}"[:100],
     )
 
 
@@ -1415,7 +1386,7 @@ class TaskDetailView(discord.ui.LayoutView):
     ):
         super().__init__(timeout=_VIEW_TIMEOUT)
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâche #{task.id}"),
+            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâche"),
             discord.ui.Separator(),
             discord.ui.TextDisplay(_format_task_body(task)),
         ]
@@ -1434,26 +1405,20 @@ class TaskDetailView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(*children))
 
 
-class _PickTaskSelect(discord.ui.Select):
-    def __init__(self, store, user_id, items: list[ScheduledTask], *, page: int = 0):
-        super().__init__(
-            placeholder="Ouvrir une tâche…",
-            options=[_task_option(t) for t in items[:_MEM_PAGE]],
-        )
+class _OpenTaskButton(discord.ui.Button):
+    def __init__(self, store, user_id, task: ScheduledTask, *, page: int = 0):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Ouvrir")
         self.store = store
         self.user_id = user_id
-        self.items = {t.id: t for t in items}
+        self.task = task
         self.page = page
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _task_deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
-        task = self.items.get(int(self.values[0]))
-        if task is None:
-            return await interaction.response.send_message("Tâche introuvable.", ephemeral=True)
         await interaction.response.edit_message(
-            view=TaskDetailView(self.store, self.user_id, task, page=self.page),
+            view=TaskDetailView(self.store, self.user_id, self.task, page=self.page),
         )
 
 
@@ -1473,34 +1438,48 @@ class TasksView(discord.ui.LayoutView):
         pages = _task_pages(tasks)
         page = max(0, min(page, len(pages) - 1))
         shown = pages[page]
+        quota_n = sum(1 for t in tasks if t.status in (TASK_PENDING, STATUS_PAUSED))
         paused_n = sum(1 for t in tasks if t.status == STATUS_PAUSED)
         subtitle = "-# Classé par prochaine exécution"
         if paused_n:
             subtitle += f" · {paused_n} en pause"
 
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâches"),
+            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâches · {quota_n}/{TASK_MAX_PENDING}"),
             discord.ui.TextDisplay(subtitle),
         ]
-        if tasks:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(_format_task_catalog(shown)),
-                discord.ui.TextDisplay(
-                    f"-# Page {page + 1}/{len(pages)} · {len(tasks)} tâche(s)"
-                ),
-            ]
-        else:
+        if not tasks:
             children += [
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("-# Aucune tâche en attente."),
             ]
+        else:
+            children.append(discord.ui.Separator())
+            groups = _task_groups(shown)
+            show_headers = len(groups) > 1
+            tight = discord.SeparatorSpacing.small
+            first_section = True
+            for gi, (title, group) in enumerate(groups):
+                if show_headers:
+                    if gi:
+                        children.append(discord.ui.Separator())
+                    children.append(discord.ui.TextDisplay(f"### {title} · {len(group)}"))
+                for i, t in enumerate(group):
+                    if not first_section and not (show_headers and i == 0):
+                        children.append(discord.ui.Separator(spacing=tight))
+                    children.append(
+                        discord.ui.Section(
+                            discord.ui.TextDisplay(_task_line(t)),
+                            accessory=_OpenTaskButton(store, user_id, t, page=page),
+                        )
+                    )
+                    first_section = False
+            if len(pages) > 1:
+                children.append(discord.ui.Separator(spacing=tight))
+                children.append(discord.ui.TextDisplay(
+                    f"-# Page {page + 1}/{len(pages)}"
+                ))
 
-        rows: list[discord.ui.ActionRow] = []
-        if shown:
-            rows.append(discord.ui.ActionRow(
-                _PickTaskSelect(store, user_id, shown, page=page),
-            ))
         extra: list[discord.ui.Button] = []
         if tasks:
             extra.append(_CancelAllTasksButton(store, user_id))
@@ -1515,6 +1494,7 @@ class TasksView(discord.ui.LayoutView):
                 extra.append(_MemPageButton("Precedent", -1, rebuild))
             if page < len(pages) - 1:
                 extra.append(_MemPageButton("Suivant", 1, rebuild))
+        rows: list[discord.ui.ActionRow] = []
         if extra:
             rows.append(discord.ui.ActionRow(*extra[:5]))
         _append_controls(children, note=note, rows=rows)

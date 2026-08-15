@@ -147,7 +147,7 @@ OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le tout de suit
 Chaîner plusieurs outils dans le même tour est normal. Widget dédié (météo/film/jeu/musique/foot/tâches/résumé) : appelle l'outil, commente sans répéter son contenu.
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
-- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (wed,fri) + time HH:MM ; until optionnel. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
+- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (wed,fri) + time HH:MM ; until optionnel. Max 5 tâches par personne. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
 - render_table : colle le bloc retourné, jamais de |---| à la main.
 - render_widget : seulement contenu dense (recette, tutoriel, comparatif). Petite liste → markdown. Jamais à la place d'un widget dédié.
 - summarize_channel : le widget EST la réponse, demi-phrase d'intro max.
@@ -178,8 +178,8 @@ DATE/HEURE : {weekday} {datetime} (Paris)"""
 # ---------------------------------------------------------------------------
 
 def _spoken_task_line(instruction: str) -> str:
-    """Texte de repli si le LLM ne rédige rien : le fait, sans « Rappelle que… »."""
-    text = sanitize_task_instruction(instruction)
+    """Texte de repli si le LLM ne rédige rien."""
+    text = (instruction or "").strip()
     return text or "C'est l'heure."
 
 
@@ -526,13 +526,13 @@ class Chat(commands.Cog):
             text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# Tâche #{task.id} · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# Tâche planifiée · <t:{int(task.execute_at.timestamp())}:R>"
         else:
             if not text:
                 text = f"{mention} {_spoken_task_line(action)}"
             elif mention not in text and f"<@!{task.user_id}>" not in text:
                 text = f"{mention} {text}"
-            footer = f"-# Tâche #{task.id} · {mention} · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# Tâche planifiée · {mention} · <t:{int(task.execute_at.timestamp())}:R>"
         if footer not in text:
             text = f"{text}\n{footer}"
 
@@ -833,10 +833,9 @@ class Chat(commands.Cog):
                 )
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
-                tid = args.get("task_id", "")
                 label = (
-                    f"{SMALL_TASK} **Tâche #{tid} · {action}**"
-                    if tid else f"{SMALL_TASK} **Tâche · {action or 'gestion'}**"
+                    f"{SMALL_TASK} **Tâche · {action}**"
+                    if action else f"{SMALL_TASK} **Tâche**"
                 )
             elif name == "search_memory":
                 q = (args.get("query") or "").strip()
