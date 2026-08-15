@@ -13,6 +13,7 @@ Clés .env : PRIM_API_KEY, SNCF_API_KEY
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 import time
@@ -48,6 +49,7 @@ _SNCF_HINT = re.compile(
     re.I,
 )
 _IDF_HINT = re.compile(r"\b(m[ée]tro|rer|tram|bus)\b", re.I)
+_ACCESSIBILITY = re.compile(r"\b(ascenseur|escalier|escalator)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,16 @@ def _physical_mode(info: dict) -> str:
 
 def _source_label(data: dict) -> str:
     return data.get("source") or "Île-de-France Mobilités"
+
+
+def _uri(ident: str) -> str:
+    return quote(ident or "", safe=":")
+
+
+def _plain_text(raw: str) -> str:
+    text = re.sub(r"(?i)<br\s*/?>", " ", raw or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(html.unescape(text).split())
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +251,7 @@ class Transport(commands.Cog):
             name="prim",
             label="Île-de-France Mobilités",
             base="https://prim.iledefrance-mobilites.fr/marketplace/v2/navitia",
-            coverage="/coverage/fr-idf",
+            coverage="",
             key=(cfg.get("PRIM_API_KEY") or "").strip(),
             auth="header",
         )
@@ -276,6 +288,7 @@ class Transport(commands.Cog):
         if r.status_code == 429:
             return {"error": f"Quota {backend.label} atteint, réessaie plus tard"}
         if not r.ok:
+            logger.warning("PRIM/SNCF %s %s", r.status_code, url)
             return {"error": f"Erreur {backend.label} {r.status_code}"}
         try:
             payload = r.json()
@@ -334,31 +347,49 @@ class Transport(commands.Cog):
         if "error" in payload:
             return payload
         objects = payload.get("pt_objects") or []
-        if not objects:
+        best = None
+        best_score = -10**9
+        q = query.strip().lower()
+        tokens = re.findall(r"[a-z0-9]+", q)
+        for obj in objects:
+            line = obj.get("line") or {}
+            lid = line.get("id")
+            if not lid:
+                continue
+            code = (line.get("code") or "").strip().lower()
+            name = (line.get("name") or "").lower()
+            modes = line.get("physical_modes") or []
+            mode = ((modes[0].get("name") if modes else "") or "").lower()
+            score = int(obj.get("quality") or 0)
+            if "remplacement" in name:
+                score -= 80
+            if re.search(r"\brer\b", q) and "rer" in mode:
+                score += 40
+            if re.search(r"\bm[ée]tro\b", q) and mode in ("métro", "metro"):
+                score += 40
+            if re.search(r"\btram", q) and "tram" in mode:
+                score += 40
+            if code and code in tokens:
+                score += 25
+            if score > best_score:
+                best_score = score
+                best = line
+        if not best:
             return {"error": f"Ligne introuvable : {query!r}"}
-        line = objects[0].get("line") or {}
-        lid = line.get("id")
-        if not lid:
-            return {"error": f"Ligne introuvable : {query!r}"}
-        name = line.get("name") or line.get("code") or query
-        code = line.get("code") or ""
-        mode = ""
-        modes = line.get("physical_modes") or []
-        if modes:
-            mode = (modes[0].get("name") or "").strip()
+        modes = best.get("physical_modes") or []
+        mode = ((modes[0].get("name") if modes else "") or "").strip()
         return {
-            "id": lid,
-            "name": name,
-            "code": code,
+            "id": best["id"],
+            "name": best.get("name") or best.get("code") or query,
+            "code": best.get("code") or "",
             "mode": mode,
-            "disruptions": payload.get("disruptions") or [],
         }
 
     def _fetch_departures(self, backend: _Backend, stop_id: str, kind: str) -> dict:
         segment = "stop_areas" if kind != "stop_point" else "stop_points"
         return self._get(
             backend,
-            f"{backend.coverage}/{segment}/{quote(stop_id, safe='')}/departures",
+            f"{backend.coverage}/{segment}/{_uri(stop_id)}/departures",
             {"count": 30, "data_freshness": "realtime"},
         )
 
@@ -433,61 +464,61 @@ class Transport(commands.Cog):
         return data if "error" not in data else fallback
 
     def _disruption_texts(self, payload: dict, *, line_id: str = "") -> list[str]:
-        notes: list[str] = []
+        primary: list[str] = []
+        secondary: list[str] = []
         seen: set[str] = set()
         for d in payload.get("disruptions") or []:
             status = (d.get("status") or "").lower()
             if status and status not in ("active", "future"):
                 continue
-            if line_id:
-                impacted = False
-                for pt in d.get("impacted_objects") or []:
-                    pt_id = ((pt.get("pt_object") or {}).get("id")) or ""
-                    if line_id in pt_id or pt_id in line_id:
-                        impacted = True
-                        break
-                if not impacted and d.get("impacted_objects"):
-                    continue
+            line_hit = False
+            for pt in d.get("impacted_objects") or []:
+                pto = pt.get("pt_object") or pt
+                pt_id = pto.get("id") or ""
+                kind = (pto.get("embedded_type") or "").lower()
+                if kind == "line":
+                    line_hit = True
+                if line_id and (line_id in pt_id or pt_id in line_id):
+                    line_hit = True
+            if line_id and d.get("impacted_objects") and not line_hit:
+                continue
             msg = ""
             for m in d.get("messages") or []:
-                text = (m.get("text") or "").strip()
+                text = _plain_text(m.get("text") or "")
                 if text:
                     msg = text
                     break
             if not msg:
-                msg = (d.get("cause") or "").strip()
+                msg = _plain_text(d.get("cause") or "")
             if not msg:
                 sev = d.get("severity") or {}
-                msg = (sev.get("name") or "").strip()
-            msg = " ".join(msg.split())
+                msg = _plain_text(sev.get("name") or "")
             if not msg or msg.lower() in seen:
+                continue
+            if _ACCESSIBILITY.search(msg):
                 continue
             seen.add(msg.lower())
             if len(msg) > 280:
                 msg = msg[:279].rstrip() + "…"
-            notes.append(msg)
-            if len(notes) >= 6:
-                break
-        return notes
+            if line_hit or not line_id:
+                primary.append(msg)
+            else:
+                secondary.append(msg)
+        notes = primary or secondary
+        return notes[:6]
 
     def _traffic_payload(self, line: str) -> dict:
         found = self._search_line(line)
         if "error" in found:
             return found
-        notes = self._disruption_texts(
-            {"disruptions": found.get("disruptions") or []},
-            line_id=found["id"],
+        raw = self._get(
+            self._prim,
+            f"{self._prim.coverage}/lines/{_uri(found['id'])}/line_reports",
+            {"count": 20},
         )
-        if not notes:
-            raw = self._get(
-                self._prim,
-                f"{self._prim.coverage}/lines/{quote(found['id'], safe='')}/traffic_reports",
-                {"count": 20, "depth": 2},
-            )
-            if "error" not in raw:
-                notes = self._disruption_texts(raw, line_id=found["id"])
-            elif "404" not in (raw.get("error") or ""):
-                return raw
+        if "error" in raw:
+            return raw
+        notes = self._disruption_texts(raw, line_id=found["id"])
         title = found["name"]
         if found.get("code") and found["code"] not in title:
             title = f"{found.get('mode') or 'Ligne'} {found['code']}".strip()
@@ -502,8 +533,8 @@ class Transport(commands.Cog):
     def _global_traffic_payload(self) -> dict:
         raw = self._get(
             self._prim,
-            f"{self._prim.coverage}/traffic_reports",
-            {"count": 20, "depth": 1},
+            f"{self._prim.coverage}/line_reports/line_reports",
+            {"count": 20},
         )
         if "error" in raw:
             return raw
