@@ -86,11 +86,11 @@ async def _channel_tip_id(channel: discord.abc.Messageable) -> Optional[int]:
 
 _SYSTEM_FINAL = """Tu résumes une conversation Discord pour le salon.
 Règles :
-- 1 court paragraphe d'intro (sujet global), puis 3–6 puces max des points clés.
+- Sans focus : 1 court paragraphe d'intro (sujet global), puis 3–6 puces max des points clés.
+- Avec focus : réponds UNIQUEMENT à cette demande (sujet, personne, décisions…). Pas de récap général autour. 1 phrase de cadre puis 3–6 puces. Si le fil n'en parle presque pas, dis-le en une phrase.
 - Cite les pseudos quand c'est utile ; ne invente rien.
 - Ignore le bruit (pings seuls, « ok », réactions textuelles sans contenu).
 - Pas d'emojis, pas d'intro du type « Voici le résumé ».
-- Si focus fourni : concentre-toi dessus, signale si peu présent.
 - Si trop peu de contenu utile : dis-le clairement en une phrase."""
 
 _SYSTEM_PARTIAL = """Tu résumes un EXTRAIT chronologique d'une conversation Discord.
@@ -98,15 +98,15 @@ Règles :
 - 2–4 puces max, densés, avec les pseudos utiles.
 - Ne invente rien. Ignore le bruit.
 - Pas d'intro, pas d'emojis, pas de conclusion globale (d'autres extraits suivront).
-- Si focus fourni : privilégie cet angle."""
+- Si focus fourni : ne retiens que ce qui sert cette demande."""
 
 _SYSTEM_MERGE = """Tu fusionnes des résumés partiels chronologiques d'une même conversation Discord
 en UN résumé final cohérent.
 Règles :
-- 1 court paragraphe d'intro, puis 3–6 puces max des points clés.
+- Sans focus : 1 court paragraphe d'intro, puis 3–6 puces max des points clés.
+- Avec focus : réponds UNIQUEMENT à cette demande, pas de récap général. Si peu présent, dis-le.
 - Déduplique, garde l'ordre du fil, cite les pseudos utiles.
-- Ne invente rien. Pas d'emojis, pas d'« Voici le résumé ».
-- Si focus fourni : concentre-toi dessus."""
+- Ne invente rien. Pas d'emojis, pas d'« Voici le résumé »."""
 
 
 def build_channel_summary_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -252,7 +252,10 @@ async def _summarize(
     lines: list[str],
     focus: str,
 ) -> str:
-    focus_block = f"\nFocus demandé : {focus}\n" if focus else ""
+    focus_block = (
+        f"\nDemande (pas un résumé général) : {focus}\n"
+        if focus else ""
+    )
     chunks = _chunk_lines(lines)
 
     # Petit volume → une seule passe (comportement d'origine).
@@ -354,8 +357,11 @@ def _build_summary_payload(
     # Pas de coupure brute ici : render_free_widget (_text_block) tronque déjà
     # proprement (fin de phrase/mot) si le résumé dépasse la place disponible.
     content = summary
+    title = f"Résumé — #{name}"
+    if focus:
+        title = f"Résumé — #{name} · {focus[:40]}"
     spec = {
-        "title": f"Résumé — #{name}",
+        "title": title,
         "emoji": RESUME,
         "blocks": [
             {"type": "text", "content": content},
@@ -364,8 +370,9 @@ def _build_summary_payload(
     }
     note = (
         f"Widget résumé de #{name} affiché ({useful} msgs"
+        + (f", demande : {focus[:80]}" if focus else "")
         + (", cache" if from_cache else "")
-        + "). Le contenu est DANS le widget : une demi-phrase d'intro max, "
+        + "). Le contenu est DANS le widget : aucun texte autour, "
         "ne reformule rien, ne recopie rien."
     )
     return {
@@ -498,11 +505,11 @@ def build_channel_summary_tools(
             name="summarize_channel",
             description=(
                 "Résume la conversation récente d'un salon/thread Discord et l'affiche "
-                "en widget. Pour « résume le salon », « c'était quoi ce fil », "
-                "« récap des derniers messages », « résume la journée ». Défaut : salon actuel. "
-                "Pour une journée : hours=24 (le volume est géré automatiquement, lots + synthèse). "
-                "Après l'appel : une demi-phrase d'intro tout au plus — ne pas reformuler "
-                "le résumé, le widget le contient déjà. Ne pas utiliser pour un simple avis en tchat."
+                "en widget. « résume le salon » / « récap » sans angle → résumé général. "
+                "Demande précise (« ce qu'a dit X », « les décisions », « le plan soirée ») "
+                "→ focus = cette demande, pas un récap global. "
+                "Défaut : salon actuel. Pour une journée : hours=24. "
+                "Après l'appel : aucun texte autour — le widget contient déjà le résumé."
             ),
             properties={
                 "channel_id": {
@@ -522,7 +529,11 @@ def build_channel_summary_tools(
                 },
                 "focus": {
                     "type": "string",
-                    "description": "Angle du résumé (ex. décisions, blagues, un sujet précis)",
+                    "description": (
+                        "Demande précise à traiter à la place d'un résumé général "
+                        "(sujet, personne, décisions, blagues, le plan…). "
+                        "Vide = récap global."
+                    ),
                 },
             },
             optional_props=["channel_id", "limit", "hours", "focus"],

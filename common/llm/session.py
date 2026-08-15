@@ -26,6 +26,7 @@ from .context import (
 )
 from .tools import ToolRegistry
 from .attachments import AttachmentCache, process_attachment
+from .capabilities import build_capability_ctx
 
 logger = logging.getLogger("llm.session")
 
@@ -190,6 +191,23 @@ def _components_v2_to_parts(
                 images.append(url)
 
     return texts, images
+
+
+def _cite_snippet(msg: discord.Message, limit: int = 180) -> str:
+    """Aperçu du message cité, pour le [FOCUS] (texte, sinon titre/URL d'embed)."""
+    text = (getattr(msg, "clean_content", None) or msg.content or "").strip()
+    if text:
+        return text[:limit]
+    for emb in getattr(msg, "embeds", None) or []:
+        title = (emb.title or "").strip()
+        url = (emb.url or "").strip()
+        if title and url:
+            return f"{title} ({url})"[:limit]
+        if title or url:
+            return (title or url)[:limit]
+        if emb.video and emb.video.url:
+            return str(emb.video.url)[:limit]
+    return ""
 
 
 def _embed_to_text(emb: discord.Embed) -> str:
@@ -498,10 +516,17 @@ class ChannelSession:
                 if recent and recent[0].role == "user":
                     recent[0].components.extend(out)
 
+        cited = None
+        focus_msg = trigger or self.trigger_message
+        if focus_msg is not None and focus_msg.reference is not None:
+            cited = await resolve_message_reference(focus_msg)
+
         # Le modèle réellement demandé pour cet appel (visible dans le developer prompt).
         effective_model = model or getattr(self.client, "completion_model", "") or ""
         prompt_ctx = dict(self._prompt_context or {})
         prompt_ctx["model"] = effective_model
+        if not skip_focus:
+            prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
         self.context.developer_prompt = self.developer_prompt_template(prompt_ctx)
 
         messages = self.context.prepare_payload()
@@ -515,20 +540,26 @@ class ChannelSession:
             if content:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:200]} ». "
-                    f"Ignore les autres questions du fil ; le `[contexte]` et les citations "
-                    f"`[Répond à …]` ne sont que du décor."
+                    f"Ignore les autres questions du fil ; le `[contexte]` n'est que du décor."
                 )
             else:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} "
                     f"(média / message sans texte). Pas aux autres messages du fil."
                 )
-            # Reply Discord : rappeler que le message cité n'est pas la question.
-            if trigger.reference is not None:
-                hint += (
-                    " Ce message est une réponse Discord : traite la demande de "
-                    f"{trigger.author.name}, pas le message auquel iel répond."
-                )
+            # Reply Discord : le message cité est l'objet de la demande, pas un concurrent.
+            if cited is not None:
+                snippet = _cite_snippet(cited)
+                if snippet:
+                    hint += (
+                        f" Iel répond à : « {snippet} ». La demande porte sur ce contenu "
+                        f"(lien, média, propos), pas sur tout le salon — sauf demande explicite."
+                    )
+                else:
+                    hint += (
+                        " C'est une réponse Discord : la demande porte sur le message cité "
+                        "(lien, média, propos), pas sur tout le salon."
+                    )
             # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
             # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
             ctx_hint = self._build_context_hint()
