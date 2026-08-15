@@ -149,7 +149,7 @@ Chaîner plusieurs outils dans le même tour est normal. Widget dédié (météo
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
 - get_transport : IDF (métro/RER/bus/tram/Transilien) + trains SNCF. Arrêt → stop= ; ligne IDF → line= ; A → B → origin + destination (itinéraire IDF, SNCF, ou les deux : Marseille → un quartier de Paris). « comment aller à X depuis chez moi » → origin = arrêt/gare en mémoire. « train pour Lyon » → origin PROFIL/mémoire, sinon demande. Hors de ces réseaux → dis-le, n'invente pas.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
-- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (wed,fri) + time HH:MM ; until optionnel. Max 10 tâches par personne, dont 3 répétitives. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
+- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (mon,tue,wed,thu,fri) + time HH:MM ; until optionnel. Heure déjà passée → prochaine occ., ne refuse pas. via=dm UNIQUEMENT si iel dit clairement MP / DM / message privé — jamais déduire de « donne-moi » / briefing perso (défaut = salon). Max 10 tâches par personne, dont 3 répétitives. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
 - render_table : colle le bloc retourné, jamais de |---| à la main.
 - render_widget : uniquement recette complète, tuto multi-étapes, comparatif dense, ou demande explicite de fiche/layout. Question directe, avis, définition, petite liste → tchat (markdown si besoin), jamais de widget. Si on te le demande après un pavé : rappelle l'outil avec tout le contenu. Jamais à la place d'un widget dédié.
 - summarize_channel : le widget EST la réponse, aucun texte autour. « résumé » / « récap » sans angle → général. Demande précise (sujet, quelqu'un, décisions, le plan…) → passe-la dans focus. hours si une fenêtre est dite.
@@ -459,16 +459,17 @@ class Chat(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _exec_task(self, task: ScheduledTask) -> None:
-        channel = self.bot.get_channel(task.channel_id)
-        if channel is None:
+        origin_channel = self.bot.get_channel(task.channel_id)
+        if origin_channel is None:
             try:
-                channel = await self.bot.fetch_channel(task.channel_id)
-            except discord.HTTPException as e:
-                raise RuntimeError(f"Salon {task.channel_id} inaccessible") from e
-        if channel is None:
-            raise RuntimeError(f"Salon {task.channel_id} introuvable")
+                origin_channel = await self.bot.fetch_channel(task.channel_id)
+            except discord.HTTPException:
+                origin_channel = None
 
-        guild = getattr(channel, "guild", None)
+        guild = self.bot.get_guild(task.guild_id) if task.guild_id else None
+        if guild is None:
+            guild = getattr(origin_channel, "guild", None)
+
         member = None
         if guild is not None:
             member = guild.get_member(task.user_id)
@@ -479,10 +480,31 @@ class Chat(commands.Cog):
                     member = None
         if member is None:
             member = self.bot.get_user(task.user_id)
+        if member is None:
+            try:
+                member = await self.bot.fetch_user(task.user_id)
+            except discord.HTTPException:
+                member = None
+        if member is None:
+            raise RuntimeError(f"Utilisateur {task.user_id} introuvable")
+
+        via_dm = bool(task.deliver_dm)
+        dest = origin_channel
+        if via_dm:
+            dm = None
+            try:
+                dm = member.dm_channel or await member.create_dm()
+            except discord.HTTPException as e:
+                raise RuntimeError(f"MP indisponibles : {e}") from e
+            if dm is None:
+                raise RuntimeError("MP indisponibles")
+            dest = dm
+        elif dest is None:
+            raise RuntimeError(f"Salon {task.channel_id} inaccessible")
 
         class _TaskTrigger:
             def __init__(self):
-                self.channel = channel
+                self.channel = dest
                 self.guild = guild
                 self.author = member
                 self.content = task.instruction
@@ -494,9 +516,6 @@ class Chat(commands.Cog):
                 self.embeds = []
                 self.components = []
                 self.stickers = []
-
-        if member is None:
-            raise RuntimeError(f"Utilisateur {task.user_id} introuvable")
 
         trigger = _TaskTrigger()
         display = getattr(member, "display_name", None) or getattr(member, "name", "?")
@@ -528,7 +547,7 @@ class Chat(commands.Cog):
         )
         user_text = f"[EXÉCUTION TÂCHE #{task.id}] Accomplis uniquement : {action}"
         resp = await self.gpt_api.run_isolated_completion(
-            channel,
+            dest,
             user_text,
             trigger_message=trigger,
             developer_prompt=prompt,
@@ -538,12 +557,16 @@ class Chat(commands.Cog):
         text = (resp.text or "").strip()
         mention = f"<@{task.user_id}>"
         origin = None
-        if task.message_id:
+        if not via_dm and task.message_id and origin_channel is not None:
             try:
-                origin = await channel.fetch_message(task.message_id)
+                origin = await origin_channel.fetch_message(task.message_id)
             except (discord.NotFound, discord.HTTPException, discord.Forbidden):
                 origin = None
-        if origin is not None:
+        if via_dm:
+            if not text:
+                text = _spoken_task_line(action)
+            footer = f"-# Tâche planifiée · <t:{int(task.execute_at.timestamp())}:R>"
+        elif origin is not None:
             text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
             if not text:
                 text = _spoken_task_line(action)
@@ -574,7 +597,7 @@ class Chat(commands.Cog):
                 return await origin.reply(
                     mention_author=True, allowed_mentions=reply_mentions, **kwargs,
                 )
-            return await channel.send(
+            return await dest.send(
                 allowed_mentions=ping_fallback if first else silent,
                 **kwargs,
             )
@@ -602,7 +625,7 @@ class Chat(commands.Cog):
             for i, chunk in enumerate(chunks):
                 sent_messages.append(await _post(content=chunk, first=(i == 0)))
         await self.gpt_api.record_assistant_post(
-            channel,
+            dest,
             text,
             discord_messages=sent_messages,
             system_notes=tool_notes,
@@ -655,7 +678,7 @@ class Chat(commands.Cog):
 
     def _should_respond(self, message: discord.Message, *, reply_to_bot: bool = False) -> bool:
         if not message.guild:
-            return False
+            return True
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
         if mode == "off":
             return False
@@ -674,6 +697,8 @@ class Chat(commands.Cog):
         return False
 
     def _build_channel_context(self, channel) -> str:
+        if isinstance(channel, discord.DMChannel):
+            return "message privé"
         target = channel.parent if isinstance(channel, discord.Thread) else channel
         parts: list[str] = []
         if isinstance(channel, discord.Thread):
@@ -799,15 +824,16 @@ class Chat(commands.Cog):
         }
 
         streamer: Optional[StreamPublisher] = None
+        stream_on = True
         if message.guild:
             stream_on = self.data.get(message.guild).settings("guild_config").get(
                 "chatbot_stream", True, cast=bool,
             )
-            if stream_on:
-                streamer = StreamPublisher(
-                    message.channel,
-                    reply_to=message if use_reply else None,
-                )
+        if stream_on:
+            streamer = StreamPublisher(
+                message.channel,
+                reply_to=message if use_reply else None,
+            )
 
         async with message.channel.typing():
             resp = await self.gpt_api.run_completion(
@@ -920,12 +946,12 @@ class Chat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        # Le chat conversationnel est volontairement limité aux serveurs.
-        if not message.guild:
-            return
         # Nos propres messages sont déjà injectés directement dans le contexte
         # (session._run côté assistant) — les réingérer ici les dupliquerait.
         if self.bot.user and message.author.id == self.bot.user.id:
+            return
+        # MP : on répond aux humains. Autres bots en MP : ignorer.
+        if not message.guild and message.author.bot:
             return
         key = (message.channel.id, message.id)
         if key in self._processed:
@@ -957,7 +983,7 @@ class Chat(commands.Cog):
             return
 
         mem_content = _build_memory_ingest_text(message, bot_user=self.bot.user)
-        if self._memory_worker and mem_content:
+        if message.guild and self._memory_worker and mem_content:
             reply_to_id = reply_to_name = reply_to_content = None
             reply_is_bot = False
             if message.reference is not None:

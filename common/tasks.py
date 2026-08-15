@@ -72,6 +72,7 @@ class ScheduledTask:
     message_id: int = 0
     created_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None
+    deliver_dm: bool = False
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -183,6 +184,41 @@ def next_occurrence(
     return None
 
 
+def snap_execute_at(
+    *,
+    kind: str,
+    weekdays: Optional[list[str]] = None,
+    time_of_day: str = "",
+    execute_at: Optional[datetime] = None,
+    until_at: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """Première occurrence assez loin (min 2 min), calée sur l'heure / les jours.
+
+    Une daily/weekly demandée à une heure déjà passée avance au prochain créneau
+    au lieu d'échouer (« trop proche »).
+    """
+    now_utc = _as_utc(now or datetime.now(timezone.utc))
+    min_at = now_utc + timedelta(minutes=TASK_MIN_MINUTES)
+    if kind == SCHEDULE_ONCE or kind not in VALID_SCHEDULES:
+        return _as_utc(execute_at) if execute_at is not None else None
+    days = normalize_weekdays(weekdays)
+    tod = normalize_time_of_day(time_of_day, execute_at)
+    dummy = ScheduledTask(
+        id=0,
+        channel_id=0,
+        user_id=0,
+        guild_id=0,
+        instruction="x",
+        execute_at=_as_utc(execute_at) if execute_at is not None else min_at,
+        schedule_kind=kind,
+        weekdays=days,
+        time_of_day=tod,
+        until_at=until_at,
+    )
+    return next_occurrence(dummy, after=min_at - timedelta(seconds=1))
+
+
 def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
     keys = r.keys()
     return ScheduledTask(
@@ -203,6 +239,7 @@ def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
         message_id=(r["message_id"] if "message_id" in keys else 0) or 0,
         created_at=_parse_optional_dt(r["created_at"] if "created_at" in keys else None),
         last_run_at=_parse_optional_dt(r["last_run_at"] if "last_run_at" in keys else None),
+        deliver_dm=bool((r["deliver_dm"] if "deliver_dm" in keys else 0) or 0),
     )
 
 
@@ -229,10 +266,16 @@ def _init_db() -> None:
                 last_error   TEXT DEFAULT '',
                 message_id   INTEGER DEFAULT 0,
                 created_at   TEXT,
-                last_run_at  TEXT
+                last_run_at  TEXT,
+                deliver_dm   INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "deliver_dm" not in cols:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN deliver_dm INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status_at ON tasks(status, execute_at)"
         )
@@ -367,6 +410,7 @@ class TaskStore:
         time_of_day: str = "",
         until_at: Optional[datetime] = None,
         message_id: int = 0,
+        deliver_dm: bool = False,
     ) -> int:
         if schedule_kind not in VALID_SCHEDULES:
             schedule_kind = SCHEDULE_ONCE
@@ -377,6 +421,15 @@ class TaskStore:
         tod = ""
         if schedule_kind != SCHEDULE_ONCE:
             tod = normalize_time_of_day(time_of_day, execute_at)
+            snapped = snap_execute_at(
+                kind=schedule_kind,
+                weekdays=days,
+                time_of_day=tod,
+                execute_at=execute_at,
+                until_at=until_at,
+            )
+            if snapped is not None:
+                execute_at = snapped
         title = (title or instruction).strip()[:TASK_TITLE_MAX]
         instruction = (instruction or "").strip()[:TASK_INSTRUCTION_MAX]
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -387,13 +440,14 @@ class TaskStore:
                 INSERT INTO tasks (
                     channel_id, user_id, guild_id, title, instruction, execute_at,
                     schedule_kind, weekdays, time_of_day, until_at, status,
-                    message_id, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    message_id, created_at, deliver_dm
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     channel_id, user_id, guild_id, title, instruction,
                     execute_at.isoformat(), schedule_kind, json.dumps(days),
                     tod, until_iso, STATUS_PENDING, message_id, now_iso,
+                    1 if deliver_dm else 0,
                 ),
             )
             return int(cur.lastrowid)
@@ -538,6 +592,7 @@ class TaskStore:
         time_of_day: Optional[str] = None,
         until_at: Optional[datetime] = None,
         clear_until: bool = False,
+        deliver_dm: Optional[bool] = None,
     ) -> bool:
         current = self.get(task_id)
         if current is None or current.user_id != user_id:
@@ -556,7 +611,15 @@ class TaskStore:
             sets.append("title=?")
             params.append(title.strip()[:TASK_TITLE_MAX])
         new_exec = _as_utc(execute_at) if execute_at is not None else None
-        if new_exec is not None:
+        kind = schedule_kind
+        if kind is not None and kind not in VALID_SCHEDULES:
+            kind = None
+        days = normalize_weekdays(weekdays) if weekdays is not None else None
+        effective_kind = kind or current.schedule_kind
+        will_snap = effective_kind != SCHEDULE_ONCE and (
+            new_exec is not None or time_of_day is not None or days is not None or kind is not None
+        )
+        if new_exec is not None and not will_snap:
             sets.append("execute_at=?")
             params.append(new_exec.isoformat())
             sets.append("retries=?")
@@ -564,13 +627,9 @@ class TaskStore:
             if current.status == STATUS_FAILED:
                 sets.append("status=?")
                 params.append(STATUS_PENDING)
-        kind = schedule_kind
-        if kind is not None and kind not in VALID_SCHEDULES:
-            kind = None
         if kind is not None:
             sets.append("schedule_kind=?")
             params.append(kind)
-        days = normalize_weekdays(weekdays) if weekdays is not None else None
         if days is not None:
             sets.append("weekdays=?")
             params.append(json.dumps(days))
@@ -583,6 +642,30 @@ class TaskStore:
         elif until_at is not None:
             sets.append("until_at=?")
             params.append(_as_utc(until_at).isoformat())
+        if deliver_dm is not None:
+            sets.append("deliver_dm=?")
+            params.append(1 if deliver_dm else 0)
+        if will_snap:
+            snapped = snap_execute_at(
+                kind=effective_kind,
+                weekdays=days if days is not None else current.weekdays,
+                time_of_day=(
+                    normalize_time_of_day(time_of_day, new_exec or current.execute_at)
+                    if time_of_day is not None else current.time_of_day
+                ),
+                execute_at=new_exec or current.execute_at,
+                until_at=(
+                    None if clear_until else (until_at if until_at is not None else current.until_at)
+                ),
+            )
+            if snapped is not None:
+                sets.append("execute_at=?")
+                params.append(snapped.isoformat())
+                sets.append("retries=?")
+                params.append(0)
+                if current.status == STATUS_FAILED:
+                    sets.append("status=?")
+                    params.append(STATUS_PENDING)
         if not sets:
             return False
         params.extend([task_id, user_id])

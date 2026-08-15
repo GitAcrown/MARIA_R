@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import layout_with_commentary
-from common.emojis import REPEAT_REMINDER
+from common.emojis import REPEAT_REMINDER, SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
     SCHEDULE_ONCE,
@@ -22,6 +22,7 @@ from common.tasks import (
     TaskStore,
     format_schedule,
     normalize_weekdays,
+    snap_execute_at,
 )
 from common.timezones import PARIS_TZ
 
@@ -39,9 +40,9 @@ def _parse_execute_at(execute_at_str: str) -> datetime:
     return execute_at.astimezone(timezone.utc)
 
 
-def _validate_horizon(execute_at: datetime) -> str | None:
+def _validate_horizon(execute_at: datetime, *, require_min: bool = True) -> str | None:
     total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
-    if total < TASK_MIN_MINUTES:
+    if require_min and total < TASK_MIN_MINUTES:
         return "Date trop proche (minimum 2 min)"
     if total > TASK_MAX_MINUTES:
         return f"Date trop lointaine (max {TASK_MAX_DAYS} jours)"
@@ -60,6 +61,7 @@ def _serialize_task(t: ScheduledTask) -> dict:
         "time_of_day": t.time_of_day,
         "status": t.status,
         "schedule_label": format_schedule(t),
+        "deliver_dm": bool(t.deliver_dm),
     }
     if t.until_at:
         item["until_at"] = t.until_at.isoformat()
@@ -79,11 +81,39 @@ def _format_widget_line(item: dict) -> str:
         until = ""
         if item.get("until_at_ts"):
             until = f" · jusqu'au <t:{item['until_at_ts']}:d>"
+        dest = " · MP" if item.get("deliver_dm") else ""
         return (
             f"-# {REPEAT_REMINDER} · <t:{ts}:f> · "
-            f"{item.get('schedule_label', kind)}{until}{status_bit}\n› {desc}"
+            f"{item.get('schedule_label', kind)}{until}{dest}{status_bit}\n› {desc}"
         )
-    return f"-# <t:{ts}:f> (<t:{ts}:R>){status_bit}\n› {desc}"
+    dest = " · MP" if item.get("deliver_dm") else ""
+    return f"-# <t:{ts}:f> (<t:{ts}:R>){dest}{status_bit}\n› {desc}"
+
+
+async def _send_dm_confirm(
+    user: discord.abc.User,
+    *,
+    label: str,
+    instruction: str,
+    execute_at: datetime,
+) -> str | None:
+    """Confirme en MP. None si OK, sinon message d'erreur (MP fermés, etc.)."""
+    ts = int(execute_at.timestamp())
+    desc = (instruction or "").strip()
+    if len(desc) > 120:
+        desc = desc[:119] + "…"
+    body = (
+        f"{SMALL_TASK} **Tâche confirmée** — {desc}\n"
+        f"-# {label} · <t:{ts}:f> (<t:{ts}:R>)"
+    )
+    try:
+        await user.send(body, allowed_mentions=discord.AllowedMentions.none())
+        return None
+    except (discord.Forbidden, discord.HTTPException):
+        return (
+            "Impossible d'envoyer en MP (MP fermés ou bot bloqué). "
+            "Tâche annulée. Ouvre tes MP avec moi, ou programme-la dans le salon."
+        )
 
 
 def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -152,7 +182,14 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         if not instruction:
             return ToolResponseRecord(tc.id, {"error": "Instruction manquante"}, datetime.now(timezone.utc))
 
+        kind = (args.get("recurrence") or SCHEDULE_ONCE).strip().lower()
+        if kind not in VALID_SCHEDULES:
+            kind = SCHEDULE_ONCE
+        days = normalize_weekdays(args.get("weekdays") or "")
+        time_of_day = (args.get("time") or "").strip()
+
         execute_at_str = (args.get("execute_at") or "").strip()
+        execute_at = None
         if execute_at_str:
             try:
                 execute_at = _parse_execute_at(execute_at_str)
@@ -161,11 +198,47 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"},
                     datetime.now(timezone.utc),
                 )
-        else:
+        elif kind == SCHEDULE_ONCE:
             total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
             execute_at = datetime.now(timezone.utc) + timedelta(minutes=max(total, 0))
 
-        err = _validate_horizon(execute_at)
+        until_at = None
+        until_str = (args.get("until") or "").strip()
+        if until_str:
+            try:
+                until_at = _parse_execute_at(until_str)
+            except ValueError:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Format until invalide (ISO 8601 attendu)"},
+                    datetime.now(timezone.utc),
+                )
+
+        if kind != SCHEDULE_ONCE:
+            if not time_of_day and execute_at is None:
+                return ToolResponseRecord(
+                    tc.id, {"error": "Heure requise (time=HH:MM) pour une tâche répétitive."},
+                    datetime.now(timezone.utc),
+                )
+            execute_at = snap_execute_at(
+                kind=kind,
+                weekdays=days,
+                time_of_day=time_of_day,
+                execute_at=execute_at,
+                until_at=until_at,
+            )
+            if execute_at is None:
+                return ToolResponseRecord(
+                    tc.id,
+                    {"error": "Aucune occurrence à venir (date de fin trop tôt, ou aucun jour valide)."},
+                    datetime.now(timezone.utc),
+                )
+        elif execute_at is None:
+            return ToolResponseRecord(
+                tc.id, {"error": "Date manquante (execute_at ou delay)."},
+                datetime.now(timezone.utc),
+            )
+
+        err = _validate_horizon(execute_at, require_min=(kind == SCHEDULE_ONCE))
         if err:
             return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
         if store.count_active(ctx.trigger_message.author.id) >= TASK_MAX_PENDING:
@@ -173,10 +246,6 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 tc.id, {"error": f"Limite atteinte ({TASK_MAX_PENDING} tâches). Annule-en une d'abord."},
                 datetime.now(timezone.utc),
             )
-
-        kind = (args.get("recurrence") or SCHEDULE_ONCE).strip().lower()
-        if kind not in VALID_SCHEDULES:
-            kind = SCHEDULE_ONCE
         if kind != SCHEDULE_ONCE:
             n_rep = store.count_active_recurring(ctx.trigger_message.author.id)
             if n_rep >= TASK_MAX_RECURRING:
@@ -188,18 +257,11 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     )},
                     datetime.now(timezone.utc),
                 )
-        days = normalize_weekdays(args.get("weekdays") or "")
-        time_of_day = (args.get("time") or "").strip()
-        until_at = None
-        until_str = (args.get("until") or "").strip()
-        if until_str:
-            try:
-                until_at = _parse_execute_at(until_str)
-            except ValueError:
-                return ToolResponseRecord(
-                    tc.id, {"error": "Format until invalide (ISO 8601 attendu)"},
-                    datetime.now(timezone.utc),
-                )
+
+        via = (args.get("via") or "").strip().lower()
+        if not via:
+            via = "dm" if ctx.trigger_message.guild is None else "channel"
+        deliver_dm = via in ("dm", "mp", "private")
 
         title = (args.get("title") or "").strip()
         guild = ctx.trigger_message.guild
@@ -215,15 +277,30 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             time_of_day=time_of_day,
             until_at=until_at,
             message_id=ctx.trigger_message.id,
+            deliver_dm=deliver_dm,
         )
         created = store.get(tid)
         label = format_schedule(created) if created else kind
+        dest = "MP" if deliver_dm else "salon"
+        if deliver_dm:
+            dm_err = await _send_dm_confirm(
+                ctx.trigger_message.author,
+                label=label,
+                instruction=instruction,
+                execute_at=execute_at,
+            )
+            if dm_err:
+                store.cancel(tid, ctx.trigger_message.author.id)
+                return ToolResponseRecord(
+                    tc.id, {"error": dm_err}, datetime.now(timezone.utc),
+                )
         return ToolResponseRecord(tc.id, {
             "success": True,
             "task_id": tid,
             "execute_at": execute_at.isoformat(),
             "schedule": label,
-            "_llm_summary": f"Tâche programmée ({label}).",
+            "via": dest,
+            "_llm_summary": f"Tâche programmée ({label}, {dest}).",
         }, datetime.now(timezone.utc))
 
     async def _tool_manage(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -314,9 +391,6 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                         tc.id, {"error": "Format execute_at invalide (ISO 8601 attendu)"},
                         datetime.now(timezone.utc),
                     )
-                err = _validate_horizon(execute_at)
-                if err:
-                    return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
             kind = args.get("recurrence")
             if isinstance(kind, str):
                 kind = kind.strip().lower()
@@ -324,8 +398,13 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     kind = None
             else:
                 kind = None
+            current = store.get(tid)
+            rec_kind = kind or (current.schedule_kind if current else SCHEDULE_ONCE)
+            if execute_at is not None and rec_kind == SCHEDULE_ONCE:
+                err = _validate_horizon(execute_at)
+                if err:
+                    return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
             if kind in (SCHEDULE_DAILY, SCHEDULE_WEEKLY):
-                current = store.get(tid)
                 already = bool(current and current.schedule_kind != SCHEDULE_ONCE)
                 n_rep = store.count_active_recurring(user_id, exclude_id=tid)
                 if not already and n_rep >= TASK_MAX_RECURRING:
@@ -354,6 +433,28 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                         tc.id, {"error": "Format until invalide"},
                         datetime.now(timezone.utc),
                     )
+            via_raw = args.get("via")
+            deliver_dm = None
+            if isinstance(via_raw, str) and via_raw.strip():
+                v = via_raw.strip().lower()
+                if v in ("dm", "mp", "private"):
+                    deliver_dm = True
+                elif v in ("channel", "salon"):
+                    deliver_dm = False
+            if deliver_dm is True and not (current and current.deliver_dm):
+                preview = current
+                dm_err = await _send_dm_confirm(
+                    ctx.trigger_message.author,
+                    label=format_schedule(preview) if preview else "MP",
+                    instruction=(new_instr or (preview.instruction if preview else "")),
+                    execute_at=execute_at or (preview.execute_at if preview else datetime.now(timezone.utc)),
+                )
+                if dm_err:
+                    return ToolResponseRecord(
+                        tc.id,
+                        {"error": dm_err.replace("Tâche annulée.", "Passage en MP annulé.")},
+                        datetime.now(timezone.utc),
+                    )
             ok = store.edit(
                 tid, user_id,
                 instruction=new_instr,
@@ -362,6 +463,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 weekdays=days,
                 time_of_day=time_of_day,
                 until_at=until_at,
+                deliver_dm=deliver_dm,
             )
             if not ok:
                 return ToolResponseRecord(
@@ -407,7 +509,11 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 f"Max {TASK_MAX_PENDING} tâches par personne, dont {TASK_MAX_RECURRING} répétitives (daily/weekly). "
                 f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
                 f"Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
-                "weekly : weekdays=wed,fri et time=HH:MM. until optionnel."
+                "weekly : weekdays=mon,tue,wed,thu,fri et time=HH:MM. until optionnel. "
+                "Heure déjà passée → prochaine occ. (ne refuse pas). "
+                "via=dm UNIQUEMENT si la personne dit clairement MP, DM ou message privé. "
+                "Interdit de déduire via=dm de « donne-moi », « envoie-moi » ou d'un briefing perso. "
+                "Défaut : channel (salon)."
             ),
             properties={
                 "instruction": {
@@ -433,8 +539,13 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 },
                 "time": {"type": "string", "description": "Heure Paris HH:MM pour daily/weekly"},
                 "until": {"type": "string", "description": "Fin de série ISO 8601 (optionnel)"},
+                "via": {
+                    "type": "string",
+                    "enum": ["channel", "dm"],
+                    "description": "channel = salon (défaut). dm = MP, seulement si demandé explicitement (MP/DM/message privé).",
+                },
             },
-            optional_props=["title", "execute_at", "delay_minutes", "delay_hours", "recurrence", "weekdays", "time", "until"],
+            optional_props=["title", "execute_at", "delay_minutes", "delay_hours", "recurrence", "weekdays", "time", "until", "via"],
             function=_tool_schedule,
         ),
         Tool(
@@ -460,8 +571,13 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 "weekdays": {"type": "string", "description": "Jours weekly, virgules (edit)"},
                 "time": {"type": "string", "description": "HH:MM Paris (edit)"},
                 "until": {"type": "string", "description": "Fin de série ISO 8601 (edit)"},
+                "via": {
+                    "type": "string",
+                    "enum": ["channel", "dm"],
+                    "description": "dm seulement si demandé explicitement (MP/DM/message privé)",
+                },
             },
-            optional_props=["task_id", "instruction", "execute_at", "recurrence", "weekdays", "time", "until"],
+            optional_props=["task_id", "instruction", "execute_at", "recurrence", "weekdays", "time", "until", "via"],
             function=_tool_manage,
         ),
         Tool(

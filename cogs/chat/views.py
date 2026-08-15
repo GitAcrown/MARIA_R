@@ -1120,6 +1120,8 @@ def _task_meta(t: ScheduledTask) -> str:
     if t.schedule_kind != SCHEDULE_ONCE:
         bits.append(f"{REPEAT_REMINDER} {format_schedule(t)}")
     bits.append(f"<t:{ts}:R>")
+    if t.deliver_dm:
+        bits.append("MP")
     return " · ".join(bits)
 
 
@@ -1139,6 +1141,8 @@ def _format_task_body(t: ScheduledTask) -> str:
         rec = f"{REPEAT_REMINDER} {rec}"
         if t.until_at:
             rec += f" · jusqu'au <t:{int(t.until_at.timestamp())}:d>"
+    if t.deliver_dm:
+        rec += " · MP"
     err = f"\n-# Dernière erreur : {t.last_error}" if t.last_error else ""
     return (
         f"-# {_task_status_label(t)} · {rec}\n"
