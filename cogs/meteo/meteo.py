@@ -26,6 +26,10 @@ _ICON_EMOJI: dict[str, str] = {
 }
 _WEEKDAYS_FULL  = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 _WEEKDAYS_SHORT = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+_MONTHS_FR = (
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+)
 _WIND_DIRS      = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"]
 
 # Périodes du jour : (label, heure_début_incluse, heure_fin_exclue)
@@ -90,6 +94,17 @@ def _forecast_day_keys(raw: dict) -> list[str]:
     return keys
 
 
+def _date_select_label(d: date) -> str:
+    """Libellé select : « Aujourd'hui · lundi 17 août », « Mercredi 19 août »."""
+    today = datetime.now(PARIS_TZ).date()
+    long = f"{_WEEKDAYS_FULL[d.weekday()].lower()} {d.day} {_MONTHS_FR[d.month - 1]}"
+    if d == today:
+        return f"Aujourd'hui · {long}"
+    if d == today + timedelta(days=1):
+        return f"Demain · {long}"
+    return f"{_WEEKDAYS_FULL[d.weekday()]} {d.day} {_MONTHS_FR[d.month - 1]}"
+
+
 def weather_tab_labels(payload: dict) -> list[str]:
     labels = []
     for key in payload.get("days") or []:
@@ -97,7 +112,7 @@ def weather_tab_labels(payload: dict) -> list[str]:
             d = date.fromisoformat(key)
         except ValueError:
             continue
-        labels.append(d.strftime("%d/%m"))
+        labels.append(_date_select_label(d))
     return labels
 
 
@@ -542,7 +557,10 @@ class Meteo(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Meteo(bot))
     register_widget("get_weather", build_weather_view)
-    register_tabs("weather", weather_tab_labels, weather_tab_body)
+    register_tabs(
+        "weather", weather_tab_labels, weather_tab_body,
+        force_select=True, placeholder="Choisir un jour",
+    )
 
 
 async def teardown(bot: commands.Bot) -> None:

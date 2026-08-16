@@ -35,6 +35,8 @@ LabelsFn = Callable[[dict], list[str]]
 BodyFn = Callable[[dict, int], discord.ui.Item]
 
 _RENDERERS: dict[str, tuple[LabelsFn, BodyFn]] = {}
+_FORCE_SELECT: set[str] = set()
+_PLACEHOLDERS: dict[str, str] = {}
 
 
 @dataclass
@@ -50,12 +52,29 @@ class _Record:
     stripped: bool
 
 
-def register_tabs(kind: str, labels: LabelsFn, body: BodyFn) -> None:
+def register_tabs(
+    kind: str,
+    labels: LabelsFn,
+    body: BodyFn,
+    *,
+    force_select: bool = False,
+    placeholder: str = "",
+) -> None:
     _RENDERERS[kind] = (labels, body)
+    if force_select:
+        _FORCE_SELECT.add(kind)
+    else:
+        _FORCE_SELECT.discard(kind)
+    if placeholder:
+        _PLACEHOLDERS[kind] = placeholder
+    else:
+        _PLACEHOLDERS.pop(kind, None)
 
 
 def unregister_tabs(kind: str) -> None:
     _RENDERERS.pop(kind, None)
+    _FORCE_SELECT.discard(kind)
+    _PLACEHOLDERS.pop(kind, None)
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -236,9 +255,12 @@ def _tab_rows(wid: str, labels: list[str], selected: int) -> list[discord.ui.Act
     return rows
 
 
-def _tab_controls(wid: str, labels: list[str], selected: int) -> list[discord.ui.ActionRow]:
-    if _use_select(labels):
-        return [discord.ui.ActionRow(TabSelect(wid, labels, selected))]
+def _tab_controls(
+    wid: str, labels: list[str], selected: int, *, kind: str = "",
+) -> list[discord.ui.ActionRow]:
+    if kind in _FORCE_SELECT or _use_select(labels):
+        ph = _PLACEHOLDERS.get(kind) or "Choisir…"
+        return [discord.ui.ActionRow(TabSelect(wid, labels, selected, placeholder=ph))]
     return _tab_rows(wid, labels, selected)
 
 
@@ -262,7 +284,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
     if live and len(labels) >= 2 and isinstance(body, discord.ui.Container):
         old = list(body.children)
         body.clear_items()
-        for row in _tab_controls(rec.id, labels, index):
+        for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
             body.add_item(row)
         body.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         for item in old:
@@ -273,7 +295,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
         view.add_item(discord.ui.TextDisplay(rec.commentary))
         view.add_item(discord.ui.Separator())
     if live and len(labels) >= 2 and not tabs_in_card:
-        for row in _tab_controls(rec.id, labels, index):
+        for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
             view.add_item(row)
         view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
     view.add_item(body)
@@ -403,7 +425,14 @@ class TabButton(discord.ui.DynamicItem[discord.ui.Button], template=r"maria:tab:
 
 
 class TabSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"maria:pick:(?P<wid>[0-9a-f]{8})"):
-    def __init__(self, wid: str, labels: list[str], selected: int = 0) -> None:
+    def __init__(
+        self,
+        wid: str,
+        labels: list[str],
+        selected: int = 0,
+        *,
+        placeholder: str = "Choisir…",
+    ) -> None:
         options = [
             discord.SelectOption(
                 label=(lab or "·")[:100],
@@ -416,7 +445,7 @@ class TabSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"maria:pick
             options = [discord.SelectOption(label="·", value="0")]
         super().__init__(
             discord.ui.Select(
-                placeholder="Choisir…",
+                placeholder=(placeholder or "Choisir…")[:150],
                 min_values=1,
                 max_values=1,
                 options=options,
@@ -439,7 +468,7 @@ class TabSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"maria:pick
             if opt.default:
                 selected = i
                 break
-        return cls(match["wid"], labels, selected)
+        return cls(match["wid"], labels, selected, placeholder=item.placeholder or "Choisir…")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         raw = (self.item.values or ["0"])[0]
