@@ -349,24 +349,23 @@ def _build_summary_payload(
         window = "fenêtre récente"
 
     footer = f"{useful} msgs utiles / {raw_count} lus · {window}"
-    if focus:
-        footer += f" · focus : {focus[:60]}"
     if from_cache:
         footer += " · cache"
 
     # Pas de coupure brute ici : render_free_widget (_text_block) tronque déjà
     # proprement (fin de phrase/mot) si le résumé dépasse la place disponible.
+    # Le focus va en sous-titre, pas dans le ## (sinon Discord/nos [:40] coupent).
     content = summary
     title = f"Résumé — #{name}"
+    blocks: list[dict] = []
     if focus:
-        title = f"Résumé — #{name} · {focus[:40]}"
+        blocks.append({"type": "text", "content": f"-# {focus.strip()}"})
+    blocks.append({"type": "text", "content": content})
+    blocks.append({"type": "footer", "text": footer})
     spec = {
         "title": title,
         "emoji": RESUME,
-        "blocks": [
-            {"type": "text", "content": content},
-            {"type": "footer", "text": footer},
-        ],
+        "blocks": blocks,
     }
     note = (
         f"Widget résumé de #{name} affiché ({useful} msgs"
