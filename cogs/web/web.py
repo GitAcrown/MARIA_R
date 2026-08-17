@@ -417,6 +417,15 @@ class Web(commands.Cog):
         url = tc.arguments.get("url", "").strip()
         if not url or not url.startswith(("http://", "https://")):
             return ToolResponseRecord(tc.id, {"error": "URL invalide"}, datetime.now(timezone.utc))
+        host = (urlparse(url).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host in {"youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}:
+            return ToolResponseRecord(
+                tc.id,
+                {"error": "C'est une vidéo YouTube — appelle read_youtube avec cette URL."},
+                datetime.now(timezone.utc),
+            )
         content = await asyncio.to_thread(self._crawl_page, url)
         if not content:
             domain = urlparse(url).netloc
@@ -446,7 +455,7 @@ class Web(commands.Cog):
             ),
             Tool(
                 name="read_web_page",
-                description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants.",
+                description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants. Pas pour YouTube (read_youtube).",
                 properties={"url": {"type": "string", "description": "URL complète"}},
                 function=self._tool_read,
             ),

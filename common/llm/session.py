@@ -462,6 +462,12 @@ class ChannelSession:
                 f"{ctx_tag}[{msg_time}] {display_name}: (message vide)"
             ))
 
+        existing = self._ingested_records.get(message.id)
+        if existing is not None and self._still_in_context(message.id):
+            existing.components = parts
+            existing.metadata["discord_message"] = message
+            return existing
+
         record = self.context.add_user_message(components=parts, name=api_name)
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message

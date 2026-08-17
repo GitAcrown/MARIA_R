@@ -11,3 +11,4 @@ trafilatura
 lxml
 tabulate
 chromadb
+youtube-transcript-api

@@ -38,7 +38,7 @@ _LAYOUT_RE = re.compile(
 )
 
 _HINTS: tuple[tuple[str, str], ...] = (
-    ("youtube", "- YouTube : tu ne peux pas regarder ni résumer la vidéo. Dis-le. Pas de summarize_channel pour ça."),
+    ("youtube", "- YouTube : read_youtube (sous-titres auteur ou auto). Pas l'image ni le son. Pas de summarize_channel. Si l'outil échoue / pas de sous-titres → dis-le, n'invente pas."),
     ("video_file", "- Vidéo jointe : tu ne peux pas la lire."),
     ("image", "- Image : tu la vois — prends-la en compte."),
     ("web", "- Lien web : read_web_page avant d'en parler. N'invente pas le contenu."),

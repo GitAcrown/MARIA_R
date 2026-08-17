@@ -27,6 +27,9 @@ MAX_TOKENS = 4000
 
 # Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
 DEBOUNCE_SECONDS: float = 0.33
+# Correction typo du ping (« marie » → « maria ») : re-déclencher si l'édition
+# arrive dans cette fenêtre après le message d'origine.
+EDIT_TRIGGER_SECONDS: float = 10
 
 # Streaming Discord (édition progressive du message)
 # Discord limite ~5 PATCH / 5 s par message : 1,2 s laisse une marge, plus l'edit final.

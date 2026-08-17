@@ -218,6 +218,7 @@ def _dossier(bot_name: str, model: str) -> dict:
             ),
             "tools": (
                 "Web, météo, transports IDF/SNCF, films/séries, jeux, foot, images, "
+                "YouTube (sous-titres), "
                 "tableaux, tâches planifiées, infos membres/salons, mémoire, et about_me "
                 "(moi-même + ping/stats machine). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "
@@ -225,7 +226,8 @@ def _dossier(bot_name: str, model: str) -> dict:
             ),
             "limits": (
                 "Pas modo, pas d'actions Discord magiques hors tâches planifiées. "
-                "Pas omnisciente. Si un outil plante je le dis normalement, "
+                "Pas omnisciente. YouTube = sous-titres seulement (pas l'image). "
+                "Si un outil plante je le dis normalement, "
                 "sans roman ni jargon d'erreur."
             ),
             "discord": (
