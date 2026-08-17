@@ -24,7 +24,7 @@ from youtube_transcript_api._errors import (
 )
 
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
-from common.emojis import TRANSCRIPT
+from common.emojis import YOUTUBE
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.widgets import register_widget, unregister_widget
 
@@ -194,7 +194,7 @@ def _youtube_container(data: dict) -> Optional[discord.ui.Container]:
     generated = bool(data.get("generated"))
     duration_s = data.get("duration_s")
 
-    body_lines = [f"## {TRANSCRIPT} {title}"]
+    body_lines = [f"## {YOUTUBE} {title}"]
     if author:
         body_lines.append(f"**{author}**")
     meta: list[str] = []
