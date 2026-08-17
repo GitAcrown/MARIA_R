@@ -47,7 +47,8 @@ WEEKDAYS_FR = {
 MAX_SEND_RETRIES = 3
 TASK_MAX_PENDING = 10
 TASK_MAX_RECURRING = 3
-TASK_MIN_MINUTES = 2
+TASK_MIN_MINUTES = 1
+TASK_MIN_SECONDS = 45
 TASK_MAX_DAYS = 365
 TASK_INSTRUCTION_MAX = 500
 TASK_TITLE_MAX = 80
@@ -195,13 +196,13 @@ def snap_execute_at(
     until_at: Optional[datetime] = None,
     now: Optional[datetime] = None,
 ) -> Optional[datetime]:
-    """Première occurrence assez loin (min 2 min), calée sur l'heure / les jours.
+    """Première occurrence assez loin (≈1 min souple), calée sur l'heure / les jours.
 
     Une daily/weekly demandée à une heure déjà passée avance au prochain créneau
     au lieu d'échouer (« trop proche »).
     """
     now_utc = _as_utc(now or datetime.now(timezone.utc))
-    min_at = now_utc + timedelta(minutes=TASK_MIN_MINUTES)
+    min_at = now_utc + timedelta(seconds=TASK_MIN_SECONDS)
     if kind == SCHEDULE_ONCE or kind not in VALID_SCHEDULES:
         return _as_utc(execute_at) if execute_at is not None else None
     days = normalize_weekdays(weekdays)

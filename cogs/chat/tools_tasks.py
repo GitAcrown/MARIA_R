@@ -17,6 +17,7 @@ from common.tasks import (
     TASK_MAX_PENDING,
     TASK_MAX_RECURRING,
     TASK_MIN_MINUTES,
+    TASK_MIN_SECONDS,
     VALID_SCHEDULES,
     ScheduledTask,
     TaskStore,
@@ -41,9 +42,10 @@ def _parse_execute_at(execute_at_str: str) -> datetime:
 
 
 def _validate_horizon(execute_at: datetime, *, require_min: bool = True) -> str | None:
-    total = int((execute_at - datetime.now(timezone.utc)).total_seconds() / 60)
-    if require_min and total < TASK_MIN_MINUTES:
-        return "Date trop proche (minimum 2 min)"
+    delta = (execute_at - datetime.now(timezone.utc)).total_seconds()
+    if require_min and delta < TASK_MIN_SECONDS:
+        return f"Date trop proche (minimum {TASK_MIN_MINUTES} min)"
+    total = int(delta / 60)
     if total > TASK_MAX_MINUTES:
         return f"Date trop lointaine (max {TASK_MAX_DAYS} jours)"
     return None
@@ -508,7 +510,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 "(rappel, météo, recherche…). "
                 f"Max {TASK_MAX_PENDING} tâches par personne, dont {TASK_MAX_RECURRING} répétitives (daily/weekly). "
                 f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
-                f"Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
+                f"Minimum ~{TASK_MIN_MINUTES} min. Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
                 "weekly : weekdays=mon,tue,wed,thu,fri et time=HH:MM. until optionnel. "
                 "Heure déjà passée → prochaine occ. (ne refuse pas). "
                 "via=dm UNIQUEMENT si la personne dit clairement MP, DM ou message privé. "

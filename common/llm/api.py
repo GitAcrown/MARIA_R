@@ -10,6 +10,47 @@ from .session import ChannelSession, ChannelSessionManager
 from .tools import Tool, ToolRegistry
 from .context import AssistantRecord, TextComponent
 
+
+def _tool_response_failed(tr) -> bool:
+    rd = getattr(tr, "response_data", None)
+    return isinstance(rd, dict) and bool(rd.get("error"))
+
+
+def _collect_run_artifacts(session, assistant) -> tuple[list, list[dict]]:
+    """Réponses d'outils + preuves d'usage (hors appels en erreur)."""
+    tool_responses: list = []
+    used_tools: list[dict] = []
+    found = False
+    for m in reversed(session.context.get_messages()):
+        if m == assistant:
+            found = True
+            continue
+        if not found:
+            continue
+        if m.role == "tool":
+            tool_responses.insert(0, m)
+        elif m.role == "assistant":
+            if hasattr(m, "tool_calls") and m.tool_calls:
+                failed_ids = {
+                    tr.tool_call_id for tr in tool_responses
+                    if _tool_response_failed(tr)
+                }
+                seen_names = {t["name"] for t in used_tools}
+                for tc in reversed(m.tool_calls):
+                    if getattr(tc, "id", None) in failed_ids:
+                        continue
+                    if tc.function_name not in seen_names:
+                        used_tools.insert(0, {
+                            "name": tc.function_name,
+                            "args": tc.arguments or {},
+                        })
+                        seen_names.add(tc.function_name)
+        elif m.role == "user":
+            if getattr(m, "name", None) == "system":
+                continue
+            break
+    return tool_responses, used_tools
+
 logger = logging.getLogger("llm.api")
 
 
@@ -80,29 +121,7 @@ class MariaGptApi:
             on_text_reset=on_text_reset,
         )
 
-        tool_responses: list = []
-        used_tools: list[dict] = []
-        found = False
-        for m in reversed(session.context.get_messages()):
-            if m == assistant:
-                found = True
-                continue
-            if not found:
-                continue
-            if m.role == "tool":
-                tool_responses.insert(0, m)
-            elif m.role == "assistant":
-                if hasattr(m, "tool_calls") and m.tool_calls:
-                    seen_names = {t["name"] for t in used_tools}
-                    for tc in reversed(m.tool_calls):
-                        if tc.function_name not in seen_names:
-                            used_tools.insert(0, {"name": tc.function_name, "args": tc.arguments or {}})
-                            seen_names.add(tc.function_name)
-            elif m.role == "user":
-                if getattr(m, "name", None) == "system":
-                    continue
-                break
-
+        tool_responses, used_tools = _collect_run_artifacts(session, assistant)
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
 
     async def run_isolated_completion(
@@ -146,28 +165,7 @@ class MariaGptApi:
             prompt_context=prompt_context,
             skip_focus=True,
         )
-        tool_responses: list = []
-        used_tools: list[dict] = []
-        found = False
-        for m in reversed(session.context.get_messages()):
-            if m == assistant:
-                found = True
-                continue
-            if not found:
-                continue
-            if m.role == "tool":
-                tool_responses.insert(0, m)
-            elif m.role == "assistant":
-                if hasattr(m, "tool_calls") and m.tool_calls:
-                    seen_names = {t["name"] for t in used_tools}
-                    for tc in reversed(m.tool_calls):
-                        if tc.function_name not in seen_names:
-                            used_tools.insert(0, {"name": tc.function_name, "args": tc.arguments or {}})
-                            seen_names.add(tc.function_name)
-            elif m.role == "user":
-                if getattr(m, "name", None) == "system":
-                    continue
-                break
+        tool_responses, used_tools = _collect_run_artifacts(session, assistant)
         return MariaResponse(assistant.full_text, assistant, tool_responses, used_tools)
 
     async def record_assistant_post(
