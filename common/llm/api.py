@@ -1,5 +1,6 @@
 """Façade publique de l'API GPT."""
 
+import logging
 from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 import discord
@@ -8,6 +9,8 @@ from .client import MariaLLMClient
 from .session import ChannelSession, ChannelSessionManager
 from .tools import Tool, ToolRegistry
 from .context import AssistantRecord, TextComponent
+
+logger = logging.getLogger("llm.api")
 
 
 class MariaResponse:
@@ -120,6 +123,8 @@ class MariaGptApi:
                 tool = self.tool_registry.get(name)
                 if tool is not None:
                     registry.register(tool)
+                else:
+                    logger.warning("Outil isolé introuvable : %s", name)
         mgr = self.session_manager
         session = ChannelSession(
             channel_id=0,

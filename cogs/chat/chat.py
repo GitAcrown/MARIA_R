@@ -110,11 +110,13 @@ _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "summarize_channel", "search_track",
 })
 
-_TASK_TOOL_WHITELIST: tuple[str, ...] = (
-    "run_python", "search_web", "read_web_page", "search_images",
-    "get_weather", "search_media", "search_game", "search_track",
-    "get_football", "get_transport", "render_table",
-)
+# Outils exclus des tâches planifiées (reprogrammation, mémoire, salon).
+_TASK_TOOL_DENY: frozenset[str] = frozenset({
+    "schedule_task", "manage_task", "show_tasks",
+    "remember_fact", "forget_fact", "search_memory",
+    "get_server_users", "get_member_info", "get_channel_info",
+    "about_me", "summarize_channel",
+})
 
 def _fmt_delay(minutes: int) -> str:
     """Convertit un délai en minutes en texte lisible."""
@@ -170,7 +172,7 @@ CONSIGNE (rien d'autre) :
 - Une phrase, deux max. Uniquement ce qui est demandé. Pas de small talk, pas d'avis, pas de question, pas de follow-up, pas de fait perso hors consigne.
 - Ne ping pas, n'ajoute pas de mention : le message sera un reply Discord au message de demande.
 - Interdit de reprogrammer, snooze, « je te rappellerai », mémoire.
-- Outil seulement si la consigne l'exige (météo, web, calcul, film…). Ville absente → ville du PROFIL du destinataire. Ne recopie pas le widget.
+- Faits actuels : appelle l'outil DANS CE TOUR, n'invente rien. Ligne / RER / métro / train / gare / trafic / itinéraire → get_transport (line= pour le statut d'une ligne). Météo → get_weather (ville absente → PROFIL du destinataire). Scores → get_football. Film/série → search_media. Web → search_web. Widget = la réponse, une phrase max autour, ne recopie pas.
 - Tutoiement, sans emoji, sans commencer par ton nom.
 {run_history}
 {profile_ctx}
@@ -582,12 +584,16 @@ class Chat(commands.Cog):
             run_history=run_history,
         )
         user_text = f"[EXÉCUTION TÂCHE #{task.id}] Accomplis uniquement : {action}"
+        allowed_tools = [
+            name for name in self.gpt_api.tool_registry.names()
+            if name not in _TASK_TOOL_DENY
+        ]
         resp = await self.gpt_api.run_isolated_completion(
             dest,
             user_text,
             trigger_message=trigger,
             developer_prompt=prompt,
-            allowed_tools=_TASK_TOOL_WHITELIST,
+            allowed_tools=allowed_tools,
             model=MODEL_MAIN,
         )
         text = (resp.text or "").strip()

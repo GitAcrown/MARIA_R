@@ -110,6 +110,9 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
+    def names(self) -> list[str]:
+        return list(self._tools)
+
     def get_compiled(self) -> list[dict]:
         if self._cache is None:
             self._cache = [t.to_openai_dict() for t in self._tools.values()]
