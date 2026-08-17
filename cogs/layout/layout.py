@@ -141,7 +141,7 @@ class Layout(commands.Cog):
             ),
         ]
 
-    @app_commands.command(name="signets", description="Tes layouts enregistrés")
+    @app_commands.command(name="signets", description="Tes fiches enregistrées")
     async def cmd_bookmarks(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         items = await asyncio.to_thread(list_for_user, interaction.user.id)

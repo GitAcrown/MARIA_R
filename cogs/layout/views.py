@@ -15,7 +15,7 @@ from common.bookmarks import (
     list_for_user,
     search_for_user,
 )
-from common.emojis import BOOKMARK
+from common.emojis import SAVE_SMALL
 from common.timezones import PARIS_TZ
 from common.widget_catalog import render_free_widget
 
@@ -61,12 +61,12 @@ class BookmarksView(discord.ui.LayoutView):
         shown = pages[page]
         total = len(items)
 
-        subtitle = "-# Layouts enregistrés depuis le bouton sous un widget"
+        subtitle = "-# Fiches enregistrées"
         if query:
             subtitle += f" · filtre « {_clip(query, 40)} »"
 
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {BOOKMARK} Signets · {total}/{BOOKMARK_MAX}"),
+            discord.ui.TextDisplay(f"## {SAVE_SMALL} Signets · {total}/{BOOKMARK_MAX}"),
             discord.ui.TextDisplay(subtitle),
         ]
         if not items:
@@ -118,7 +118,7 @@ class BookmarkDetailView(discord.ui.LayoutView):
                 self.add_item(item)
         else:
             self.add_item(discord.ui.TextDisplay(f"## {bm.title}"))
-            self.add_item(discord.ui.TextDisplay("-# Layout illisible."))
+            self.add_item(discord.ui.TextDisplay("-# Fiche illisible."))
         self.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         self.add_item(discord.ui.ActionRow(
             _SendBookmarkButton(user_id, bm),
@@ -142,13 +142,13 @@ class _PickBookmarkSelect(discord.ui.Select):
     def __init__(self, user_id: int, items: list[Bookmark], *, query: str, page: int):
         options = [
             discord.SelectOption(
-                label=_clip(bm.title, 100) or "Layout",
+                label=_clip(bm.title, 100) or "Fiche",
                 value=bm.id,
                 description=_stamp_plain(bm.created_at)[:100],
             )
             for bm in items[:25]
         ]
-        super().__init__(placeholder="Ouvrir un layout", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Ouvrir une fiche", min_values=1, max_values=1, options=options)
         self.user_id = user_id
         self.query = query
         self.page = page
@@ -190,7 +190,7 @@ class SearchBookmarkModal(discord.ui.Modal, title="Rechercher un signet"):
         self.user_id = user_id
         self.query = discord.ui.TextInput(
             label="Recherche",
-            placeholder="recette, comparatif, un mot du layout…",
+            placeholder="recette, comparatif, un mot de la fiche…",
             required=True,
             max_length=80,
             default=(current or "")[:80],
@@ -282,7 +282,7 @@ class _SendBookmarkButton(discord.ui.Button):
         view = render_free_widget(self.bm.spec, commentary="")
         if view is None:
             return await interaction.response.send_message(
-                "Layout illisible.", ephemeral=True,
+                "Fiche illisible.", ephemeral=True,
             )
         channel = interaction.channel
         if channel is None or not isinstance(channel, discord.abc.Messageable):

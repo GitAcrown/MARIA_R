@@ -16,7 +16,7 @@ from typing import Iterator, Optional
 
 import discord
 
-from common.emojis import BOOKMARK
+from common.emojis import BOOKMARK, SAVE_SMALL
 from common.widget_catalog import render_free_widget
 
 logger = logging.getLogger("MARIA.Bookmarks")
@@ -125,7 +125,7 @@ def spec_title(spec: dict) -> str:
         content = str(raw.get("content") or "").strip().replace("\n", " ")
         if content:
             return content[:80]
-    return "Layout"
+    return "Fiche"
 
 
 def spec_hash(spec: dict) -> str:
@@ -158,7 +158,7 @@ def _bookmark_from_row(r: sqlite3.Row) -> Bookmark:
     return Bookmark(
         id=r["id"],
         user_id=int(r["user_id"]),
-        title=r["title"] or "Layout",
+        title=r["title"] or "Fiche",
         spec=_loads(r["spec"]),
         created_at=_as_utc(datetime.fromisoformat(r["created_at"])),
     )
@@ -273,7 +273,7 @@ def save_for_user(user_id: int, spec: dict, *, title: str = "") -> tuple[str, Op
     if count_for_user(user_id) >= BOOKMARK_MAX:
         return "full", None
     digest = spec_hash(spec)
-    label = (title or spec_title(spec)).strip()[:80] or "Layout"
+    label = (title or spec_title(spec)).strip()[:80] or "Fiche"
     bid = uuid.uuid4().hex[:8]
     now = _now().isoformat()
     try:
@@ -408,13 +408,13 @@ class BookmarkButton(
             return
         status, _ = save_for_user(interaction.user.id, rec.spec, title=rec.title)
         if status == "ok":
-            msg = f"{BOOKMARK} **Enregistré** — `/signets` pour le retrouver."
+            msg = f"{SAVE_SMALL} **Enregistré** — `/signets` pour le retrouver."
         elif status == "dup":
             msg = "Déjà dans tes signets."
         elif status == "full":
             msg = f"Limite atteinte ({BOOKMARK_MAX}). Supprime-en un dans `/signets`."
         else:
-            msg = "Impossible d'enregistrer ce layout."
+            msg = "Impossible d'enregistrer cette fiche."
         await interaction.response.send_message(msg, ephemeral=True)
 
 

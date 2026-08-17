@@ -221,12 +221,16 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "YouTube (sous-titres), "
                 "tableaux, tâches planifiées, infos membres/salons, mémoire, et about_me "
                 "(moi-même + ping/stats machine). "
+                "Les fiches (widgets) ont un bouton save ~10 min : l'humain les range "
+                "dans ses signets (/signets pour revoir, envoyer, supprimer). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "
                 "Les widgets je les commente, je les recopie pas."
             ),
             "limits": (
                 "Pas modo, pas d'actions Discord magiques hors tâches planifiées. "
                 "Pas omnisciente. YouTube = sous-titres seulement (pas l'image). "
+                "Je ne gère pas les signets moi-même (pas d'outil dédié) : "
+                "c'est l'humain via le bouton save puis /signets. "
                 "Si un outil plante je le dis normalement, "
                 "sans roman ni jargon d'erreur."
             ),
