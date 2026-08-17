@@ -328,7 +328,6 @@ def attach_bookmark_button(
         return
     title = spec_title(spec)
     wid = _insert_pending(spec, commentary, title)
-    view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
     view.add_item(discord.ui.ActionRow(BookmarkButton(wid)))
     setattr(view, VIEW_ATTR, wid)
 
@@ -409,11 +408,11 @@ class BookmarkButton(
             return
         status, _ = save_for_user(interaction.user.id, rec.spec, title=rec.title)
         if status == "ok":
-            msg = f"{BOOKMARK} Enregistré — `/bookmarks` pour le retrouver."
+            msg = f"{BOOKMARK} Enregistré — `/signets` pour le retrouver."
         elif status == "dup":
-            msg = "Déjà dans tes favoris."
+            msg = "Déjà dans tes signets."
         elif status == "full":
-            msg = f"Limite atteinte ({BOOKMARK_MAX}). Supprime-en un dans `/bookmarks`."
+            msg = f"Limite atteinte ({BOOKMARK_MAX}). Supprime-en un dans `/signets`."
         else:
             msg = "Impossible d'enregistrer ce layout."
         await interaction.response.send_message(msg, ephemeral=True)

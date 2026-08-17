@@ -1,4 +1,4 @@
-"""Vues /bookmarks — liste, recherche, ouverture, suppression."""
+"""Vues /signets — liste, recherche, ouverture, suppression."""
 
 from __future__ import annotations
 
@@ -66,14 +66,14 @@ class BookmarksView(discord.ui.LayoutView):
             subtitle += f" · filtre « {_clip(query, 40)} »"
 
         children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {BOOKMARK} Favoris · {total}/{BOOKMARK_MAX}"),
+            discord.ui.TextDisplay(f"## {BOOKMARK} Signets · {total}/{BOOKMARK_MAX}"),
             discord.ui.TextDisplay(subtitle),
         ]
         if not items:
             children += [
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(
-                    "-# Aucun résultat." if query else "-# Aucun favori pour l'instant."
+                    "-# Aucun résultat." if query else "-# Aucun signet pour l'instant."
                 ),
             ]
         else:
@@ -134,7 +134,7 @@ def _reload(user_id: int, *, query: str = "", page: int = 0, note: str = "") -> 
 
 def _deny(interaction: discord.Interaction, user_id: int) -> Optional[str]:
     if interaction.user.id != user_id:
-        return "C'est pas tes favoris."
+        return "C'est pas tes signets."
     return None
 
 
@@ -184,7 +184,7 @@ class _SearchBookmarkButton(discord.ui.Button):
         )
 
 
-class SearchBookmarkModal(discord.ui.Modal, title="Rechercher un favori"):
+class SearchBookmarkModal(discord.ui.Modal, title="Rechercher un signet"):
     def __init__(self, user_id: int, *, current: str = ""):
         super().__init__()
         self.user_id = user_id
@@ -263,7 +263,7 @@ class _DeleteBookmarkButton(discord.ui.Button):
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         ok = delete_bookmark(self.bm.id, self.user_id)
-        note = "Favori supprimé." if ok else "Déjà plus là."
+        note = "Signet supprimé." if ok else "Déjà plus là."
         await interaction.response.edit_message(
             view=_reload(self.user_id, query=self.query, page=self.page, note=note),
         )
