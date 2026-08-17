@@ -1114,9 +1114,14 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     return [ordered[i:i + _TASK_PAGE] for i in range(0, len(ordered), _TASK_PAGE)]
 
 
+def _task_heading(t: ScheduledTask) -> str:
+    raw = (t.title or "").strip() or (t.instruction or "").strip() or "Sans consigne"
+    return f"**{_clip(raw, 120)}**"
+
+
 def _task_meta(t: ScheduledTask) -> str:
     ts = int(t.execute_at.timestamp())
-    bits: list[str] = []
+    bits: list[str] = [_task_status_label(t)]
     if t.schedule_kind != SCHEDULE_ONCE:
         bits.append(f"{REPEAT_REMINDER} {format_schedule(t)}")
     bits.append(f"<t:{ts}:R>")
@@ -1125,13 +1130,23 @@ def _task_meta(t: ScheduledTask) -> str:
     return " · ".join(bits)
 
 
-def _task_groups(items: list[ScheduledTask]) -> list[tuple[str, list[ScheduledTask]]]:
-    groups = [
-        ("Actives", [t for t in items if _task_rank(t) == 0]),
-        ("En pause", [t for t in items if t.status == STATUS_PAUSED]),
-        ("Échecs", [t for t in items if t.status == STATUS_FAILED]),
+def _task_section(
+    store: TaskStore,
+    user_id: int,
+    t: ScheduledTask,
+    *,
+    page: int,
+) -> discord.ui.Section:
+    lines: list[discord.ui.TextDisplay] = [
+        discord.ui.TextDisplay(_task_heading(t)),
+        discord.ui.TextDisplay(f"-# {_task_meta(t)}"),
     ]
-    return [(title, group) for title, group in groups if group]
+    if t.last_error:
+        lines.append(discord.ui.TextDisplay(f"-# {_clip(t.last_error, 80)}"))
+    return discord.ui.Section(
+        *lines,
+        accessory=_OpenTaskButton(store, user_id, t, page=page),
+    )
 
 
 def _format_task_body(t: ScheduledTask) -> str:
@@ -1446,45 +1461,19 @@ class TasksView(discord.ui.LayoutView):
         subtitle = "-# Classé par prochaine exécution"
         if paused_n:
             subtitle += f" · {paused_n} en pause"
+        if len(pages) > 1:
+            subtitle += f" · page {page + 1}/{len(pages)}"
 
         children: list[discord.ui.Item] = [
             discord.ui.TextDisplay(f"## {SMALL_TASK} Tâches · {quota_n}/{TASK_MAX_PENDING}"),
             discord.ui.TextDisplay(subtitle),
         ]
         if not tasks:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("-# Aucune tâche en attente."),
-            ]
+            children.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))
         else:
-            children.append(discord.ui.Separator())
-            groups = _task_groups(shown)
-            show_headers = len(groups) > 1
-            tight = discord.SeparatorSpacing.small
-            first_section = True
-            for gi, (title, group) in enumerate(groups):
-                if show_headers:
-                    if gi:
-                        children.append(discord.ui.Separator())
-                    children.append(discord.ui.TextDisplay(f"### {title} · {len(group)}"))
-                for i, t in enumerate(group):
-                    if not first_section and not (show_headers and i == 0):
-                        children.append(discord.ui.Separator(spacing=tight))
-                    instr = (t.instruction or "").strip()
-                    if instr:
-                        children.append(discord.ui.TextDisplay(instr))
-                    children.append(
-                        discord.ui.Section(
-                            discord.ui.TextDisplay(f"-# {_task_meta(t)}"),
-                            accessory=_OpenTaskButton(store, user_id, t, page=page),
-                        )
-                    )
-                    first_section = False
-            if len(pages) > 1:
-                children.append(discord.ui.Separator(spacing=tight))
-                children.append(discord.ui.TextDisplay(
-                    f"-# Page {page + 1}/{len(pages)}"
-                ))
+            for t in shown:
+                children.append(discord.ui.Separator())
+                children.append(_task_section(store, user_id, t, page=page))
 
         extra: list[discord.ui.Button] = []
         if tasks:
