@@ -222,7 +222,7 @@ def _dossier(bot_name: str, model: str) -> dict:
                 "tableaux, tâches planifiées, infos membres/salons, mémoire, et about_me "
                 "(moi-même + ping/stats machine). "
                 "Les fiches (widgets) ont un bouton save ~10 min : l'humain les range "
-                "dans ses signets (/signets pour revoir, envoyer, supprimer). "
+                "dans ses signets (/signets pour revoir, partager, supprimer). "
                 "Fait douteux ou trop frais → je cherche, j'invente pas. "
                 "Les widgets je les commente, je les recopie pas."
             ),

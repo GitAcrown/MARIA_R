@@ -53,9 +53,12 @@ class BookmarksView(discord.ui.LayoutView):
         query: str = "",
         page: int = 0,
         note: str = "",
+        shared_ids: Optional[set[str]] = None,
     ):
         super().__init__(timeout=_VIEW_TIMEOUT)
         self.user_id = user_id
+        self.shared_ids = shared_ids if shared_ids is not None else set()
+        shared_ids = self.shared_ids
         pages = _pages(items)
         page = max(0, min(page, len(pages) - 1))
         shown = pages[page]
@@ -70,48 +73,54 @@ class BookmarksView(discord.ui.LayoutView):
             discord.ui.TextDisplay(subtitle),
         ]
         if not items:
-            children += [
-                discord.ui.Separator(),
-                discord.ui.TextDisplay(
-                    "-# Aucun résultat." if query else "-# Aucun signet pour l'instant."
-                ),
-            ]
+            children.append(discord.ui.TextDisplay(
+                "-# Aucun résultat." if query else "-# Aucun signet pour l'instant."
+            ))
         else:
             lines = []
             for bm in shown:
                 lines.append(f"**{_clip(bm.title, 80)}**\n-# {_stamp(bm.created_at)}")
             children += [
-                discord.ui.Separator(),
                 discord.ui.TextDisplay("\n\n".join(lines)),
                 discord.ui.TextDisplay(f"-# Page {page + 1}/{len(pages)}"),
             ]
 
         rows: list[discord.ui.ActionRow] = []
         if shown:
-            rows.append(discord.ui.ActionRow(_PickBookmarkSelect(user_id, shown, query=query, page=page)))
+            rows.append(discord.ui.ActionRow(
+                _PickBookmarkSelect(user_id, shown, query=query, page=page, shared_ids=shared_ids),
+            ))
         actions: list[discord.ui.Button] = [
-            _SearchBookmarkButton(user_id, query=query, page=page),
+            _SearchBookmarkButton(user_id, query=query, page=page, shared_ids=shared_ids),
         ]
         if query:
-            actions.append(_ClearSearchButton(user_id))
+            actions.append(_ClearSearchButton(user_id, shared_ids=shared_ids))
         if len(pages) > 1:
             if page > 0:
-                actions.append(_BmPageButton("Precedent", user_id, items, query, page - 1))
+                actions.append(_BmPageButton("Precedent", user_id, items, query, page - 1, shared_ids=shared_ids))
             if page < len(pages) - 1:
-                actions.append(_BmPageButton("Suivant", user_id, items, query, page + 1))
+                actions.append(_BmPageButton("Suivant", user_id, items, query, page + 1, shared_ids=shared_ids))
         rows.append(discord.ui.ActionRow(*actions[:5]))
         if note:
-            children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {note}")]
-        children.append(discord.ui.Separator())
+            children.append(discord.ui.TextDisplay(f"-# {note}"))
         for row in rows:
             children.append(row)
         self.add_item(discord.ui.Container(*children))
 
 
 class BookmarkDetailView(discord.ui.LayoutView):
-    def __init__(self, user_id: int, bm: Bookmark, *, query: str = "", page: int = 0):
+    def __init__(
+        self,
+        user_id: int,
+        bm: Bookmark,
+        *,
+        query: str = "",
+        page: int = 0,
+        shared_ids: Optional[set[str]] = None,
+    ):
         built = render_free_widget(bm.spec, commentary="")
         super().__init__(timeout=_VIEW_TIMEOUT)
+        shared_ids = shared_ids if shared_ids is not None else set()
         if built is not None:
             for item in list(built.children):
                 built.remove_item(item)
@@ -119,17 +128,23 @@ class BookmarkDetailView(discord.ui.LayoutView):
         else:
             self.add_item(discord.ui.TextDisplay(f"## {bm.title}"))
             self.add_item(discord.ui.TextDisplay("-# Fiche illisible."))
-        self.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         self.add_item(discord.ui.ActionRow(
-            _SendBookmarkButton(user_id, bm),
-            _DeleteBookmarkButton(user_id, bm, query=query, page=page),
-            _BackBookmarksButton(user_id, query=query, page=page),
+            _SendBookmarkButton(user_id, bm, query=query, page=page, shared_ids=shared_ids),
+            _DeleteBookmarkButton(user_id, bm, query=query, page=page, shared_ids=shared_ids),
+            _BackBookmarksButton(user_id, query=query, page=page, shared_ids=shared_ids),
         ))
 
 
-def _reload(user_id: int, *, query: str = "", page: int = 0, note: str = "") -> BookmarksView:
+def _reload(
+    user_id: int,
+    *,
+    query: str = "",
+    page: int = 0,
+    note: str = "",
+    shared_ids: Optional[set[str]] = None,
+) -> BookmarksView:
     items = search_for_user(user_id, query) if query else list_for_user(user_id)
-    return BookmarksView(user_id, items, query=query, page=page, note=note)
+    return BookmarksView(user_id, items, query=query, page=page, note=note, shared_ids=shared_ids)
 
 
 def _deny(interaction: discord.Interaction, user_id: int) -> Optional[str]:
@@ -139,7 +154,15 @@ def _deny(interaction: discord.Interaction, user_id: int) -> Optional[str]:
 
 
 class _PickBookmarkSelect(discord.ui.Select):
-    def __init__(self, user_id: int, items: list[Bookmark], *, query: str, page: int):
+    def __init__(
+        self,
+        user_id: int,
+        items: list[Bookmark],
+        *,
+        query: str,
+        page: int,
+        shared_ids: set[str],
+    ):
         options = [
             discord.SelectOption(
                 label=_clip(bm.title, 100) or "Fiche",
@@ -152,6 +175,7 @@ class _PickBookmarkSelect(discord.ui.Select):
         self.user_id = user_id
         self.query = query
         self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
@@ -161,33 +185,41 @@ class _PickBookmarkSelect(discord.ui.Select):
         bm = get_bookmark(bid, self.user_id) if bid else None
         if bm is None:
             return await interaction.response.edit_message(
-                view=_reload(self.user_id, query=self.query, page=self.page, note="Introuvable."),
+                view=_reload(
+                    self.user_id, query=self.query, page=self.page,
+                    note="Introuvable.", shared_ids=self.shared_ids,
+                ),
             )
         await interaction.response.edit_message(
-            view=BookmarkDetailView(self.user_id, bm, query=self.query, page=self.page),
+            view=BookmarkDetailView(
+                self.user_id, bm, query=self.query, page=self.page,
+                shared_ids=self.shared_ids,
+            ),
         )
 
 
 class _SearchBookmarkButton(discord.ui.Button):
-    def __init__(self, user_id: int, *, query: str, page: int):
+    def __init__(self, user_id: int, *, query: str, page: int, shared_ids: set[str]):
         super().__init__(style=discord.ButtonStyle.secondary, label="Rechercher")
         self.user_id = user_id
         self.query = query
         self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.send_modal(
-            SearchBookmarkModal(self.user_id, current=self.query),
+            SearchBookmarkModal(self.user_id, current=self.query, shared_ids=self.shared_ids),
         )
 
 
 class SearchBookmarkModal(discord.ui.Modal, title="Rechercher un signet"):
-    def __init__(self, user_id: int, *, current: str = ""):
+    def __init__(self, user_id: int, *, current: str = "", shared_ids: Optional[set[str]] = None):
         super().__init__()
         self.user_id = user_id
+        self.shared_ids = shared_ids if shared_ids is not None else set()
         self.query = discord.ui.TextInput(
             label="Recherche",
             placeholder="recette, comparatif, un mot de la fiche…",
@@ -202,61 +234,92 @@ class SearchBookmarkModal(discord.ui.Modal, title="Rechercher un signet"):
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         q = (self.query.value or "").strip()
-        await interaction.response.edit_message(view=_reload(self.user_id, query=q, page=0))
+        await interaction.response.edit_message(
+            view=_reload(self.user_id, query=q, page=0, shared_ids=self.shared_ids),
+        )
 
 
 class _ClearSearchButton(discord.ui.Button):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, *, shared_ids: set[str]):
         super().__init__(style=discord.ButtonStyle.secondary, label="Tout afficher")
         self.user_id = user_id
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
-        await interaction.response.edit_message(view=_reload(self.user_id))
+        await interaction.response.edit_message(
+            view=_reload(self.user_id, shared_ids=self.shared_ids),
+        )
 
 
 class _BmPageButton(discord.ui.Button):
-    def __init__(self, label: str, user_id: int, items: list[Bookmark], query: str, page: int):
+    def __init__(
+        self,
+        label: str,
+        user_id: int,
+        items: list[Bookmark],
+        query: str,
+        page: int,
+        *,
+        shared_ids: set[str],
+    ):
         super().__init__(style=discord.ButtonStyle.secondary, label=label)
         self.user_id = user_id
         self.items = items
         self.query = query
         self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.edit_message(
-            view=BookmarksView(self.user_id, self.items, query=self.query, page=self.page),
+            view=BookmarksView(
+                self.user_id, self.items, query=self.query, page=self.page,
+                shared_ids=self.shared_ids,
+            ),
         )
 
 
 class _BackBookmarksButton(discord.ui.Button):
-    def __init__(self, user_id: int, *, query: str, page: int):
+    def __init__(self, user_id: int, *, query: str, page: int, shared_ids: set[str]):
         super().__init__(style=discord.ButtonStyle.secondary, label="Retour")
         self.user_id = user_id
         self.query = query
         self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         await interaction.response.edit_message(
-            view=_reload(self.user_id, query=self.query, page=self.page),
+            view=_reload(
+                self.user_id, query=self.query, page=self.page,
+                shared_ids=self.shared_ids,
+            ),
         )
 
 
 class _DeleteBookmarkButton(discord.ui.Button):
-    def __init__(self, user_id: int, bm: Bookmark, *, query: str, page: int):
+    def __init__(
+        self,
+        user_id: int,
+        bm: Bookmark,
+        *,
+        query: str,
+        page: int,
+        shared_ids: set[str],
+    ):
         super().__init__(style=discord.ButtonStyle.danger, label="Supprimer")
         self.user_id = user_id
         self.bm = bm
         self.query = query
         self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
@@ -265,20 +328,46 @@ class _DeleteBookmarkButton(discord.ui.Button):
         ok = delete_bookmark(self.bm.id, self.user_id)
         note = "Signet supprimé." if ok else "Déjà plus là."
         await interaction.response.edit_message(
-            view=_reload(self.user_id, query=self.query, page=self.page, note=note),
+            view=_reload(
+                self.user_id, query=self.query, page=self.page, note=note,
+                shared_ids=self.shared_ids,
+            ),
         )
 
 
 class _SendBookmarkButton(discord.ui.Button):
-    def __init__(self, user_id: int, bm: Bookmark):
-        super().__init__(style=discord.ButtonStyle.primary, label="Envoyer")
+    def __init__(
+        self,
+        user_id: int,
+        bm: Bookmark,
+        *,
+        query: str,
+        page: int,
+        shared_ids: set[str],
+    ):
+        already = bm.id in shared_ids
+        super().__init__(
+            style=discord.ButtonStyle.secondary if already else discord.ButtonStyle.primary,
+            label="Partager",
+            disabled=already,
+        )
         self.user_id = user_id
         self.bm = bm
+        self.query = query
+        self.page = page
+        self.shared_ids = shared_ids
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _deny(interaction, self.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
+        if self.bm.id in self.shared_ids:
+            return await interaction.response.edit_message(
+                view=BookmarkDetailView(
+                    self.user_id, self.bm, query=self.query, page=self.page,
+                    shared_ids=self.shared_ids,
+                ),
+            )
         view = render_free_widget(self.bm.spec, commentary="")
         if view is None:
             return await interaction.response.send_message(
@@ -287,12 +376,18 @@ class _SendBookmarkButton(discord.ui.Button):
         channel = interaction.channel
         if channel is None or not isinstance(channel, discord.abc.Messageable):
             return await interaction.response.send_message(
-                "Pas de salon où l'envoyer.", ephemeral=True,
+                "Pas de salon où le partager.", ephemeral=True,
             )
         try:
             await channel.send(view=view)
         except discord.HTTPException:
             return await interaction.response.send_message(
-                "Impossible d'envoyer ici.", ephemeral=True,
+                "Impossible de partager ici.", ephemeral=True,
             )
-        await interaction.response.send_message("Envoyé dans le salon.", ephemeral=True)
+        self.shared_ids.add(self.bm.id)
+        await interaction.response.edit_message(
+            view=BookmarkDetailView(
+                self.user_id, self.bm, query=self.query, page=self.page,
+                shared_ids=self.shared_ids,
+            ),
+        )
