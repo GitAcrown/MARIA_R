@@ -1,9 +1,11 @@
 """Cog Layout — rendu de tableaux ASCII (tabulate) et de widgets libres pour l'IA."""
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 try:
@@ -12,9 +14,11 @@ try:
 except ImportError:
     _HAS_TABULATE = False
 
+from common.bookmarks import attach_bookmark_button, list_for_user
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.widget_catalog import WIDGET_CANON_EXAMPLES, WIDGET_SPEC_SCHEMA, render_free_widget
 from common.widgets import register_widget, unregister_widget
+from cogs.layout.views import BookmarksView
 
 _MAX_COLS = 8
 _MAX_ROWS = 20
@@ -25,7 +29,11 @@ def build_render_widget_view(data: dict, commentary: str = "") -> Optional[disco
     """Builder du widget libre — rend le spec produit par l'outil render_widget."""
     if not isinstance(data, dict) or "error" in data:
         return None
-    return render_free_widget(data.get("spec"), commentary=commentary)
+    view = render_free_widget(data.get("spec"), commentary=commentary)
+    if view is None:
+        return None
+    attach_bookmark_button(view, data.get("spec"), commentary=commentary)
+    return view
 
 
 def _render_table(headers: list, rows: list) -> str:
@@ -132,6 +140,15 @@ class Layout(commands.Cog):
                 function=self._tool_render_widget,
             ),
         ]
+
+    @app_commands.command(name="bookmarks", description="Tes layouts enregistrés")
+    async def cmd_bookmarks(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        items = await asyncio.to_thread(list_for_user, interaction.user.id)
+        await interaction.followup.send(
+            view=BookmarksView(interaction.user.id, items),
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

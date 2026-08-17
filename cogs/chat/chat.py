@@ -39,6 +39,7 @@ from common.tasks import (
 )
 from common.timezones import PARIS_TZ
 from common.dyn_widgets import bind as bind_dyn_widget
+from common.bookmarks import bind as bind_bookmark
 from common.widgets import build_widget, register_widget, unregister_widget
 
 from cogs.chat.config import (
@@ -662,6 +663,7 @@ class Chat(commands.Cog):
                 continue
             posted = await _post(view=view, first=not sent_messages)
             await bind_dyn_widget(view, posted)
+            await bind_bookmark(view, posted)
             sent_messages.append(posted)
             note = rd.get("_llm_summary")
             if isinstance(note, str) and note.strip():
@@ -984,6 +986,7 @@ class Chat(commands.Cog):
             else:
                 posted = await message.channel.send(view=view)
             await bind_dyn_widget(view, posted)
+            await bind_bookmark(view, posted)
             note = rd.get("_llm_summary") or "Résultat affiché dans le salon."
             await self.gpt_api.inject_context_note_async(message.channel, note)
             sent_tools.append(tool_name)
