@@ -14,7 +14,7 @@ from typing import Optional
 
 import discord
 
-from common.emojis import REPEAT_REMINDER, SMALL_TASK
+from common.emojis import PENCIL, REPEAT_REMINDER, SMALL_TASK
 from common.memory.store import (
     CATEGORY_EVENT,
     CATEGORY_SERVER,
@@ -1425,7 +1425,10 @@ class TaskDetailView(discord.ui.LayoutView):
 
 class _OpenTaskButton(discord.ui.Button):
     def __init__(self, store, user_id, task: ScheduledTask, *, page: int = 0):
-        super().__init__(style=discord.ButtonStyle.secondary, label="Ouvrir")
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            emoji=discord.PartialEmoji.from_str(PENCIL),
+        )
         self.store = store
         self.user_id = user_id
         self.task = task
