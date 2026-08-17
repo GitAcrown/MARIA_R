@@ -408,7 +408,7 @@ class BookmarkButton(
             return
         status, _ = save_for_user(interaction.user.id, rec.spec, title=rec.title)
         if status == "ok":
-            msg = f"{BOOKMARK} Enregistré — `/signets` pour le retrouver."
+            msg = f"{BOOKMARK} **Enregistré** — `/signets` pour le retrouver."
         elif status == "dup":
             msg = "Déjà dans tes signets."
         elif status == "full":
