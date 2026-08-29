@@ -133,7 +133,7 @@ async def process_attachment(
     if _is_audio(attachment):
         return await _process_audio(attachment, client, cache)
     if _is_image(attachment):
-        return [ImageComponent(_image_url(attachment), detail="auto")]
+        return [ImageComponent(_image_url(attachment), detail="low")]
     if _is_text_file(attachment):
         return await _process_text_file(attachment)
     return []

@@ -26,7 +26,11 @@ from .context import (
 )
 from .tools import ToolRegistry
 from .attachments import AttachmentCache, process_attachment
-from .capabilities import build_capability_ctx
+from .capabilities import (
+    build_capability_ctx,
+    collect_capability_flags,
+    select_tool_names,
+)
 
 logger = logging.getLogger("llm.session")
 
@@ -193,7 +197,7 @@ def _components_v2_to_parts(
     return texts, images
 
 
-def _cite_snippet(msg: discord.Message, limit: int = 180) -> str:
+def _cite_snippet(msg: discord.Message, limit: int = 120) -> str:
     """Aperçu du message cité, pour le [FOCUS] (texte, sinon titre/URL d'embed)."""
     text = (getattr(msg, "clean_content", None) or msg.content or "").strip()
     if text:
@@ -398,8 +402,8 @@ class ChannelSession:
             parts.append(TextComponent(f"{ctx_tag}[{msg_time}] {display_name}:"))
 
         # --- Embeds + LayoutView : texte toujours ; images seulement si adressé au bot ---
-        embed_cap = 400 if is_context_only else 800
-        layout_cap = 600 if is_context_only else 1200
+        embed_cap = 300 if is_context_only else 600
+        layout_cap = 400 if is_context_only else 800
 
         for emb in message.embeds:
             emb_text = _embed_to_text(emb)
@@ -410,7 +414,7 @@ class ChannelSession:
                     url = emb.image.url
                     if url.lower().endswith(".gif"):
                         url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
-                    parts.append(ImageComponent(url, detail="high"))
+                    parts.append(ImageComponent(url, detail="low"))
                 if emb.thumbnail and emb.thumbnail.url:
                     url = emb.thumbnail.url
                     if url.lower().endswith(".gif"):
@@ -435,16 +439,16 @@ class ChannelSession:
             for m in re.finditer(r"https?://[^\s]+", text):
                 url = re.sub(r"\?.*$", "", m.group(0))
                 if url.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    parts.append(ImageComponent(url, detail="auto"))
+                    parts.append(ImageComponent(url, detail="low"))
                 elif url.lower().endswith(".gif"):
                     parts.append(ImageComponent(
                         f"{url}?format=png" if "?" not in url else f"{url}&format=png",
-                        detail="auto",
+                        detail="low",
                     ))
 
             for st in message.stickers:
                 if st.url:
-                    parts.append(ImageComponent(st.url, detail="auto"))
+                    parts.append(ImageComponent(st.url, detail="low"))
 
             for att in message.attachments:
                 ct = att.content_type or ""
@@ -453,7 +457,7 @@ class ChannelSession:
                     url = att.url
                     if fn.endswith(".gif"):
                         url = f"{url}?format=png" if "?" not in url else f"{url}&format=png"
-                    parts.append(ImageComponent(url, detail="auto"))
+                    parts.append(ImageComponent(url, detail="low"))
 
         if not parts:
             msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
@@ -548,7 +552,7 @@ class ChannelSession:
             content = trigger.clean_content.strip()
             if content:
                 hint = (
-                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:200]} ». "
+                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:140]} ». "
                     f"Ignore les autres questions du fil ; le `[contexte]` n'est que du décor."
                 )
             else:
@@ -591,7 +595,16 @@ class ChannelSession:
             and depth < MAX_RECURSION - 1
             and len(self.tool_registry) > 0
         )
-        tools = self.tool_registry.get_compiled() if use_tools else []
+        tools = []
+        if use_tools:
+            # Premier tour : on retire seulement les outils clairement hors-sujet.
+            # Tours suivants / tâches planifiées : liste complète (chaînage).
+            if skip_focus or depth > 0:
+                tools = self.tool_registry.get_compiled()
+            else:
+                flags = collect_capability_flags(focus_msg, cited)
+                names = select_tool_names(self.tool_registry.names(), flags)
+                tools = self.tool_registry.get_compiled(names)
         stream = on_text_delta is not None
 
         async def _delta(raw: str) -> None:

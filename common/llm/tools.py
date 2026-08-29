@@ -3,7 +3,7 @@
 import inspect
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Union, Awaitable
+from typing import Any, Awaitable, Callable, Optional, Union
 
 from .context import ToolCallRecord, ToolResponseRecord
 
@@ -113,10 +113,13 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
-    def get_compiled(self) -> list[dict]:
-        if self._cache is None:
-            self._cache = [t.to_openai_dict() for t in self._tools.values()]
-        return self._cache
+    def get_compiled(self, names: Optional[set[str] | list[str]] = None) -> list[dict]:
+        if names is None:
+            if self._cache is None:
+                self._cache = [t.to_openai_dict() for t in self._tools.values()]
+            return self._cache
+        wanted = set(names)
+        return [t.to_openai_dict() for t in self._tools.values() if t.name in wanted]
 
     def clear(self) -> None:
         self._tools.clear()

@@ -40,7 +40,8 @@ class ImageComponent(ContentComponent):
         super().__init__(
             type="image_url",
             data={"type": "image_url", "image_url": {"url": url, "detail": detail}},
-            token_count=250,
+            # low ≈ 85 tokens côté API ; high/auto restent une estimation haute.
+            token_count=85 if detail == "low" else 250,
         )
 
 

@@ -29,13 +29,64 @@ _SKIP_HOSTS = frozenset({
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 _VID_EXT = (".mp4", ".mov", ".webm", ".mkv", ".avi")
 _LAYOUT_RE = re.compile(
-    r"\b(?:fiche\s+)?layout\b"
-    r"|\b(?:une?\s+)?(?:recettes?|recipes?)\b"
+    r"\b(?:fiches?|layouts?)\b"
+    r"|\b(?:recettes?|recipes?|ingr[ée]dients?)\b"
     r"|\b(?:tutoriels?|tuto(?:riel)?s?)\b"
-    r"|\bcomparatif(?:s|s\s+dense)?\b"
-    r"|comment (?:cuisiner|pr[ée]parer)\b",
+    r"|\bcomparatif"
+    r"|comment (?:cuisiner|pr[ée]parer|faire)\b"
+    r"|[ée]tape par [ée]tape|mode d['']emploi",
     re.I,
 )
+_TRANSPORT_RE = re.compile(
+    r"\b(?:m[eé]tro|rer|tram|bus|transilien|sncf|train|trains?|"
+    r"gare|trajet|itin[eé]raire|correspondance|ratp|"
+    r"ligne|arr[êe]t|station|quai|trafic|retard)\b"
+    r"|comment (?:on |je |tu |nous |vous |y )?(?:va|vais|allez|aller)\b"
+    r"|(?:pour|faut|dois|doit|on doit|je dois) aller\b"
+    r"|(?:on va|je vais|tu vas|on y va) (?:à|au|aux|en)\b"
+    r"|depuis chez\b"
+    r"|pour (?:me |te |se )?rendre\b"
+    r"|chemin (?:pour|vers|jusqu)\b",
+    re.I,
+)
+_FOOTBALL_RE = re.compile(
+    r"\b(?:foot(?:ball)?|match(?:s)?|score|scores?|ligue|champions?|"
+    r"psg|\bom\b|\bol\b|asse|équipe|equipe|buteurs?|buts?|"
+    r"hors[- ]jeu|classement|c1|c3|l1|ligue 1|"
+    r"coupe du monde|euro|penalty|p[ée]nalty|mi[- ]temps|"
+    r"r[ée]sultat|r[ée]sultats|championnat)\b",
+    re.I,
+)
+_SUMMARY_RE = re.compile(
+    r"\b(?:r[eé]sum[eé]|r[eé]cap(?:itul(?:e|er|atif)?)?|"
+    r"synth[eè]se|r[eé]capitule|"
+    r"derniers messages|c'[eé]tait quoi|"
+    r"ce qui s['']est dit|t'as (?:suivi|lu)|catch[- ]up)\b",
+    re.I,
+)
+_IMAGES_SEARCH_RE = re.compile(
+    r"\b(?:montre(?:[- ]moi)?|images?|photos?|illustration|"
+    r"visuel|pics?|[àa] quoi (?:[çc]a )?ressemble)\b",
+    re.I,
+)
+_WEB_PAGE_RE = re.compile(
+    r"\b(?:articles?|liens?|urls?|ce site|cette page|page web|"
+    r"lis (?:le |la |cet |cette )?(?:page|article|lien|site))\b",
+    re.I,
+)
+_YT_WORD_RE = re.compile(r"\b(?:youtube|youtu\.be|\byt\b|shorts)\b", re.I)
+
+# Outils envoyés seulement si le flag correspondant est présent.
+# Tout le reste (météo, search_web, mémoire, etc.) reste toujours exposé.
+_GATED_TOOLS: dict[str, str] = {
+    "read_youtube": "youtube",
+    "read_web_page": "web",
+    "search_images": "images_search",
+    "get_transport": "transport",
+    "get_football": "football",
+    "summarize_channel": "summary",
+    "render_widget": "layout",
+}
 
 _HINTS: tuple[tuple[str, str], ...] = (
     ("youtube", "- YouTube : read_youtube (sous-titres auteur ou auto). Pas l'image ni le son. Pas de summarize_channel. Si l'outil échoue / pas de sous-titres → dis-le, n'invente pas."),
@@ -78,6 +129,17 @@ def _urls_in(msg: discord.Message) -> list[str]:
     return found
 
 
+def _message_text(msg: discord.Message) -> str:
+    """Texte + titres d'embeds — pour matcher large, pas seulement le clean_content."""
+    parts = [getattr(msg, "clean_content", None) or msg.content or ""]
+    for emb in msg.embeds or []:
+        if emb.title:
+            parts.append(emb.title)
+        if emb.description:
+            parts.append(emb.description[:240])
+    return "\n".join(parts)
+
+
 def _is_youtube_message(msg: discord.Message) -> bool:
     blob = msg.content or ""
     for emb in msg.embeds or []:
@@ -85,7 +147,7 @@ def _is_youtube_message(msg: discord.Message) -> bool:
         blob += f" {getattr(emb.provider, 'name', None) or ''}"
         if emb.video and emb.video.url:
             blob += f" {emb.video.url}"
-    if _YT_RE.search(blob) or "youtube" in blob.lower():
+    if _YT_RE.search(blob) or _YT_WORD_RE.search(blob):
         return True
     return any(_host(u) in _YT_HOSTS for u in _urls_in(msg))
 
@@ -124,9 +186,19 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("youtube")
         if _has_real_image(msg):
             flags.add("image")
-        text = getattr(msg, "clean_content", None) or msg.content or ""
+        text = _message_text(msg)
         if _LAYOUT_RE.search(text):
             flags.add("layout")
+        if _TRANSPORT_RE.search(text):
+            flags.add("transport")
+        if _FOOTBALL_RE.search(text):
+            flags.add("football")
+        if _SUMMARY_RE.search(text):
+            flags.add("summary")
+        if _IMAGES_SEARCH_RE.search(text):
+            flags.add("images_search")
+        if _WEB_PAGE_RE.search(text):
+            flags.add("web")
         for url in _urls_in(msg):
             host = _host(url)
             ext = _path_ext(url)
@@ -158,3 +230,14 @@ def build_capability_ctx(*messages: discord.Message | None) -> str:
     if not lines:
         return ""
     return "\nDEMANDE (ce tour seulement) :\n" + "\n".join(lines) + "\n"
+
+
+def select_tool_names(all_names: list[str], flags: set[str]) -> list[str]:
+    """Garde tous les outils sauf une poignée de spécialisés hors-sujet.
+
+    Un outil inconnu / non listé reste inclus (sûr pour les ajouts futurs).
+    """
+    return [
+        name for name in all_names
+        if _GATED_TOOLS.get(name) is None or _GATED_TOOLS[name] in flags
+    ]

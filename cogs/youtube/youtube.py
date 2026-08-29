@@ -33,7 +33,7 @@ logger = logging.getLogger("MARIA.YouTube")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
 OEMBED_URL = "https://www.youtube.com/oembed"
 CACHE_SEC = 3600
-TRANSCRIPT_MAX = 12000
+TRANSCRIPT_MAX = 8000
 _LANGS = ("fr", "fr-FR", "en", "en-US", "en-GB")
 
 _YT_ID_RE = re.compile(

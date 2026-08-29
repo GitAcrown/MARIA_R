@@ -181,7 +181,7 @@ async def extract_memories(
             ),
         },
     ]
-    max_tokens = max(2500, 350 * max_actions)
+    max_tokens = max(2000, 300 * max_actions)
     try:
         completion = await llm_client.chat(
             messages,
