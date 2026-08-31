@@ -106,7 +106,7 @@ def _date_select_label(d: date) -> str:
 
 
 def weather_tab_labels(payload: dict) -> list[str]:
-    labels = []
+    labels = ["Semaine"]
     for key in payload.get("days") or []:
         try:
             d = date.fromisoformat(key)
@@ -120,9 +120,9 @@ def weather_tab_body(payload: dict, index: int) -> discord.ui.Item:
     days = payload.get("days") or []
     city = payload.get("city") or "?"
     raw = payload.get("raw") or {}
-    if not days:
+    if index <= 0 or not days:
         return _forecast_container(city, raw)
-    key = days[index] if 0 <= index < len(days) else days[0]
+    key = days[index - 1] if 1 <= index <= len(days) else days[0]
     try:
         target = date.fromisoformat(key)
     except ValueError:
@@ -150,13 +150,14 @@ def build_weather_view(data: dict, commentary: str = "") -> Optional[discord.ui.
     try:
         if weather_type == "forecast":
             days = _forecast_day_keys(raw)
+            # 0 = panorama semaine ; les jours suivent (décalage +1).
             selected = 0
             if target_date_str:
                 target = _parse_target_date(target_date_str)
                 if target:
                     tkey = target.isoformat()
                     if tkey in days:
-                        selected = days.index(tkey)
+                        selected = days.index(tkey) + 1
             if len(days) >= 2:
                 view = make_tabbed_view(
                     "weather",
