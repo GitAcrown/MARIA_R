@@ -75,6 +75,14 @@ _WEB_PAGE_RE = re.compile(
     re.I,
 )
 _YT_WORD_RE = re.compile(r"\b(?:youtube|youtu\.be|\byt\b|shorts)\b", re.I)
+_SERVER_STATS_RE = re.compile(
+    r"\b(?:stats?|statistiques?)\b.*\b(?:serveur|salon|discord)\b"
+    r"|\b(?:serveur|salon)\b.*\b(?:stats?|statistiques?)\b"
+    r"|\bactivit[eé] du (?:serveur|salon)\b"
+    r"|\b(?:salon|channel) le plus actif\b"
+    r"|\bqui (?:parle|poste|papote) le plus\b",
+    re.I,
+)
 _WEATHER_RE = re.compile(
     r"\b(?:m[eé]t[eé]o|pluie|pleu(?:t|voir|voir[ao])|neige|neiger?|"
     r"degr[eé]s?|temp[eé]rature|soleil|ensoleill[eé]|nuageux|nuages?|"
@@ -107,6 +115,7 @@ _GATED_TOOLS: dict[str, str] = {
     "search_media": "media_topic",
     "search_game": "media_topic",
     "search_track": "media_topic",
+    "get_server_stats": "server_stats",
 }
 
 # Momentum de session : un outil récemment appelé garde son flag "chaud" quelques
@@ -240,6 +249,8 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("weather")
         if _MEDIA_TOPIC_RE.search(text):
             flags.add("media_topic")
+        if _SERVER_STATS_RE.search(text):
+            flags.add("server_stats")
         for url in _urls_in(msg):
             host = _host(url)
             ext = _path_ext(url)

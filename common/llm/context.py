@@ -243,6 +243,21 @@ class ConversationContext:
         self._messages.clear()
         self._needs_trim = False
 
+    def truncate_from(self, predicate) -> list["MessageRecord"]:
+        """Retire du contexte le premier message qui matche `predicate` ET tout ce
+        qui suit (réponse assistant, tool calls/réponses…). Retourne les messages
+        retirés (liste vide si rien ne matche)."""
+        idx = None
+        for i, m in enumerate(self._messages):
+            if predicate(m):
+                idx = i
+                break
+        if idx is None:
+            return []
+        removed = self._messages[idx:]
+        self._messages = self._messages[:idx]
+        return removed
+
     # Notes système (injections post-widget) protégées contre l'éviction par âge.
     _SYSTEM_NOTE_MIN_AGE = timedelta(minutes=15)
 

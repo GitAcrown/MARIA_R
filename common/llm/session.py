@@ -295,6 +295,34 @@ class ChannelSession:
         self._ingested_ids.add(message_id)
         self._ingested_records[message_id] = record
 
+    def prepare_edit_redo(self, user_message_id: int) -> bool:
+        """Retire du contexte le message utilisateur `user_message_id` et tout ce qui
+        suit (réponse assistant, tool calls/réponses), pour permettre une régénération
+        propre après une édition tardive. Retourne False si rien à faire (message déjà
+        évincé du contexte par trim()).
+
+        Limite connue : si un AUTRE message (contexte passif) a été ingéré entre la
+        question d'origine et la réponse, il est aussi retiré — cas rare (fenêtre de
+        génération très courte), accepté comme compromis.
+        """
+        if not self._still_in_context(user_message_id):
+            return False
+
+        def _is_target(m: MessageRecord) -> bool:
+            dm = m.metadata.get("discord_message") if hasattr(m, "metadata") else None
+            return getattr(dm, "id", None) == user_message_id
+
+        removed = self.context.truncate_from(_is_target)
+        if not removed:
+            return False
+        for m in removed:
+            dm = m.metadata.get("discord_message") if hasattr(m, "metadata") else None
+            mid = getattr(dm, "id", None)
+            if mid is not None:
+                self._ingested_ids.discard(mid)
+                self._ingested_records.pop(mid, None)
+        return True
+
     def _still_in_context(self, message_id: int) -> bool:
         """True si le message référencé est encore visible dans le contexte courant
         (pas évincé par trim()) — sinon un simple « [Suite de : X] » serait aveugle."""

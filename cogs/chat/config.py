@@ -31,6 +31,10 @@ DEBOUNCE_SECONDS: float = 0.33
 # Correction typo du ping (« marie » → « maria ») : re-déclencher si l'édition
 # arrive dans cette fenêtre après le message d'origine.
 EDIT_TRIGGER_SECONDS: float = 10
+# Au-delà de EDIT_TRIGGER_SECONDS mais dans cette fenêtre : si MARIA a déjà répondu
+# et que rien n'a été dit depuis, une édition met à jour sa réponse (au lieu d'en
+# poster une nouvelle qui répondrait à une question qui n'existe plus).
+EDIT_UPDATE_WINDOW_SECONDS: float = 300
 
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).

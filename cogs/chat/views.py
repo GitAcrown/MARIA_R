@@ -14,6 +14,7 @@ from typing import Optional
 
 import discord
 
+from common.discord_ui import section_with_thumbnail
 from common.emojis import PENCIL, REPEAT_REMINDER, SMALL_TASK
 from common.memory.store import (
     CATEGORY_EVENT,
@@ -856,10 +857,112 @@ class MeMemoryView(discord.ui.LayoutView):
             extra_buttons=[
                 _AddPersonalMemoryButton(store, vectors, guild_id, user_id, display_name),
                 _ResetPersonalButton(store, vectors, guild_id, user_id, display_name),
+                _ShowCardButton(store, vectors, guild_id, user_id, display_name),
             ],
             rebuild=rebuild,
         )
         self.add_item(discord.ui.Container(*children))
+
+
+class _ShowCardButton(discord.ui.Button):
+    """Bascule vers la carte mémoire visuelle — pure mise en forme locale des faits
+    déjà en base, aucun appel LLM (contrairement au résumé texte de /moi)."""
+
+    def __init__(self, store, vectors, guild_id, user_id, display_name):
+        super().__init__(style=discord.ButtonStyle.primary, label="Carte", emoji="🪪")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        memories = await asyncio.to_thread(
+            lambda: self.store.list_for_user(
+                self.guild_id, self.user_id, limit=80, include_server=False, include_pending=False,
+            ),
+        )
+        avatar_url = None
+        try:
+            avatar_url = interaction.user.display_avatar.url
+        except Exception:
+            pass
+        view = MemoryCardView(
+            self.display_name, memories,
+            avatar_url=avatar_url,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class _BackToMeButton(discord.ui.Button):
+    def __init__(self, store, vectors, guild_id, user_id, display_name):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Retour")
+        self.store = store
+        self.vectors = vectors
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.display_name = display_name
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        view = await _rebuild_me_view(
+            interaction,
+            store=self.store, vectors=self.vectors,
+            guild_id=self.guild_id, user_id=self.user_id, display_name=self.display_name,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class MemoryCardView(discord.ui.LayoutView):
+    """Carte mémoire personnalisée — synthèse visuelle des faits déjà en base,
+    sans aucun appel LLM (coût nul, contrairement au résumé texte de /moi)."""
+
+    def __init__(
+        self,
+        display_name: str,
+        memories: list[Memory],
+        *,
+        avatar_url: Optional[str],
+        store: MemoryStore,
+        vectors: VectorStore,
+        guild_id: int,
+        user_id: int,
+    ):
+        super().__init__(timeout=_VIEW_TIMEOUT)
+        active = sorted(
+            [m for m in memories if m.status == STATUS_ACTIVE],
+            key=lambda m: m.confidence,
+            reverse=True,
+        )
+
+        children: list[discord.ui.Item] = [discord.ui.TextDisplay(f"## 🪪 Carte mémoire · {display_name}")]
+        if active:
+            oldest = min(active, key=lambda m: m.created_at)
+            avg_conf = sum(m.confidence for m in active) / len(active)
+            children.append(discord.ui.TextDisplay(
+                f"-# {len(active)} souvenir(s) actif(s) · confiance moy. {avg_conf:.0%} "
+                f"· connu(e) depuis le {oldest.created_at.strftime('%d/%m/%Y')}"
+            ))
+        else:
+            children.append(discord.ui.TextDisplay("-# Aucun souvenir actif pour l'instant."))
+        children.append(discord.ui.Separator())
+
+        top = active[:8]
+        if top:
+            children.append(discord.ui.TextDisplay("\n".join(f"› {m.content}" for m in top)))
+        else:
+            children.append(discord.ui.TextDisplay("-# Rien à afficher — parle-lui un peu !"))
+
+        children.append(discord.ui.Separator())
+        children.append(discord.ui.ActionRow(
+            _BackToMeButton(store, vectors, guild_id, user_id, display_name),
+        ))
+
+        container = discord.ui.Container(*children)
+        self.add_item(section_with_thumbnail(container, avatar_url))
 
 
 async def _rebuild_me_view(
