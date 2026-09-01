@@ -47,7 +47,6 @@ from cogs.chat.config import (
     CONTEXT_AGE_HOURS,
     CONTEXT_WINDOW,
     DEBOUNCE_SECONDS,
-    EDIT_TRIGGER_SECONDS,
     EDIT_UPDATE_WINDOW_SECONDS,
     MAX_MESSAGES,
     MAX_TOKENS,
@@ -998,9 +997,9 @@ class Chat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
-        """Ping corrigé dans les 10 s (« marie » → « maria ») → se déclencher.
-        Édition plus tardive (jusqu'à EDIT_UPDATE_WINDOW_SECONDS) → met à jour la
-        réponse déjà postée au lieu d'en reposter une (cf. _maybe_redo_response)."""
+        """Dans les 15 s : ping corrigé (« marie » → « maria ») → première réponse ;
+        message déjà répondu → mise à jour in-place (cf. _maybe_redo_response).
+        Au-delà : ignoré (évite de relancer un message déjà modéré)."""
         if after.author.bot:
             return
         if (after.content or "") == (before.content or ""):
@@ -1009,11 +1008,12 @@ class Chat(commands.Cog):
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - created).total_seconds()
-        if age <= EDIT_TRIGGER_SECONDS:
-            await self._handle_incoming(after, edited=True)
+        if age > EDIT_UPDATE_WINDOW_SECONDS:
             return
-        if age <= EDIT_UPDATE_WINDOW_SECONDS:
+        if after.id in self._answered:
             await self._maybe_redo_response(after)
+            return
+        await self._handle_incoming(after, edited=True)
 
     async def _maybe_redo_response(self, message: discord.Message) -> None:
         """Édition tardive d'un message auquel MARIA a déjà répondu : si sa réponse

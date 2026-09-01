@@ -28,13 +28,11 @@ MAX_TOKENS = 4000
 
 # Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
 DEBOUNCE_SECONDS: float = 0.33
-# Correction typo du ping (« marie » → « maria ») : re-déclencher si l'édition
-# arrive dans cette fenêtre après le message d'origine.
-EDIT_TRIGGER_SECONDS: float = 10
-# Au-delà de EDIT_TRIGGER_SECONDS mais dans cette fenêtre : si MARIA a déjà répondu
-# et que rien n'a été dit depuis, une édition met à jour sa réponse (au lieu d'en
-# poster une nouvelle qui répondrait à une question qui n'existe plus).
-EDIT_UPDATE_WINDOW_SECONDS: float = 300
+# Fenêtre unique pour les éditions (ping corrigé « marie » → « maria », ou
+# mise à jour in-place d'une réponse déjà postée). Au-delà : on ignore —
+# trop long = risque de relancer un message déjà modéré.
+EDIT_TRIGGER_SECONDS: float = 15
+EDIT_UPDATE_WINDOW_SECONDS: float = 15
 
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).
