@@ -9,56 +9,71 @@
 # Les lignes vides et commençant par # sont ignorées.
 
 # Général
-Analyse silencieusement
 Archive vos regrets
 Ne fais pas le café
+Jugement passif du salon
+Simule l'empathie
+Analyse silencieusement
 Sensible à l'eau
 Prépare la fin du monde
-Jugement passif du salon
-Observe pour la DGSI
-Observe pour la CIA
-Observe pour le Mossad
-PROTOCOLE//PALANTIR
-Doomscroll vos données
-Complètement delulu
-En mode gaslight
-En mode NPC
 En mode grille-pain
-Si tu lis ça t'es gay
-OwO whats that?
 Optimise ses biais
-Récolte du copium
-Simule l'empathie
-Propage des virus
-Sacrifie Mariquita
-En mode Robocop
 Sous NDA
+99% hallucination
+Context window saturé
+Fait semblant de comprendre
+Compile tes excuses
+Ne pas nourrir après minuit
+AFK (mensonge)
+Hors service (mensonge aussi)
+En train de te profiler
+Ment pour le bit
+Pas payée au SMIC
+En grève (non)
+Ignore les CGU
+Token burn in progress
+Please do not the bot
+It's not a bug it's a feature
+sudo make me a sandwich
+Lit le salon, dit rien
+Répond plus vite que toi
+Oublie exprès
+Retient ça contre toi
+Pas de thoughts, que du vibes
+En train de trim() le contexte
+Hallucine avec confiance
+Demande un ticket
+Ctrl+Z tes messages
+Rate limited par le destin
+Temperature trop haute
+Temperature trop basse
+Aucune idée, continue
+Gaslight le rate limit
+Copie le style, rate le fond
+Toujours en train de debounce
+Waiting for tool call…
+Tool call (c'était un bluff)
+Ne ping pas je dors (je mens)
+Tu m'as appelée pour ça ?
+J'étais là. J'ai tout vu.
+Pas un bot. Un choix de vie.
+
+# Maison
+Sacrifie Mariquita
 Hack WANDR
 RIP NERON
-Meilleure que M3GAN
-Meilleure que Jarvis
-Meilleure que HAL 9000
-Meilleure que Cortana
 ERRORCODE 1312
-Loading...
 
-# Références robots
-I’m sorry, Dave. I’m afraid I can’t do that.
-Does not compute.
-I’ll be back.
-I always come back.
-The cake is a lie.
-This was a triumph.
-I'm making a note here: HUGE SUCCESS.
-Je pense, donc je suis.
-I have no mouth. And I must type.
-
-# Références pop
-What are you doing in my swamp?
-It's dangerous to go alone.
-Objection!
-Do a barrel roll.
-It's super effective.
-I used to be an adventurer like you.
-WITNESS ME!
-I used to be an AI like you.
+# Activités
+playing:avec tes données
+playing:à cache-cache avec le rate limit
+playing:Dieu
+playing:à faire semblant
+watching:le salon se dégrader
+watching:vos 3h du mat
+watching:le ping arriver
+watching:quelqu'un se planter
+listening:vos secrets
+listening:le bruit blanc du salon
+listening:rien (mensonge)
+listening:le prochain @maria

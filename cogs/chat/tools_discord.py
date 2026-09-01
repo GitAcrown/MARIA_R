@@ -8,11 +8,12 @@ import discord
 
 from common.activity import ActivityTracker, KIND_MESSAGE, KIND_SUMMON
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.emojis import SMALL_CHART
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 # Nombre maximum de membres renvoyés par get_server_users.
 MAX_SERVER_USERS = 60
-# Fenêtre des classements du widget get_server_stats.
+# Fenêtre des classements de la vue get_server_stats.
 SERVER_STATS_DAYS = 7
 
 
@@ -21,14 +22,17 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
         return None
     name = data.get("guild_name") or "Serveur"
     days = data.get("days") or SERVER_STATS_DAYS
-    children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"## 📊 {name}"),
+    # Section + thumbnail d'abord, PUIS Container — une Section ne peut pas
+    # envelopper un Container (Discord 400, message jamais posté).
+    header = section_with_thumbnail(
         discord.ui.TextDisplay(
+            f"## {SMALL_CHART} {name}\n"
             f"-# {data.get('member_count', '?')} membres · "
             f"{data.get('messages_total', 0)} messages sur {days} j"
         ),
-        discord.ui.Separator(),
-    ]
+        data.get("guild_icon"),
+    )
+    children: list[discord.ui.Item] = [header, discord.ui.Separator()]
 
     def _ranked_block(title: str, items: list[dict], unit: str) -> Optional[discord.ui.TextDisplay]:
         if not items:
@@ -51,9 +55,7 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
                 children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
             children.append(b)
 
-    container = discord.ui.Container(*children)
-    body = section_with_thumbnail(container, data.get("guild_icon"))
-    return layout_with_commentary(body, commentary)
+    return layout_with_commentary(discord.ui.Container(*children), commentary)
 
 
 def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
@@ -178,7 +180,7 @@ def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
 
         return ToolResponseRecord(tc.id, {
             "_tool": "get_server_stats",
-            "_llm_summary": f"Stats de {guild.name} sur {days} j affichées (widget). Ne les récite pas.",
+            "_llm_summary": f"Stats de {guild.name} sur {days} j affichées (vue). Ne les récite pas.",
             "guild_name": guild.name,
             "guild_icon": str(guild.icon.url) if guild.icon else None,
             "member_count": guild.member_count,
@@ -215,7 +217,7 @@ def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
             name="get_server_stats",
             description=(
                 "Statistiques communautaires du serveur sur les 7 derniers jours : salon le plus "
-                "actif, membres les plus bavards, membres qui te sollicitent le plus. Widget dédié, "
+                "actif, membres les plus bavards, membres qui te sollicitent le plus. Vue dédiée, "
                 "aucun paramètre. Uniquement si on demande explicitement les stats/l'activité du serveur."
             ),
             properties={},
