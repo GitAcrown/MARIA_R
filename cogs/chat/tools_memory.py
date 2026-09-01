@@ -470,7 +470,10 @@ def build_memory_tools(
             )
 
         mem = await asyncio.to_thread(store.get, memory_id)
-        if mem is None or mem.guild_id != guild.id or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
+        # Les souvenirs de catégorie "user" sont globaux (valables sur tous les serveurs) :
+        # ne pas bloquer leur oubli sous prétexte qu'ils ont été créés sur un autre serveur.
+        wrong_guild = mem is not None and mem.category != CATEGORY_USER and mem.guild_id != guild.id
+        if mem is None or wrong_guild or mem.status not in (STATUS_ACTIVE, STATUS_PENDING):
             return ToolResponseRecord(
                 tc.id, {"error": "memory_id introuvable ou déjà oublié"}, datetime.now(timezone.utc),
             )

@@ -9,7 +9,9 @@ from common.discord_ui import layout_with_commentary
 from common.emojis import REPEAT_REMINDER, SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
+    SCHEDULE_DAILY,
     SCHEDULE_ONCE,
+    SCHEDULE_WEEKLY,
     STATUS_PAUSED,
     STATUS_PENDING,
     TASK_INSTRUCTION_MAX,

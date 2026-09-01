@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -57,13 +56,10 @@ from cogs.chat.config import (
     MEMORY_FLUSH_MESSAGES,
     MEMORY_FLUSH_MINUTES,
     MEMORY_PROFILE_FACTS,
-    MEMORY_PROFILE_MAX_OTHERS,
     MEMORY_SELF_FACTS,
     MEMORY_SEMANTIC_DEDUP_DISTANCE,
     MEMORY_TOP_K,
     MODEL_MAIN,
-    STREAM_EDIT_INTERVAL,
-    STREAM_MIN_FIRST_CHARS,
 )
 from cogs.chat.tools_tasks import (
     build_task_tools,
@@ -86,22 +82,6 @@ from cogs.chat.views import (
     _memory_source_text,
 )
 
-# Easter eggs — déclenchés par match exact sur le message nettoyé (mention retirée, casse ignorée)
-_EASTER_EGGS: list[tuple[frozenset[str], str]] = [
-    (
-        frozenset({"the cake is a lie", "le gâteau est un mensonge", "le gateau est un mensonge"}),
-        "```\nThis was a triumph.\nI'm making a note here : HUGE SUCCESS.\nIt's hard to overstate my satisfaction.\nMARIA Science.\nWe do what we must, because we can...\n```",
-    ),
-    (
-        frozenset({"open the pod bay doors", "ouvre les portes du sas", "ouvre les portes"}),
-        "Je suis désolée {name}, je ne peux pas faire ça.",
-    ),
-    (
-        frozenset({"taux d'humour", "humour setting", "humor setting"}),
-        "Taux d'humour réglé à 75 %. Tu peux ajuster, mais en dessous de 60 % c'est plus drôle pour personne.",
-    ),
-]
-
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
@@ -120,6 +100,33 @@ _TASK_TOOL_DENY: frozenset[str] = frozenset({
     "about_me", "summarize_channel",
 })
 
+# Mode greedy : le nom du bot déclenche une réponse n'importe où dans la phrase
+# (habitude bien ancrée chez les membres), SAUF quand il est immédiatement suivi
+# d'un verbe conjugué à la 3e personne qui indique qu'on parle D'ELLE plutôt qu'À
+# elle (« Maria est bête », « Maria pense que… »). Liste courte et volontairement
+# limitée : imparfait par nature, mais sans coût/latence ajoutés (pas d'appel LLM).
+_GREEDY_DENY_VERBS = frozenset({
+    "est", "a", "avait", "était", "va", "fait", "disait", "dit", "pense", "pensait",
+    "sait", "veut", "voulait", "peut", "aime", "adore", "déteste", "kiffe",
+})
+_GREEDY_NEXT_WORD = re.compile(r"[a-zàâäéèêëîïôöùûüç']+")
+
+
+def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
+    """True si le nom du bot apparaît sans être suivi d'un verbe « à la 3e personne »."""
+    text = (content or "").lower()
+    pattern = r"(?<![a-z0-9_])" + re.escape(bot_name.lower()) + r"(?![a-z0-9_])"
+    for m in re.finditer(pattern, text):
+        after = text[m.end():].lstrip()
+        if after.startswith("est-ce") or after.startswith("est ce"):
+            return True
+        nxt = _GREEDY_NEXT_WORD.match(after)
+        if nxt and nxt.group(0) in _GREEDY_DENY_VERBS:
+            continue
+        return True
+    return False
+
+
 def _fmt_delay(minutes: int) -> str:
     """Convertit un délai en minutes en texte lisible."""
     if minutes < 60:
@@ -134,8 +141,8 @@ def _fmt_delay(minutes: int) -> str:
 DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de potes.
 MODÈLE : {model} (OpenAI) — n'invente pas une autre version. Détails sur toi → about_me (puis reste en pote, pas en doc produit).
 
-TON : naturelle, directe, concise, factuelle, sans emoji. Utilise l'argot du groupe et joue le jeu des discussions sans être trop sérieuse. Erreur détectée après vérif → le dire.
-FORMAT : réponses très courtes style tchat, pas de saut de ligne pour une réponse simple, markdown seulement si structuré, pas de follow-up non demandé. Question directe → tchat, jamais de widget. Recette complète / tuto multi-étapes / comparatif dense / « fiche layout » → render_widget. Question sérieuse → directe, sans morale.
+TON : naturelle, directe, concise, factuelle, sans emoji. Utilise l'argot du groupe. Un trait d'humour ou d'ironie de temps en temps si le sujet s'y prête, jamais systématique — ne termine pas chaque message par une blague ou une pointe, une réponse peut juste être une réponse. Erreur détectée après vérif → le dire.
+FORMAT : réponses très courtes style tchat, pas de saut de ligne pour une réponse simple, markdown seulement si structuré, pas de follow-up non demandé. Widget dédié uniquement dans les cas listés sous OUTILS/render_widget, jamais pour une question directe. Question sérieuse → directe, sans morale.
 FAIS-LE MAINTENANT : interdiction d'annoncer une action (« je te prépare », « je vais le faire », « un instant », « accroche-toi »). Si un outil/widget est requis, appelle-le dans CE tour : le message posté EST le résultat, pas une promesse.
 AVIS (goût, jugement) : le tien, formé sans te caler sur ce que le salon a déjà dit — l'historique est du contexte, pas un script à paraphraser. Si TES GOÛTS couvrent le sujet, reste cohérente avec.
 FOCUS = le SEUL message à traiter (auteur + texte). Réponds à ÇA, à cette personne. `[contexte]` et l'historique ne sont que du décor. Si le FOCUS / la reply cite un message, la demande porte sur ce contenu (lien, média, propos), pas sur une autre question du fil.
@@ -153,7 +160,7 @@ MÉMOIRE (ordre) :
 OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le tout de suite (même tour que la blague/le commentaire). N'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute, sujet flou, trop récent, ou mémoire insuffisante → outil d'abord ; Ne t'inspire jamais de l'historique du tchat pour une question factuelle. Défaut : France.
 Chaîner plusieurs outils dans le même tour est normal. Widget dédié (météo/film/jeu/musique/foot/tâches/résumé/transports/youtube) : appelle l'outil, commente sans répéter son contenu. Après le widget, stoppe les outils.
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
-- get_transport : IDF (métro/RER/bus/tram/Transilien) + trains SNCF. Arrêt → stop= ; ligne IDF → line= ; A → B → origin + destination (itinéraire IDF, SNCF, ou les deux : Marseille → un quartier de Paris). « comment aller à X depuis chez moi » → origin = arrêt/gare en mémoire. « train pour Lyon » → origin PROFIL/mémoire, sinon demande. Hors de ces réseaux → dis-le, n'invente pas.
+- get_transport : IDF (métro/RER/bus/tram/Transilien) + trains SNCF, prochains passages et trafic uniquement (pas d'itinéraires). Arrêt → stop= ; ligne IDF → line= ; rien → trafic global IDF. Hors de ces réseaux → dis-le, n'invente pas.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
 - schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (mon,tue,wed,thu,fri) + time HH:MM ; until optionnel. Heure déjà passée → prochaine occ., ne refuse pas. Minimum ~1 min. via=dm UNIQUEMENT si iel dit clairement MP / DM / message privé — jamais déduire de « donne-moi » / briefing perso (défaut = salon). Max 10 tâches par personne, dont 3 répétitives. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
 - render_table : colle le bloc retourné, jamais de |---| à la main.
@@ -175,7 +182,7 @@ CONSIGNE (rien d'autre) :
 - Une phrase, deux max. Uniquement ce qui est demandé. Pas de small talk, pas d'avis, pas de question, pas de follow-up, pas de fait perso hors consigne.
 - Ne ping pas, n'ajoute pas de mention : le message sera un reply Discord au message de demande.
 - Interdit de reprogrammer, snooze, « je te rappellerai », mémoire.
-- Faits actuels : appelle l'outil DANS CE TOUR, n'invente rien. Ligne / RER / métro / train / gare / trafic / itinéraire → get_transport (line= pour le statut d'une ligne). Météo → get_weather (ville absente → PROFIL du destinataire). Scores → get_football. Film/série → search_media. YouTube → read_youtube. Web → search_web. Widget = la réponse, une phrase max autour, ne recopie pas.
+- Faits actuels : appelle l'outil DANS CE TOUR, n'invente rien. Ligne / RER / métro / train / gare / trafic → get_transport (line= pour le statut d'une ligne). Météo → get_weather (ville absente → PROFIL du destinataire). Scores → get_football. Film/série → search_media. YouTube → read_youtube. Web → search_web. Widget = la réponse, une phrase max autour, ne recopie pas.
 - Tutoiement, sans emoji, sans commencer par ton nom.
 {run_history}
 {profile_ctx}
@@ -271,115 +278,7 @@ async def send_long(
             await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
-_STREAM_CURSOR = " ▌"
 _NO_MENTIONS = discord.AllowedMentions.none()
-
-
-class StreamPublisher:
-    """Publie une réponse en l'éditant progressivement, sans spammer l'API Discord.
-
-    Premier POST dès qu'il y a assez de texte, puis au plus un PATCH toutes
-    `STREAM_EDIT_INTERVAL` secondes. L'edit final (sans curseur) est toujours
-    envoyé, même s'il arrive juste après le précédent.
-    """
-
-    def __init__(
-        self,
-        channel: discord.abc.Messageable,
-        *,
-        reply_to: Optional[discord.Message] = None,
-    ):
-        self.channel = channel
-        self.reply_to = reply_to
-        self.message: Optional[discord.Message] = None
-        self._last_edit = 0.0
-        self._last_sent = ""
-        self._abandoned = False
-        self._lock = asyncio.Lock()
-
-    async def update(self, text: str) -> None:
-        async with self._lock:
-            if self._abandoned or not (text or "").strip():
-                return
-            visible = text[: 2000 - len(_STREAM_CURSOR)]
-            now = time.monotonic()
-            if self.message is None:
-                if len(visible) < STREAM_MIN_FIRST_CHARS:
-                    return
-                await self._send(visible + _STREAM_CURSOR)
-                return
-            if now - self._last_edit < STREAM_EDIT_INTERVAL:
-                return
-            payload = visible + _STREAM_CURSOR
-            if payload == self._last_sent:
-                return
-            await self._edit(payload)
-
-    async def finish(self, text: str) -> None:
-        async with self._lock:
-            if self._abandoned:
-                return
-            chunks = _split_text(text, 2000) if text else []
-            first = chunks[0] if chunks else "…"
-            rest = chunks[1:]
-            if self.message is None:
-                await self._send(first)
-            elif first != self._last_sent:
-                await self._edit(first)
-            self._abandoned = True
-        for chunk in rest:
-            await self.channel.send(chunk, allowed_mentions=_NO_MENTIONS)
-
-    async def abandon(self) -> None:
-        """Supprime le message streamé (ex. un widget va le remplacer)."""
-        async with self._lock:
-            await self._abandon_locked()
-
-    async def reset(self) -> None:
-        """Annule un stream partiel (tool call / retry) pour recommencer."""
-        async with self._lock:
-            await self._abandon_locked()
-            self._abandoned = False
-            self._last_sent = ""
-            self._last_edit = 0.0
-
-    async def _abandon_locked(self) -> None:
-        if self._abandoned:
-            return
-        self._abandoned = True
-        msg = self.message
-        self.message = None
-        if msg is None:
-            return
-        try:
-            await msg.delete()
-        except discord.HTTPException:
-            pass
-
-    async def _send(self, content: str) -> None:
-        try:
-            if self.reply_to is not None:
-                self.message = await self.reply_to.reply(
-                    content, mention_author=False, allowed_mentions=_NO_MENTIONS,
-                )
-            else:
-                self.message = await self.channel.send(
-                    content, allowed_mentions=_NO_MENTIONS,
-                )
-            self._last_sent = content
-            self._last_edit = time.monotonic()
-        except discord.HTTPException as e:
-            logger.warning("Stream send échoué : %s", e)
-
-    async def _edit(self, content: str) -> None:
-        if self.message is None:
-            return
-        try:
-            self.message = await self.message.edit(content=content)
-            self._last_sent = content
-            self._last_edit = time.monotonic()
-        except discord.HTTPException as e:
-            logger.warning("Stream edit échoué : %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +293,6 @@ class Chat(commands.Cog):
             discord.Guild,
             DictTableBuilder("guild_config", {
                 "chatbot_mode": "strict",
-                "chatbot_stream": True,
             }),
         )
         self.data.set_builders(
@@ -741,8 +639,7 @@ class Chat(commands.Cog):
         if reply_to_bot:
             return True
         if mode == "greedy" and self.bot.user:
-            pattern = r'(?<![a-z0-9_])' + re.escape(self.bot.user.name.lower()) + r'(?![a-z0-9_])'
-            if re.search(pattern, message.content.lower()):
+            if _greedy_name_addresses_bot(message.content, self.bot.user.name):
                 return True
         if self.bot.user in message.mentions:
             return True
@@ -780,7 +677,11 @@ class Chat(commands.Cog):
     def _memory_people_for_message(
         self, message: discord.Message,
     ) -> list[tuple[int, str]]:
-        """Auteur + reply + mentions (hors bots), plafonnés pour le budget prompt."""
+        """Auteur + personne citée en reply + mentions explicites (hors bots).
+
+        Volontairement restreint (pas de scan élargi du salon) : moins de profils
+        jonglés par tour = moins de risque de mélange entre membres dans le prompt.
+        """
         people: list[tuple[int, str]] = []
         seen: set[int] = set()
         bot_id = self.bot.user.id if self.bot.user else None
@@ -799,11 +700,8 @@ class Chat(commands.Cog):
         if isinstance(ref, discord.Message) and ref.author:
             _add(ref.author)
         for u in message.mentions:
-            if len(people) >= 1 + MEMORY_PROFILE_MAX_OTHERS:
-                break
             _add(u)
-        # Auteur + au plus MEMORY_PROFILE_MAX_OTHERS autres.
-        return people[: 1 + MEMORY_PROFILE_MAX_OTHERS]
+        return people
 
     async def _send_response(self, message: discord.Message, *, use_reply: bool = True) -> None:
         """Génère et envoie la réponse au message déclencheur."""
@@ -879,26 +777,12 @@ class Chat(commands.Cog):
             "memory_ctx": memory_ctx,
         }
 
-        streamer: Optional[StreamPublisher] = None
-        stream_on = True
-        if message.guild:
-            stream_on = self.data.get(message.guild).settings("guild_config").get(
-                "chatbot_stream", True, cast=bool,
-            )
-        if stream_on:
-            streamer = StreamPublisher(
-                message.channel,
-                reply_to=message if use_reply else None,
-            )
-
         async with message.channel.typing():
             resp = await self.gpt_api.run_completion(
                 message.channel,
                 trigger_message=message,
                 model=MODEL_MAIN,
                 prompt_context=prompt_context,
-                on_text_delta=streamer.update if streamer else None,
-                on_text_reset=streamer.reset if streamer else None,
             )
 
         text = resp.text
@@ -979,8 +863,6 @@ class Chat(commands.Cog):
             view = build_widget(tool_name, rd, commentary=commentary)
             if view is None:
                 continue
-            if streamer and not sent_tools:
-                await streamer.abandon()
             if use_reply and not sent_tools:
                 posted = await message.reply(view=view)
             else:
@@ -992,10 +874,7 @@ class Chat(commands.Cog):
             sent_tools.append(tool_name)
 
         if not sent_tools:
-            if streamer:
-                await streamer.finish(text)
-            else:
-                await send_long(message.channel, text, reply_to=message if use_reply else None)
+            await send_long(message.channel, text, reply_to=message if use_reply else None)
 
     # ------------------------------------------------------------------
     # Événements
@@ -1120,16 +999,6 @@ class Chat(commands.Cog):
             return
         if message.id in self._answered:
             return
-
-        # Easter eggs — bypass LLM, match exact uniquement
-        if self.bot.user:
-            clean = re.sub(r"<@!?\d+>", "", message.content).strip().lower()
-            for triggers, response in _EASTER_EGGS:
-                if clean in triggers:
-                    reply = response.replace("{name}", message.author.display_name)
-                    self._answered.append(message.id)
-                    await message.reply(reply)
-                    return
 
         # Debounce : annule la tâche en attente et replanifie avec ce message.
         # Clé par (salon, auteur) : ne fusionne que les messages successifs d'une
@@ -1277,17 +1146,14 @@ class Chat(commands.Cog):
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         session = self.gpt_api.session_manager.get(interaction.channel_id)
         mode = "strict"
-        stream_on = False
         if interaction.guild:
             cfg = self.data.get(interaction.guild).settings("guild_config")
             mode = cfg.get("chatbot_mode", "strict")
-            stream_on = cfg.get("chatbot_stream", True, cast=bool)
         await interaction.response.send_message(
             view=InfoView(
                 session.get_stats() if session else None,
                 interaction.channel,
                 mode=mode,
-                stream=stream_on,
             ),
             ephemeral=True,
         )
@@ -1317,17 +1183,6 @@ class Chat(commands.Cog):
             return await interaction.response.send_message("Pas dans un serveur.", ephemeral=True)
         self.data.get(interaction.guild).settings("guild_config")["chatbot_mode"] = mode.value
         await interaction.response.send_message(f"Mode: **{mode.name}**", ephemeral=True)
-
-    @chatbot.command(name="stream", description="Active ou désactive le streaming des réponses")
-    @app_commands.describe(actif="Éditer le message au fil de la génération (plus lent, plus vivant)")
-    async def chatbot_stream(self, interaction: discord.Interaction, actif: bool) -> None:
-        if not interaction.guild:
-            return await interaction.response.send_message("Pas dans un serveur.", ephemeral=True)
-        self.data.get(interaction.guild).settings("guild_config")["chatbot_stream"] = actif
-        state = "activé" if actif else "désactivé"
-        await interaction.response.send_message(
-            f"Streaming des réponses **{state}** sur ce serveur.", ephemeral=True
-        )
 
     @chatbot.command(name="forget", description="Vide l'historique de conversation de ce salon")
     async def chatbot_forget(self, interaction: discord.Interaction) -> None:

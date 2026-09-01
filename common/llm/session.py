@@ -6,7 +6,7 @@ import logging
 import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 import discord
 
@@ -29,6 +29,7 @@ from .attachments import AttachmentCache, process_attachment
 from .capabilities import (
     build_capability_ctx,
     collect_capability_flags,
+    momentum_flags,
     select_tool_names,
 )
 
@@ -38,6 +39,12 @@ logger = logging.getLogger("llm.session")
 # Le pseudo+id lisible va dans le *contenu* du message, pas dans ce champ.
 USER_FORMAT = "{message.author.name}"
 MAX_RECURSION = 8
+
+# Fenêtre de "momentum" pour le gating d'outils : un outil de recherche appelé
+# récemment garde son flag ouvert quelques tours (question de suivi sur un titre
+# propre sans mot-clé, deuxième recherche web qui enchaîne sur la première…).
+_MOMENTUM_MESSAGES = 20
+_MOMENTUM_WINDOW = timedelta(minutes=10)
 
 # Fuites de tokens / placeholders connus côté modèle — filet de sécurité, pas un
 # vrai fix côté modèle. VEVENT = jargon iCal d'outils internes OpenAI ;
@@ -484,15 +491,12 @@ class ChannelSession:
         *,
         model: Optional[str] = None,
         prompt_context: Optional[dict] = None,
-        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
         skip_focus: bool = False,
     ) -> AssistantRecord:
         async with self._lock:
             self._prompt_context = prompt_context
             return await self._run(
                 trigger_message, 0, model=model,
-                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
                 skip_focus=skip_focus,
             )
 
@@ -502,8 +506,6 @@ class ChannelSession:
         depth: int,
         *,
         model: Optional[str] = None,
-        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
         skip_focus: bool = False,
         allow_tools: bool = True,
         widget_done: bool = False,
@@ -603,25 +605,15 @@ class ChannelSession:
                 tools = self.tool_registry.get_compiled()
             else:
                 flags = collect_capability_flags(focus_msg, cited)
+                flags |= momentum_flags(self._recent_tool_names())
                 names = select_tool_names(self.tool_registry.names(), flags)
                 tools = self.tool_registry.get_compiled(names)
-        stream = on_text_delta is not None
-
-        async def _delta(raw: str) -> None:
-            if on_text_delta is None:
-                return
-            cleaned = _strip_leaked_tokens(raw) if raw else raw
-            if cleaned:
-                await on_text_delta(cleaned)
 
         try:
             completion = await self.client.chat(
                 messages=messages,
                 tools=tools if tools else None,
                 model=model,
-                stream=stream,
-                on_text_delta=_delta if stream else None,
-                on_text_reset=on_text_reset if stream else None,
             )
         except MariaOpenAIError as e:
             if "invalid_image_url" in str(e):
@@ -631,9 +623,6 @@ class ChannelSession:
                     messages=messages,
                     tools=tools if tools else None,
                     model=model,
-                    stream=stream,
-                    on_text_delta=_delta if stream else None,
-                    on_text_reset=on_text_reset if stream else None,
                 )
             else:
                 raise
@@ -678,20 +667,11 @@ class ChannelSession:
         )
 
         if tool_calls:
-            if on_text_reset is not None:
-                try:
-                    await on_text_reset()
-                except Exception:
-                    logger.exception("on_text_reset")
             await self._execute_tools(tool_calls)
-            # Un widget va porter le commentaire : ne pas streamer le texte
-            # (sinon le message s'affiche puis se fait remplacer).
             widget_coming = any(has_widget(tc.function_name) for tc in tool_calls)
             next_widget = widget_done or widget_coming
             return await self._run(
                 None, depth + 1, model=model,
-                on_text_delta=None if next_widget else on_text_delta,
-                on_text_reset=None if next_widget else on_text_reset,
                 skip_focus=skip_focus,
                 allow_tools=allow_tools and not next_widget,
                 widget_done=next_widget,
@@ -701,11 +681,6 @@ class ChannelSession:
             # Widget déjà là : le vide est une réponse valide, pas un prétexte à relancer.
             if widget_done or depth + 1 >= MAX_RECURSION:
                 return assistant
-            if on_text_reset is not None:
-                try:
-                    await on_text_reset()
-                except Exception:
-                    logger.exception("on_text_reset")
             self.context._messages.pop()
             retry = (
                 "[SYSTEM] Rédige maintenant le message à poster "
@@ -717,7 +692,6 @@ class ChannelSession:
             self.context.add_user_message(components=[TextComponent(retry)], name="system")
             return await self._run(
                 None, depth + 1, model=model,
-                on_text_delta=on_text_delta, on_text_reset=on_text_reset,
                 skip_focus=skip_focus,
                 allow_tools=allow_tools,
                 widget_done=widget_done,
@@ -742,7 +716,7 @@ class ChannelSession:
                 resp = await tool.execute(tc, self)
                 self.context.add_message(resp)
             except Exception as e:
-                logger.error(f"Outil {tc.function_name}: {e}")
+                logger.error(f"Outil {tc.function_name}: {e}", exc_info=True)
                 self.context.add_message(
                     ToolResponseRecord(
                         tool_call_id=tc.id,
@@ -756,6 +730,18 @@ class ChannelSession:
         text = note.strip()
         if text:
             self._recent_system_notes.append((datetime.now(timezone.utc), text))
+
+    def _recent_tool_names(self) -> set[str]:
+        """Noms des outils appelés récemment (fenêtre messages + temps) pour le momentum de gating."""
+        names: set[str] = set()
+        cutoff = datetime.now(timezone.utc) - _MOMENTUM_WINDOW
+        for m in reversed(self.context.get_recent_messages(_MOMENTUM_MESSAGES)):
+            created_at = getattr(m, "created_at", None)
+            if created_at is not None and created_at < cutoff:
+                break
+            for tc in getattr(m, "tool_calls", None) or []:
+                names.add(tc.function_name)
+        return names
 
     def _build_context_hint(self, max_age_minutes: int = 20, limit: int = 3) -> str:
         """Retourne une ligne '[CONTEXTE RÉCENT]' avec les dernières notes système pertinentes.

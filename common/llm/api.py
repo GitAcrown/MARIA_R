@@ -1,7 +1,7 @@
 """Façade publique de l'API GPT."""
 
 import logging
-from typing import Awaitable, Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 import discord
 
@@ -109,16 +109,12 @@ class MariaGptApi:
         *,
         model: Optional[str] = None,
         prompt_context: Optional[dict] = None,
-        on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_text_reset: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> MariaResponse:
         session = self.session_manager.get_or_create(channel)
         assistant = await session.run_completion(
             trigger_message,
             model=model,
             prompt_context=prompt_context,
-            on_text_delta=on_text_delta,
-            on_text_reset=on_text_reset,
         )
 
         tool_responses, used_tools = _collect_run_artifacts(session, assistant)

@@ -32,12 +32,6 @@ DEBOUNCE_SECONDS: float = 0.33
 # arrive dans cette fenêtre après le message d'origine.
 EDIT_TRIGGER_SECONDS: float = 10
 
-# Streaming Discord (édition progressive du message)
-# Discord limite ~5 PATCH / 5 s par message : 1,2 s laisse une marge, plus l'edit final.
-STREAM_EDIT_INTERVAL: float = 1.2
-# Ne pas poster le premier message à la première lettre (évite un flash "M").
-STREAM_MIN_FIRST_CHARS: int = 8
-
 # Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
 # Lots plus gros = meilleur contexte (gags, attribution).
 # Flush hybride : lecture passive plus lente ; dialogue avec MARIA flush plus tôt.
@@ -53,7 +47,6 @@ MEMORY_EXISTING_LIMIT = 20
 MEMORY_BATCH_OVERLAP = 6
 # Mini-profils injectés à chaque réponse (auteur + mentions/reply).
 MEMORY_PROFILE_FACTS = 5
-MEMORY_PROFILE_MAX_OTHERS = 3
 # Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).
 MEMORY_SELF_FACTS = 6
 # Dédup sémantique à la création (distance cosine Chroma) : en dessous de ce seuil,

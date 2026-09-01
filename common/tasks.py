@@ -45,6 +45,10 @@ WEEKDAYS_FR = {
 }
 
 MAX_SEND_RETRIES = 3
+# Backoff croissant appliqué par TaskStore.retry_later, indexé par le compteur
+# de retries après incrément (1ère → 2e → 3e tentative).
+_RETRY_BACKOFF_SECONDS = {1: 30, 2: 120, 3: 300}
+_RETRY_BACKOFF_SECONDS_MAX = 300
 TASK_MAX_PENDING = 10
 TASK_MAX_RECURRING = 3
 TASK_MIN_MINUTES = 1
@@ -627,7 +631,11 @@ class TaskStore:
         return nxt
 
     def retry_later(self, task_id: int, error: str) -> int:
-        """Remet pending + incrément retries. Retourne le nouveau compteur."""
+        """Remet pending + incrément retries, avec un backoff croissant sur execute_at.
+
+        Sans ce délai, `TaskWorker._loop` reclaim immédiatement une tâche due après un
+        échec : les MAX_SEND_RETRIES tentatives s'enchaîneraient quasi instantanément.
+        """
         with _db() as conn:
             conn.execute(
                 """
@@ -637,7 +645,14 @@ class TaskStore:
                 (STATUS_PENDING, (error or "")[:300], task_id),
             )
             row = conn.execute("SELECT retries FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return row[0] if row else MAX_SEND_RETRIES
+            retries = row[0] if row else MAX_SEND_RETRIES
+            delay_seconds = _RETRY_BACKOFF_SECONDS.get(retries, _RETRY_BACKOFF_SECONDS_MAX)
+            next_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            conn.execute(
+                "UPDATE tasks SET execute_at=? WHERE id=?",
+                (next_at.isoformat(), task_id),
+            )
+        return retries
 
     def edit(
         self,

@@ -61,7 +61,6 @@ class InfoView(discord.ui.LayoutView):
         channel,
         *,
         mode: str = "strict",
-        stream: bool = False,
     ):
         super().__init__(timeout=60)
         ch_name = getattr(channel, "name", str(getattr(channel, "id", "?")))
@@ -75,8 +74,7 @@ class InfoView(discord.ui.LayoutView):
             "greedy": "Mention + nom",
         }
         mode_str = mode_labels.get(mode, mode)
-        stream_str = "oui" if stream else "non"
-        config = discord.ui.TextDisplay(f"**Mode** · {mode_str}\n**Streaming** · {stream_str}")
+        config = discord.ui.TextDisplay(f"**Mode** · {mode_str}")
 
         if stats:
             ctx = stats["context_stats"]

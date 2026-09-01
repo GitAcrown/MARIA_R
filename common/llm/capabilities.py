@@ -75,9 +75,26 @@ _WEB_PAGE_RE = re.compile(
     re.I,
 )
 _YT_WORD_RE = re.compile(r"\b(?:youtube|youtu\.be|\byt\b|shorts)\b", re.I)
+_WEATHER_RE = re.compile(
+    r"\b(?:m[eé]t[eé]o|pluie|pleu(?:t|voir|voir[ao])|neige|neiger?|"
+    r"degr[eé]s?|temp[eé]rature|soleil|ensoleill[eé]|nuageux|nuages?|"
+    r"orage|vent[eé]?|canicule|froid|chaud|gel[eé]e?|humidit[eé]|"
+    r"temps qu'il (?:fait|fera|va faire)|pr[eé]visions?)\b",
+    re.I,
+)
+# Déclencheur "à froid" pour film/série/jeu/musique — souvent complété par le
+# momentum de session (titre propre sans mot-clé, question de suivi…).
+_MEDIA_TOPIC_RE = re.compile(
+    r"\b(?:films?|s[eé]ries?|saisons?|[eé]pisodes?|acteurs?|actrices?|"
+    r"r[eé]alisateurs?|sortie|streaming|netflix|bande[- ]annonce|trailer|"
+    r"jeux?(?:[- ]vid[eé]o)?|gameplay|speedrun|niveau|boss|dlc|manette|"
+    r"console|playstation|xbox|steam|chansons?|albums?|musiques?|"
+    r"playlist|artistes?|clip|paroles?)\b",
+    re.I,
+)
 
 # Outils envoyés seulement si le flag correspondant est présent.
-# Tout le reste (météo, search_web, mémoire, etc.) reste toujours exposé.
+# Tout le reste (search_web, mémoire, etc.) reste toujours exposé.
 _GATED_TOOLS: dict[str, str] = {
     "read_youtube": "youtube",
     "read_web_page": "web",
@@ -86,7 +103,27 @@ _GATED_TOOLS: dict[str, str] = {
     "get_football": "football",
     "summarize_channel": "summary",
     "render_widget": "layout",
+    "get_weather": "weather",
+    "search_media": "media_topic",
+    "search_game": "media_topic",
+    "search_track": "media_topic",
 }
+
+# Momentum de session : un outil récemment appelé garde son flag "chaud" quelques
+# tours, pour ne pas rater les questions de suivi (titre propre sans mot-clé,
+# deuxième recherche web qui enchaîne sur la première…).
+_MOMENTUM_TOOL_FLAGS: dict[str, str] = {
+    "search_media": "media_topic",
+    "search_game": "media_topic",
+    "search_track": "media_topic",
+    "search_web": "web",
+    "search_images": "images_search",
+    "read_web_page": "web",
+}
+
+
+def momentum_flags(recent_tool_names) -> set[str]:
+    return {_MOMENTUM_TOOL_FLAGS[n] for n in recent_tool_names if n in _MOMENTUM_TOOL_FLAGS}
 
 _HINTS: tuple[tuple[str, str], ...] = (
     ("youtube", "- YouTube : read_youtube (sous-titres auteur ou auto). Pas l'image ni le son. Pas de summarize_channel. Si l'outil échoue / pas de sous-titres → dis-le, n'invente pas."),
@@ -199,6 +236,10 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("images_search")
         if _WEB_PAGE_RE.search(text):
             flags.add("web")
+        if _WEATHER_RE.search(text):
+            flags.add("weather")
+        if _MEDIA_TOPIC_RE.search(text):
+            flags.add("media_topic")
         for url in _urls_in(msg):
             host = _host(url)
             ext = _path_ext(url)

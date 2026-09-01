@@ -50,7 +50,7 @@ class Tool:
                 created_at=datetime.now(timezone.utc),
             )
         except Exception as e:
-            logger.error(f"Outil {self.name}: {e}")
+            logger.error(f"Outil {self.name}: {e}", exc_info=True)
             return ToolResponseRecord(
                 tool_call_id=tool_call.id,
                 response_data={"error": str(e)},
