@@ -9,6 +9,7 @@ import discord
 from common.activity import ActivityTracker, KIND_MESSAGE, KIND_SUMMON
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import SMALL_CHART
+from common.funstat import FunStatTracker
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 
 # Nombre maximum de membres renvoyés par get_server_users.
@@ -40,10 +41,16 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
         lines = [f"{i + 1}. **{it['name']}** — {it['count']} {unit}" for i, it in enumerate(items)]
         return discord.ui.TextDisplay(f"**{title}**\n" + "\n".join(lines))
 
+    fun = data.get("fun_stat") if isinstance(data.get("fun_stat"), dict) else None
+    if fun and fun.get("items"):
+        members_block = _ranked_block(fun.get("title") or "Stat du moment", fun["items"], fun.get("unit") or "fois")
+    else:
+        members_block = _ranked_block("Membres les plus bavards", data.get("top_members") or [], "messages")
+
     blocks = [
         b for b in (
             _ranked_block("Salons les plus actifs", data.get("top_channels") or [], "messages"),
-            _ranked_block("Membres les plus bavards", data.get("top_members") or [], "messages"),
+            members_block,
             _ranked_block("Sollicitent le plus MARIA", data.get("top_summoners") or [], "fois"),
         ) if b is not None
     ]
@@ -58,7 +65,7 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
     return layout_with_commentary(discord.ui.Container(*children), commentary)
 
 
-def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
+def build_discord_tools(activity: ActivityTracker, funstat: FunStatTracker) -> list[Tool]:
     """Construit les outils d'introspection serveur / membres / salons."""
 
     async def _tool_server_users(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -178,9 +185,23 @@ def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
             m = guild.get_member(uid)
             return m.display_name if m else "membre parti"
 
+        fun_raw = funstat.visible_ranking(guild.id, limit=3)
+        fun_stat = None
+        if fun_raw:
+            title, unit, rows = fun_raw
+            fun_stat = {
+                "title": title,
+                "unit": unit,
+                "items": [{"name": _member_name(uid), "count": n} for uid, n in rows],
+            }
+
+        summary = f"Stats de {guild.name} sur {days} j affichées (vue). Ne les récite pas."
+        if fun_stat:
+            summary += f" Classement fun visible : {fun_stat['title']}."
+
         return ToolResponseRecord(tc.id, {
             "_tool": "get_server_stats",
-            "_llm_summary": f"Stats de {guild.name} sur {days} j affichées (vue). Ne les récite pas.",
+            "_llm_summary": summary,
             "guild_name": guild.name,
             "guild_icon": str(guild.icon.url) if guild.icon else None,
             "member_count": guild.member_count,
@@ -189,6 +210,7 @@ def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
             "top_channels": [{"name": _channel_name(cid), "count": n} for cid, n in top_channels_raw],
             "top_members": [{"name": _member_name(uid), "count": n} for uid, n in top_members_raw],
             "top_summoners": [{"name": _member_name(uid), "count": n} for uid, n in top_summoners_raw],
+            "fun_stat": fun_stat,
         }, datetime.now(timezone.utc))
 
     return [
@@ -217,8 +239,10 @@ def build_discord_tools(activity: ActivityTracker) -> list[Tool]:
             name="get_server_stats",
             description=(
                 "Statistiques communautaires du serveur sur les 7 derniers jours : salon le plus "
-                "actif, membres les plus bavards, membres qui te sollicitent le plus. Vue dédiée, "
-                "aucun paramètre. Uniquement si on demande explicitement les stats/l'activité du serveur."
+                "actif, membres les plus bavards, membres qui te sollicitent le plus. Parfois un "
+                "classement fun (running gag du serveur, déjà en cours) remplace les plus bavards "
+                "— tu ne le déclenches pas, tu n'en parles pas s'il n'est pas dans le résultat. "
+                "Aucun paramètre. Uniquement si on demande explicitement les stats/l'activité du serveur."
             ),
             properties={},
             function=_tool_server_stats,

@@ -17,6 +17,7 @@ from discord.ext import commands, tasks
 
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
+from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.emojis import SMALL_BRAIN, SMALL_POLL, SMALL_TASK, SMALL_WEB
 from common.llm import MariaGptApi, Tool, resolve_message_reference
@@ -330,6 +331,7 @@ class Chat(commands.Cog):
         self.memory_vectors = VectorStore(bot.config["OPENAI_API_KEY"])
         self._memory_worker: Optional[MemoryWorker] = None
         self.activity = ActivityTracker()
+        self.funstat = FunStatTracker()
         self.polls = PollStore()
 
         def developer_prompt(context: Optional[dict] = None) -> str:
@@ -409,6 +411,7 @@ class Chat(commands.Cog):
         register_widget("summarize_channel", build_channel_summary_view)
         register_widget("get_server_stats", build_server_stats_view)
         self._activity_flush.start()
+        self._funstat_rotate.start()
         await self._register_tools_from_cogs()
 
     async def cog_unload(self) -> None:
@@ -417,7 +420,9 @@ class Chat(commands.Cog):
         if self._memory_worker:
             await self._memory_worker.stop()
         self._activity_flush.cancel()
+        self._funstat_rotate.cancel()
         await asyncio.to_thread(self.activity.flush)
+        await asyncio.to_thread(self.funstat.flush)
         unregister_widget("show_tasks")
         unregister_widget("summarize_channel")
         unregister_widget("get_server_stats")
@@ -427,6 +432,42 @@ class Chat(commands.Cog):
     @tasks.loop(seconds=60)
     async def _activity_flush(self) -> None:
         await asyncio.to_thread(self.activity.flush)
+        await asyncio.to_thread(self.funstat.flush)
+
+    @tasks.loop(hours=1)
+    async def _funstat_rotate(self) -> None:
+        for guild in list(self.bot.guilds):
+            try:
+                await self._roll_funstat(guild)
+            except Exception as e:
+                logger.warning("Fun-stat %s : %s", guild.id, e, exc_info=True)
+
+    @_funstat_rotate.before_loop
+    async def _before_funstat_rotate(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _roll_funstat(self, guild: discord.Guild, *, force: bool = False) -> bool:
+        if not force and not self.funstat.needs_roll(guild.id):
+            return False
+        memories = await asyncio.to_thread(
+            lambda: self.memory_store.list_server(guild.id, limit=25),
+        )
+        texts = [m.content.strip() for m in memories if (m.content or "").strip()]
+        recent = await asyncio.to_thread(self.funstat.recent_patterns, guild.id)
+        proposed = await propose_campaign(
+            self.gpt_api.client,
+            model=MODEL_MAIN,
+            guild_name=guild.name,
+            memories=texts,
+            recent_patterns=recent,
+        )
+        if not proposed:
+            return False
+        title, unit, kind, pattern = proposed
+        self.funstat.start_campaign(
+            guild.id, title=title, unit=unit, kind=kind, pattern=pattern,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Tâches planifiées
@@ -643,7 +684,7 @@ class Chat(commands.Cog):
 
         # Outils propres au cog Chat.
         tools.extend(build_task_tools(self.tasks))
-        tools.extend(build_discord_tools(self.activity))
+        tools.extend(build_discord_tools(self.activity, self.funstat))
         tools.extend(build_memory_tools(
             self.memory_store, self.memory_vectors, bot=self.bot,
         ))
@@ -1088,6 +1129,11 @@ class Chat(commands.Cog):
             self.activity.bump_message(message.guild.id, message.channel.id, message.author.id)
             if should_respond:
                 self.activity.bump_summon(message.guild.id, message.channel.id, message.author.id)
+            self.funstat.observe(
+                message.guild.id,
+                message.author.id,
+                message.clean_content or message.content or "",
+            )
 
         mem_content = _build_memory_ingest_text(message, bot_user=self.bot.user)
         if message.guild and self._memory_worker and mem_content:
@@ -1250,6 +1296,33 @@ class Chat(commands.Cog):
             can_manage=_is_memory_mod(interaction.user),
         )
         await interaction.followup.send(view=view, ephemeral=True)
+
+    @commands.command(name="funstat", hidden=True)
+    @commands.is_owner()
+    async def cmd_funstat(self, ctx: commands.Context, action: Optional[str] = None) -> None:
+        """Aperçu / relance du compteur fun de la vue stats (serveur courant).
+
+        `funstat`       → campagne en cours
+        `funstat roll`  → force un nouveau tirage (LLM + mémoire)
+        """
+        if not ctx.guild:
+            await ctx.send("Uniquement sur un serveur.")
+            return
+        if (action or "").lower() == "roll":
+            ok = await self._roll_funstat(ctx.guild, force=True)
+            if not ok:
+                await ctx.send("Pas de nouveau compteur (mémoire trop mince ou motif rejeté).")
+                return
+        snap = self.funstat.peek(ctx.guild.id)
+        if not snap:
+            await ctx.send("Aucune campagne fun-stat en cours.")
+            return
+        ts = int(snap["expires_at"].timestamp())
+        vis = "visible" if snap["revealed"] else f"cachée ({snap['total']} hits / {snap['users']} pers.)"
+        await ctx.send(
+            f"**{snap['title']}** · {vis}\n"
+            f"`{snap['kind']}` `{snap['pattern']}` · expire <t:{ts}:R>"
+        )
 
     @commands.command(name="mempurge", hidden=True)
     @commands.is_owner()
