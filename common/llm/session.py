@@ -115,6 +115,10 @@ def _strip_leaked_tokens(text: str) -> str:
 INGESTED_IDS_MAX = 500
 
 _API_NAME_BAD_RE = re.compile(r"[\s<|\\/>]+")
+# Aliases connus + le vrai nick Discord. Sert à retirer le ping en tête
+# (« Maria passage… ») pour que luna ne prenne pas ça pour une étiquette de tour.
+_BOT_NAME_ALIASES = ("Maria", "MARIA", "marie")
+_IDENTITY_PUNCT_RE = re.compile(r"^[\s\"'«»*_`]+|[\s\"'«»*_`.,!?:;…\-—]+$")
 
 
 def _api_message_name(message: discord.Message) -> str:
@@ -122,6 +126,64 @@ def _api_message_name(message: discord.Message) -> str:
     raw = (message.author.name or "user").strip() or "user"
     safe = _API_NAME_BAD_RE.sub("_", raw).strip("_") or "user"
     return f"{safe}_{message.author.id}"
+
+
+def _bot_identity(message: Optional[discord.Message]) -> tuple[Optional[int], list[str]]:
+    """Id Discord du bot + noms à retirer en tête d'un message adressé."""
+    names = list(_BOT_NAME_ALIASES)
+    if message is None:
+        return None, names
+    me = getattr(getattr(message, "guild", None), "me", None)
+    if me is None:
+        return None, names
+    for attr in ("name", "display_name", "global_name"):
+        val = getattr(me, attr, None)
+        if isinstance(val, str) and val.strip():
+            names.append(val.strip())
+    # Dédup en gardant les plus longs d'abord (évite de rater « MARIA »).
+    uniq = sorted({n for n in names if n}, key=len, reverse=True)
+    return me.id, uniq
+
+
+def _strip_bot_address(text: str, *, bot_id: Optional[int], names: list[str]) -> str:
+    """Retire un ping / nom de bot en tête (« @MARIA … » / « Maria, … »)."""
+    out = (text or "").strip()
+    if not out:
+        return out
+    if bot_id is not None:
+        out = re.sub(rf"^<@!?{bot_id}>\s*", "", out)
+    for n in names:
+        nxt = re.sub(
+            rf"^{re.escape(n)}\b[\s,.:;!?\u2026\-—]*",
+            "",
+            out,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if nxt != out:
+            out = nxt
+            break
+    return out.lstrip()
+
+
+def _is_identity_stub(text: str, names: list[str]) -> bool:
+    """True si la complétion n'est que le nom du bot (fuite d'étiquette de tour)."""
+    t = _IDENTITY_PUNCT_RE.sub("", (text or "").strip())
+    if not t or len(t) > 24:
+        return False
+    folded = t.casefold()
+    return any(folded == n.casefold() for n in names)
+
+
+def _payload_plain_text(msg: dict) -> str:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "") for p in content if isinstance(p, dict)
+        )
+    return ""
 
 
 def _display_user_label(message: discord.Message) -> str:
@@ -427,9 +489,13 @@ class ChannelSession:
         # ne les traite pas comme une question qui lui est posée.
         msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
         ctx_tag = "[contexte] " if is_context_only else ""
-        if text.strip():
+        shown = (message.clean_content or text).strip()
+        if not is_context_only:
+            bot_id, bot_names = _bot_identity(message)
+            shown = _strip_bot_address(shown, bot_id=bot_id, names=bot_names)
+        if shown:
             parts.append(TextComponent(
-                f"{ctx_tag}[{msg_time}] {display_name}: {message.clean_content}"
+                f"{ctx_tag}[{msg_time}] {display_name}: {shown}"
             ))
         elif message.embeds or message.components or (
             not is_context_only and (message.stickers or message.attachments)
@@ -573,13 +639,28 @@ class ChannelSession:
         self.context.developer_prompt = self.developer_prompt_template(prompt_ctx)
 
         messages = self.context.prepare_payload()
+        # Une complétion « Maria » déjà entrée dans l'historique recollerait
+        # le modèle en étiquette de tour — on l'ôte du payload de ce tour.
+        _, bot_names = _bot_identity(focus_msg)
+        if bot_names:
+            messages = [
+                m for m in messages
+                if not (
+                    m.get("role") == "assistant"
+                    and not m.get("tool_calls")
+                    and _is_identity_stub(_payload_plain_text(m), bot_names)
+                )
+            ]
 
         # Injecter une note éphémère (non persistée) pour indiquer le trigger au LLM.
         # skip_focus : tâches planifiées — le FOCUS tchat (« réponds à l'auteur »)
         # ferait prendre la consigne pour une nouvelle demande au lieu de l'exécuter.
         if depth == 0 and trigger and not skip_focus:
             author = f"{trigger.author.name} ({trigger.author.id})"
-            content = trigger.clean_content.strip()
+            bot_id, bot_names = _bot_identity(trigger)
+            content = _strip_bot_address(
+                trigger.clean_content.strip(), bot_id=bot_id, names=bot_names,
+            )
             if content:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:140]} ». "
@@ -682,6 +763,14 @@ class ChannelSession:
             tool_calls = []
 
         cleaned_content = _strip_leaked_tokens(msg.content) if msg.content else msg.content
+        _, bot_names = _bot_identity(focus_msg)
+        if (
+            cleaned_content
+            and not tool_calls
+            and _is_identity_stub(cleaned_content, bot_names)
+        ):
+            logger.info("Complétion réduite au nom du bot, relance.")
+            cleaned_content = ""
         components = []
         if cleaned_content:
             components.append(TextComponent(cleaned_content))
