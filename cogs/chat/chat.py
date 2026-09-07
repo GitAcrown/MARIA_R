@@ -110,8 +110,15 @@ _TASK_TOOL_DENY: frozenset[str] = frozenset({
 # elle (« Maria est bête », « Maria pense que… »). Liste courte et volontairement
 # limitée : imparfait par nature, mais sans coût/latence ajoutés (pas d'appel LLM).
 _GREEDY_DENY_VERBS = frozenset({
-    "est", "a", "avait", "était", "va", "fait", "disait", "dit", "pense", "pensait",
+    "est", "a", "avait", "était", "va", "fait", "disait", "pense", "pensait",
     "sait", "veut", "voulait", "peut", "aime", "adore", "déteste", "kiffe",
+})
+# « dit » est ambigu : 3e pers. (« Maria dit que… ») ET impératif relâché
+# (« maria dit camion » = dis « camion »). On ne le traite comme 3e pers.
+# que s'il est suivi d'un marqueur de discours rapporté.
+_GREEDY_DIT_ABOUT = frozenset({
+    "que", "qu", "ça", "ca", "cela", "toujours", "souvent", "jamais",
+    "rien", "pas", "aussi", "même", "meme",
 })
 _GREEDY_NEXT_WORD = re.compile(r"[a-zàâäéèêëîïôöùûüç']+")
 
@@ -127,6 +134,13 @@ def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
         nxt = _GREEDY_NEXT_WORD.match(after)
         if nxt and nxt.group(0) in _GREEDY_DENY_VERBS:
             continue
+        if nxt and nxt.group(0) == "dit":
+            rest = after[nxt.end():].lstrip()
+            if rest.startswith("qu'"):
+                continue
+            fol = _GREEDY_NEXT_WORD.match(rest)
+            if fol and fol.group(0) in _GREEDY_DIT_ABOUT:
+                continue
         return True
     return False
 
