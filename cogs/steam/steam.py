@@ -9,7 +9,7 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import section_with_thumbnail
+from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import GAMES
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.media_hub import build_media_layout
@@ -157,7 +157,7 @@ def _game_container(r: dict) -> Optional[discord.ui.Container]:
     if devs:
         meta_parts.append(f"par {devs[0]}")
     if appid:
-        meta_parts.append(f"[Steam]({STEAM_STORE.format(appid)})")
+        meta_parts.append(md_link("Steam", STEAM_STORE.format(appid)))
 
     children: list = [header, sep1, main_section]
     if meta_parts:

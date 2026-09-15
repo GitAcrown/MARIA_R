@@ -10,7 +10,7 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import section_with_thumbnail
+from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.media_hub import build_media_layout
@@ -189,7 +189,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     tmdb_id = r.get("id")
     footer_parts = extra[:]
     if tmdb_id:
-        footer_parts.append(f"[TMDB](https://www.themoviedb.org/{media_type}/{tmdb_id})")
+        footer_parts.append(md_link("TMDB", f"https://www.themoviedb.org/{media_type}/{tmdb_id}"))
 
     children: list = [header, sep1, main_section]
     if footer_parts:

@@ -23,7 +23,7 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.discord_ui import layout_with_commentary, md_link, section_with_thumbnail
 from common.emojis import YOUTUBE
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.widgets import register_widget, unregister_widget
@@ -207,7 +207,7 @@ def _youtube_container(data: dict) -> Optional[discord.ui.Container]:
     if data.get("truncated"):
         meta.append("début seulement")
     if url.startswith("http"):
-        meta.append(f"[YouTube]({url})")
+        meta.append(md_link("YouTube", url))
     if meta:
         body_lines.append(f"-# {' · '.join(meta)}")
     main = section_with_thumbnail(discord.ui.TextDisplay("\n".join(body_lines)), thumb)

@@ -11,7 +11,7 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import section_with_thumbnail
+from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import MUSIC
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.media_hub import build_media_layout
@@ -160,7 +160,7 @@ def _track_container(t: dict) -> Optional[discord.ui.Container]:
     if explicit:
         meta.append("🅴")
     if url:
-        meta.append(f"[Spotify]({url})")
+        meta.append(md_link("Spotify", url))
     if meta:
         body_lines.append(f"-# {' · '.join(meta)}")
     body_block = discord.ui.TextDisplay("\n".join(body_lines))

@@ -1,8 +1,38 @@
 """Helpers de construction de vues Discord (components v2) partagés par les cogs."""
 
+from __future__ import annotations
+
+import re
 from typing import Optional
 
 import discord
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!<)(https?://[^)\s]+)\)", re.I)
+_BARE_URL_RE = re.compile(r"(?<![<(])https?://[^\s<>]+", re.I)
+
+
+def md_link(label: str, url: str) -> str:
+    """Lien markdown Discord sans aperçu (URL encapsulée dans <>)."""
+    return f"[{label}](<{url}>)"
+
+
+def suppress_link_embeds(text: str) -> str:
+    """Empêche l'unfurl : `[texte](<url>)` et URLs nues en `<url>`."""
+    if not text:
+        return text
+    text = _MD_LINK_RE.sub(lambda m: f"[{m.group(1)}](<{m.group(2)}>)", text)
+
+    def _bare(m: re.Match) -> str:
+        url = m.group(0)
+        trail = ""
+        while url and url[-1] in ".,;:!?":
+            trail = url[-1] + trail
+            url = url[:-1]
+        if not url:
+            return m.group(0)
+        return f"<{url}>{trail}"
+
+    return _BARE_URL_RE.sub(_bare, text)
 
 
 def layout_with_commentary(
@@ -15,7 +45,7 @@ def layout_with_commentary(
     """
     view = discord.ui.LayoutView(timeout=None)
     if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
+        view.add_item(discord.ui.TextDisplay(suppress_link_embeds(commentary)))
         view.add_item(discord.ui.Separator())
     view.add_item(body)
     return view

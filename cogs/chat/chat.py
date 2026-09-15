@@ -16,6 +16,7 @@ logger = logging.getLogger("MARIA.Chat")
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from common.discord_ui import suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
 from common.funstat import FunStatTracker, propose_campaign
@@ -210,6 +211,15 @@ def _source_domain(url: str) -> str:
     return host
 
 
+def _foot_tag(title: str, detail: str = "") -> str:
+    """Ligne d'outil discrète : **Mot** · détail."""
+    title = (title or "").strip()
+    detail = (detail or "").strip()
+    if title and detail:
+        return f"**{title}** · {detail}"
+    return f"**{title}**" if title else detail
+
+
 def _source_footer_line(tool_responses) -> str:
     """Une ligne de domaines cliquables (max 3) — jamais d'URL inventée par le modèle."""
     seen_host: set[str] = set()
@@ -232,10 +242,12 @@ def _source_footer_line(tool_responses) -> str:
             if not domain or domain in seen_host:
                 continue
             seen_host.add(domain)
-            bits.append(f"[{domain}]({url})")
+            bits.append(f"[{domain}](<{url}>)")
             if len(bits) >= 3:
-                return " · ".join(bits)
-    return " · ".join(bits)
+                break
+        if len(bits) >= 3:
+            break
+    return _foot_tag("Source", " · ".join(bits)) if bits else ""
 
 
 DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de potes.
@@ -370,7 +382,7 @@ async def send_long(
     reply_to: Optional[discord.Message] = None,
     max_len: int = 2000,
 ) -> list[discord.Message]:
-    chunks = _split_text(text, max_len)
+    chunks = _split_text(suppress_link_embeds(text), max_len)
     posted: list[discord.Message] = []
     for i, chunk in enumerate(chunks):
         if i == 0 and reply_to:
@@ -703,7 +715,7 @@ class Chat(commands.Cog):
         async def _post(*, content: str = "", view=None, first: bool) -> discord.Message:
             kwargs: dict = {}
             if content:
-                kwargs["content"] = content
+                kwargs["content"] = suppress_link_embeds(content)
             if view is not None:
                 kwargs["view"] = view
             if first and origin is not None:
@@ -1007,7 +1019,7 @@ class Chat(commands.Cog):
         visible_parts: list[str] = []
         source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
-            visible_parts.append("mémoire")
+            visible_parts.append(_foot_tag("Mémoire"))
             for mem in memories:
                 try:
                     await asyncio.to_thread(self.memory_store.bump_confidence, mem.id)
@@ -1022,48 +1034,49 @@ class Chat(commands.Cog):
                 continue
             if name == "search_web":
                 q = _clip_q(args.get("query", ""))
-                label = f"recherche « {q} »" if q else "recherche"
+                label = _foot_tag("Recherche", f"« {q} »" if q else "")
             elif name == "search_images":
                 q = _clip_q(args.get("query", ""))
-                label = f"images « {q} »" if q else "images"
+                label = _foot_tag("Images", f"« {q} »" if q else "")
             elif name == "read_web_page":
                 domain = _source_domain((args.get("url") or "").strip())
-                label = domain if domain else "lecture"
+                label = _foot_tag("Lecture", domain)
             elif name == "schedule_task":
                 desc = _clip_q(args.get("instruction") or args.get("title") or "", 48)
                 execute_at_str = (args.get("execute_at") or "").strip()
+                extra: list[str] = []
+                if desc:
+                    extra.append(f"« {desc} »")
                 if execute_at_str:
                     try:
                         dt = datetime.fromisoformat(execute_at_str)
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=PARIS_TZ)
-                        ts = int(dt.timestamp())
-                        delay_str = f" · <t:{ts}:f>"
+                        extra.append(f"<t:{int(dt.timestamp())}:f>")
                     except ValueError:
-                        delay_str = f" · {execute_at_str}"
+                        extra.append(execute_at_str)
                 else:
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
-                    delay_str = f" · dans {_fmt_delay(total)}" if total else ""
-                label = (
-                    f"tâche · « {desc} »{delay_str}"
-                    if desc else f"tâche{delay_str}"
-                )
+                    if total:
+                        extra.append(f"dans {_fmt_delay(total)}")
+                label = _foot_tag("Tâche", " · ".join(extra))
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
-                label = f"tâche · {action}" if action else "tâche"
+                label = _foot_tag("Tâche", action)
             elif name == "search_memory":
                 q = _clip_q(args.get("query") or "")
-                label = f"mémoire « {q} »" if q else "mémoire"
+                label = _foot_tag("Mémoire", f"« {q} »" if q else "")
             elif name == "remember_fact":
                 fact = _clip_q(args.get("fact") or "", 48)
-                label = f"retenu · « {fact} »" if fact else "retenu"
+                label = _foot_tag("Retenu", f"« {fact} »" if fact else "")
             elif name == "forget_fact":
-                label = "oublié"
+                label = _foot_tag("Oublié")
             elif name == "create_poll":
                 q = _clip_q(args.get("question") or "")
-                label = f"sondage « {q} »" if q else "sondage"
+                label = _foot_tag("Sondage", f"« {q} »" if q else "")
             else:
-                label = name.replace("_", " ")
+                words = [w.capitalize() for w in name.replace("_", " ").split() if w]
+                label = _foot_tag(" ".join(words[:2]) or "Outil")
             if label not in visible_parts:
                 visible_parts.append(label)
         if source_line:
@@ -1107,7 +1120,7 @@ class Chat(commands.Cog):
             return
 
         if edit_target is not None:
-            chunks = _split_text(text, 2000)
+            chunks = _split_text(suppress_link_embeds(text), 2000)
             if len(chunks) == 1:
                 try:
                     await edit_target.edit(content=chunks[0], allowed_mentions=_NO_MENTIONS)

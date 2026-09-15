@@ -12,7 +12,7 @@ from typing import Optional
 
 import discord
 
-from common.discord_ui import section_with_thumbnail
+from common.discord_ui import section_with_thumbnail, suppress_link_embeds
 
 _MAX_BLOCKS = 12
 _MAX_STAT_ITEMS = 6
@@ -41,7 +41,7 @@ def _truncate_clean(text: str, limit: int) -> str:
 
 
 def _text_block(content: str) -> discord.ui.TextDisplay:
-    return discord.ui.TextDisplay(_truncate_clean(content, _MAX_TEXT))
+    return discord.ui.TextDisplay(_truncate_clean(suppress_link_embeds(content), _MAX_TEXT))
 
 
 def _stat_row_block(items) -> Optional[discord.ui.TextDisplay]:
@@ -123,14 +123,14 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
         elif btype == "footer":
             text = (raw.get("text") or "").strip()
             if text:
-                children.append(discord.ui.TextDisplay(f"-# {text}"))
+                children.append(discord.ui.TextDisplay(f"-# {suppress_link_embeds(text)}"))
 
     if not children:
         return None
 
     view = discord.ui.LayoutView(timeout=None)
     if commentary:
-        view.add_item(discord.ui.TextDisplay(commentary))
+        view.add_item(discord.ui.TextDisplay(suppress_link_embeds(commentary)))
         view.add_item(discord.ui.Separator())
     view.add_item(discord.ui.Container(*children))
 

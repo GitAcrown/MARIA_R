@@ -19,6 +19,8 @@ from typing import Callable, Iterator, Optional
 
 import discord
 
+from common.discord_ui import suppress_link_embeds
+
 logger = logging.getLogger("MARIA.DynWidgets")
 
 DATA_DIR = Path("data")
@@ -272,7 +274,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
             return None
         view = discord.ui.LayoutView(timeout=None)
         if rec.commentary:
-            view.add_item(discord.ui.TextDisplay(rec.commentary))
+            view.add_item(discord.ui.TextDisplay(suppress_link_embeds(rec.commentary)))
             view.add_item(discord.ui.Separator())
         view.add_item(body)
         return view
@@ -292,7 +294,7 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
         tabs_in_card = True
     view = discord.ui.LayoutView(timeout=None)
     if rec.commentary:
-        view.add_item(discord.ui.TextDisplay(rec.commentary))
+        view.add_item(discord.ui.TextDisplay(suppress_link_embeds(rec.commentary)))
         view.add_item(discord.ui.Separator())
     if live and len(labels) >= 2 and not tabs_in_card:
         for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
