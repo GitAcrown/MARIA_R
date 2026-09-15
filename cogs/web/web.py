@@ -413,8 +413,8 @@ class Web(commands.Cog):
                     "error": "Aucun résultat",
                     "query": q,
                     "reformulate_hint": (
-                        "Reformule avec un nom propre, une date, un lieu ou un terme plus précis, "
-                        "puis rappelle search_web."
+                        "Aucun hit. Une seule reformulation plus précise "
+                        "(nom, date, lieu), puis search_web une fois — pas une série."
                     ),
                 },
                 datetime.now(timezone.utc),
@@ -426,9 +426,9 @@ class Web(commands.Cog):
                 "query": q,
                 "results": sources,
                 "note": (
-                    "Cite uniquement ces ids (s1, s2…). "
-                    "Si les extraits sont minces, read_web_page sur l'URL. "
-                    "N'invente aucune URL."
+                    "Les liens partent en footer. N'écris pas [s1]/[s2] dans le tchat. "
+                    "Si tu sourcer, nomme le site dans la phrase. "
+                    "Une recherche suffit : réponds, ou read_web_page si l'extrait est trop court."
                 ),
             },
             datetime.now(timezone.utc),
@@ -510,10 +510,10 @@ class Web(commands.Cog):
             Tool(
                 name="search_web",
                 description=(
-                    "Recherche web pour l'actualité, les faits du monde réel, les dates, "
-                    "chiffres, définitions ou toute info potentiellement obsolète. "
-                    "PAS pour un avis, une blague, ou ce qui s'est dit dans le salon. "
-                    "Les résultats portent des ids (s1, s2…) : cite-les, n'invente pas d'URL."
+                    "Recherche web (actu, faits, dates, chiffres). Une seule requête par question. "
+                    "Si les extraits suffisent, réponds ; sinon read_web_page sur l'URL. "
+                    "Pas de 2e search_web pour confirmer. Les liens sont en footer : "
+                    "n'écris pas [s1]/[s2], nomme le site dans la phrase si besoin."
                 ),
                 properties={
                     "query": {"type": "string", "description": "Requête précise (noms, date, lieu)"},

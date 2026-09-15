@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import layout_with_commentary
-from common.emojis import REPEAT_REMINDER, SMALL_TASK
+from common.emojis import SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
     SCHEDULE_DAILY,
@@ -87,7 +87,7 @@ def _format_widget_line(item: dict) -> str:
             until = f" · jusqu'au <t:{item['until_at_ts']}:d>"
         dest = " · MP" if item.get("deliver_dm") else ""
         return (
-            f"-# {REPEAT_REMINDER} · <t:{ts}:f> · "
+            f"-# <t:{ts}:f> · "
             f"{item.get('schedule_label', kind)}{until}{dest}{status_bit}\n› {desc}"
         )
     dest = " · MP" if item.get("deliver_dm") else ""

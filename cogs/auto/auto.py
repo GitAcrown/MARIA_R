@@ -109,8 +109,8 @@ class Auto(commands.Cog):
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
         suffix = (
-            f"\n-# {TRANSCRIPT} {requester_name}"
-            if requester_name else f"\n-# {TRANSCRIPT} auto"
+            f"\n-# {requester_name}"
+            if requester_name else "\n-# auto"
         )
         await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
         await self._ingest_transcript(reply_to, transcript)

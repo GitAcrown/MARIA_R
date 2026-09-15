@@ -1004,7 +1004,24 @@ class ChannelSession:
         return assistant
 
     async def _execute_tools(self, tool_calls: list[ToolCallRecord]) -> None:
+        search_web_done = False
         for tc in tool_calls:
+            if tc.function_name == "search_web":
+                if search_web_done:
+                    self.context.add_message(
+                        ToolResponseRecord(
+                            tool_call_id=tc.id,
+                            response_data={
+                                "error": (
+                                    "Une search_web suffit. Utilise ces résultats "
+                                    "ou read_web_page, ne relance pas."
+                                ),
+                            },
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    continue
+                search_web_done = True
             tool = self.tool_registry.get(tc.function_name)
             if not tool:
                 logger.warning(f"Outil inconnu : {tc.function_name}")

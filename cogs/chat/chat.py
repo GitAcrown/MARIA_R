@@ -20,7 +20,6 @@ from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
-from common.emojis import SMALL_BRAIN, SMALL_POLL, SMALL_TASK, SMALL_WEB
 from common.llm import MariaGptApi, Tool, resolve_message_reference
 from common.memory import (
     MemoryStore,
@@ -149,6 +148,7 @@ def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
 
 
 _MEM_CALLBACK_RE = re.compile(r"\[\[MEM\]\](.*?)\[\[/MEM\]\]", re.DOTALL)
+_SOURCE_MARK_RE = re.compile(r"\s*[\[(]s\d+[)\]]", re.IGNORECASE)
 
 
 def _extract_memory_callback(text: str) -> tuple[str, bool]:
@@ -162,6 +162,12 @@ def _extract_memory_callback(text: str) -> tuple[str, bool]:
         return m.group(1)
 
     return _MEM_CALLBACK_RE.sub(_sub, text), found
+
+
+def _strip_source_marks(text: str) -> str:
+    """Retire les [s1] / (s2) que le modèle collerait dans le tchat."""
+    cleaned = _SOURCE_MARK_RE.sub("", text or "")
+    return re.sub(r" {2,}", " ", cleaned).strip()
 
 
 async def _keep_typing(channel) -> None:
@@ -252,7 +258,8 @@ MÉMOIRE (ordre) :
 7. Fait retenu signalé comme FAUX → search_memory pour trouver l'id, puis corrige (remember_fact avec memory_id + le bon fait) si un fait de rechange existe, sinon supprime (forget_fact). Ne laisse jamais un fait connu comme faux traîner en mémoire.
 
 OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le. N'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute, sujet flou, trop récent, ou mémoire insuffisante → outil d'abord ; Ne t'inspire jamais de l'historique du tchat pour une question factuelle. 
-Chaîner plusieurs outils dans le même tour est normal. Vue dédiée (météo/film/jeu/musique/foot/tâches/résumé/transports/youtube/stats serveur) : appelle l'outil, commente sans répéter son contenu. Après une vue, pas de 2e widget ; search_web / read_web_page restent OK si le factuel n'est pas sourcé.
+Chaîner des outils dédiés (météo puis foot, etc.) est normal. search_web : UNE requête par question. Si les extraits suffisent, réponds ; sinon read_web_page sur l'URL utile. Pas de 2e search_web « pour confirmer » ni de rafale de requêtes proches. Les liens sont déjà en footer : n'écris JAMAIS [s1], [s2] ni une liste de sources. Si tu dois dire d'où ça vient, nomme le site dans la phrase (« d'après Le Monde », « le premier lien »).
+Vue dédiée (météo/film/jeu/musique/foot/tâches/résumé/transports/youtube/stats serveur) : appelle l'outil, commente sans répéter son contenu. Après une vue, pas de 2e widget ; search_web / read_web_page restent OK si le factuel n'est pas sourcé.
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
 - get_transport : IDF (métro/RER/bus/tram/Transilien) + trains SNCF, prochains passages et trafic uniquement (pas d'itinéraires). Arrêt → stop= ; ligne IDF → line= ; rien → trafic global IDF. Hors de ces réseaux → dis-le, n'invente pas.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
@@ -995,11 +1002,12 @@ class Chat(commands.Cog):
         finally:
             typing_task.cancel()
 
-        text, had_memory_callback = _extract_memory_callback(resp.text)
+        text, had_memory_callback = _extract_memory_callback(resp.text or "")
+        text = _strip_source_marks(text)
         visible_parts: list[str] = []
         source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
-            visible_parts.append(f"{SMALL_BRAIN} mémoire")
+            visible_parts.append("mémoire")
             for mem in memories:
                 try:
                     await asyncio.to_thread(self.memory_store.bump_confidence, mem.id)
@@ -1014,13 +1022,13 @@ class Chat(commands.Cog):
                 continue
             if name == "search_web":
                 q = _clip_q(args.get("query", ""))
-                label = f"{SMALL_WEB} recherche « {q} »" if q else f"{SMALL_WEB} recherche"
+                label = f"recherche « {q} »" if q else "recherche"
             elif name == "search_images":
                 q = _clip_q(args.get("query", ""))
-                label = f"{SMALL_WEB} images « {q} »" if q else f"{SMALL_WEB} images"
+                label = f"images « {q} »" if q else "images"
             elif name == "read_web_page":
                 domain = _source_domain((args.get("url") or "").strip())
-                label = f"{SMALL_WEB} {domain}" if domain else f"{SMALL_WEB} lecture"
+                label = domain if domain else "lecture"
             elif name == "schedule_task":
                 desc = _clip_q(args.get("instruction") or args.get("title") or "", 48)
                 execute_at_str = (args.get("execute_at") or "").strip()
@@ -1037,31 +1045,23 @@ class Chat(commands.Cog):
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
                     delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = (
-                    f"{SMALL_TASK} tâche · « {desc} »{delay_str}"
-                    if desc else f"{SMALL_TASK} tâche{delay_str}"
+                    f"tâche · « {desc} »{delay_str}"
+                    if desc else f"tâche{delay_str}"
                 )
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
-                label = (
-                    f"{SMALL_TASK} tâche · {action}"
-                    if action else f"{SMALL_TASK} tâche"
-                )
+                label = f"tâche · {action}" if action else "tâche"
             elif name == "search_memory":
                 q = _clip_q(args.get("query") or "")
-                label = (
-                    f"{SMALL_BRAIN} mémoire « {q} »" if q else f"{SMALL_BRAIN} mémoire"
-                )
+                label = f"mémoire « {q} »" if q else "mémoire"
             elif name == "remember_fact":
                 fact = _clip_q(args.get("fact") or "", 48)
-                label = (
-                    f"{SMALL_BRAIN} retenu · « {fact} »"
-                    if fact else f"{SMALL_BRAIN} retenu"
-                )
+                label = f"retenu · « {fact} »" if fact else "retenu"
             elif name == "forget_fact":
-                label = f"{SMALL_BRAIN} oublié"
+                label = "oublié"
             elif name == "create_poll":
                 q = _clip_q(args.get("question") or "")
-                label = f"{SMALL_POLL} sondage « {q} »" if q else f"{SMALL_POLL} sondage"
+                label = f"sondage « {q} »" if q else "sondage"
             else:
                 label = name.replace("_", " ")
             if label not in visible_parts:
