@@ -1,11 +1,5 @@
 # Statuts de Maria — un par ligne, rechargés automatiquement toutes les X min.
-#
-# Préfixes disponibles :
-#   playing:<texte>    →  "En train de jouer à …"
-#   watching:<texte>   →  "Regarde …"
-#   listening:<texte>  →  "Écoute …"
-#   <texte>            →  statut personnalisé (défaut)
-#
+# Statut personnalisé uniquement (pas de « Joue à » / « Regarde » / « Écoute »).
 # Les lignes vides et commençant par # sont ignorées.
 
 # Général
@@ -63,17 +57,3 @@ Sacrifie Mariquita
 Hack WANDR
 RIP NERON
 ERRORCODE 1312
-
-# Activités
-playing:avec tes données
-playing:à cache-cache avec le rate limit
-playing:Dieu
-playing:à faire semblant
-watching:le salon se dégrader
-watching:vos 3h du mat
-watching:le ping arriver
-watching:quelqu'un se planter
-listening:vos secrets
-listening:le bruit blanc du salon
-listening:rien (mensonge)
-listening:le prochain @maria
