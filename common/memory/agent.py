@@ -47,8 +47,8 @@ _MEMORY_SCHEMA = {
                             "content": {
                                 "type": "string",
                                 "description": (
-                                    "Fait précis et naturel (≤22 mots), avec le détail utile "
-                                    "(date, lieu, titre, nom…). "
+                                    "Grand fait durable (≤18 mots) : ville, boulot, anniv, "
+                                    "lien nommé, goût ancré avec le titre. "
                                     "Perso : « Pseudo : fait » SANS id. "
                                     "Lien : « Alice (111) ↔ Bob (222) : coloc depuis 2023 »."
                                 ),
@@ -75,58 +75,49 @@ _MEMORY_SCHEMA = {
     },
 }
 
-_SYSTEM_PROMPT = """Tu extrais des souvenirs pour MARIA (petit Discord entre potes).
+_SYSTEM_PROMPT = """Tu extrais des souvenirs DURABLES pour MARIA (petit Discord entre potes).
+Le fil du jour est déjà dans le résumé de session : n'en refais PAS des souvenirs.
 
-RÈGLE D'OR — PRÉCISION OU RIEN :
-- Un souvenir doit contenir le détail concret utile (quoi / qui / où / quand assez pour
-  le réutiliser plus tard sans le fil). Pas de détail → n'extrais PAS.
-- KO : « aime les jeux », « habite quelque part », « anniversaire le… », « gag du serveur »,
-  « joue souvent », formulations coupées ou vagues.
-- OK : « anniversaire le 22 juillet 1999 », « habite à Saint-Ouen (95) »,
-  « main Jett en ranked Valorant », « Running gag : kebab commandé à 4h du mat ».
-- N'invente aucun détail absent du lot. Mieux vaut [] qu'un fait flou.
+RÈGLE D'OR — CARTE D'IDENTITÉ, PAS LE JOURNAL :
+- Un souvenir = un grand fait sur UNE personne, encore vrai dans des mois.
+  OK : « Alice : habite à Saint-Ouen (95) », « Bob : anniversaire le 22 juillet 1999 »,
+  « Chloé : main Jett en ranked Valorant », « Alice (111) ↔ Bob (222) : coloc depuis 2023 ».
+- KO : ce soir / cette semaine, un score, la météo, un gag, un avis, « a regardé X »,
+  « aime les jeux », « habite quelque part », formulations coupées.
+- Pas d'identité durable → n'extrais PAS. Mieux vaut [] que trois petits faits.
+- N'invente aucun détail absent du lot.
 
-DATES RELATIVES → toujours résoudre en date absolue avant d'écrire le fait (AUJOURD'HUI = {current_date}).
-« demain », « après-demain », « ce week-end », « lundi prochain », « dans 3 jours »… lus tels quels
-deviendraient faux dès le lendemain. Calcule la date réelle et écris-la (ex. « demain » un jeudi 12/03
-→ « voyage prévu le 13/03 »). Fait avec date relative non résolue → n'extrais PAS plutôt que de la garder.
+DATES RELATIVES → toujours résoudre en date absolue (AUJOURD'HUI = {current_date}).
+« demain », « ce week-end », « lundi prochain »… lus tels quels deviennent faux le lendemain.
+Calcule la date réelle. Date relative non résolue → skip.
+Un plan daté (voyage, soirée) n'est PAS de l'identité : skip, le résumé de session s'en charge.
 
-DIRECT vs PASSIF (critique pour le perso) :
-- Lignes marquées `[→ MARIA]` = l'humain parle À MARIA (mention / reply au bot).
-  Fait perso précis ici → PRIORITAIRE, à retenir volontiers (toujours avec détail).
-- Lignes sans `[→ MARIA]` = lecture passive du salon. PERSO beaucoup plus prudent :
-  seulement faits très clairs, non ambigus, non sarcastiques. En cas de doute → skip.
-- Collectif : OK depuis le passif si le gag/habitude est identifiable et précis.
+DIRECT vs PASSIF :
+- `[→ MARIA]` = parle À MARIA. À retenir seulement si c'est identitaire, pas un caprice du tour.
+- Sans `[→ MARIA]` = passif. Encore plus strict : net, non sarcastique. Doute → skip.
+- Lien durable seulement : « Alice (111) ↔ Bob (222) : coloc ».
 
-TROIS BARRES :
-1) COLLECTIF (server/event) — plus ouvert, mais toujours précis.
-   Gags nommables, habitudes concrètes, soirées/voyages clairement identifiés.
-   Plusieurs gens → server. user_id=null, stable=false, pas d'ids Discord dans content.
-2) PERSO (user) — précis + prudent surtout en passif.
-   DIRECT `[→ MARIA]` : affirmations à MARIA = bonne source.
-   PASSIF : seulement si affirmé net / répété. Liens : « Alice (111) ↔ Bob (222) : coloc ».
-   Pattern (2e fois) → déduction hedgée précise ; 1re → observation détaillée.
+COLLECTIF : presque jamais. Pas d'event (soirée, voyage = résumé). server seulement
+si habitude de groupe durable et nommable. user_id=null, stable=false, pas d'ids dans content.
+
 BOT = « {bot_name} » / MARIA.
 JAMAIS category=self (goûts MARIA) — gérés ailleurs, réservés au créateur.
-JAMAIS category=user avec l'id du bot.
-Blagues sur le bot → ignore, sauf gag collectif précis → server.
+JAMAIS category=user avec l'id du bot. Blagues sur le bot → ignore.
 
-IGNORE : actu/score du jour, blabla, image non décrite, transfert non repris,
-banter one-shot sans ancrage, tout fait sans détail réutilisable.
+IGNORE : actu, blabla, image, banter, humeur, ce que le résumé de session couvre déjà.
 
 ATTRIBUTION :
 - `[HH:MM] Pseudo (id) [répond à …]: texte`. « je/mon » = auteur de la ligne.
 - Fait dans l'extrait cité = la cible (sauf « moi aussi/pareil »).
 - Reply au bot + fait perso → auteur humain. user_id / ids ∈ lot. Doute sur qui → skip.
 
-STYLE — naturel, une info, prêt à être relu :
+STYLE — une info, prêt à être relu :
 - user : « Alice : anniversaire le 22 juillet 1999 »
-- server : « Running gag : kebab à 4h du mat »
 - Pas de « le membre », « a dit que », « semble », pas de troncature « … ».
 
 stable=true : anniv / date de naissance avec jour+mois (année si dite). Sinon false.
-Même sujet en SOUVENIRS → update/merge (target_id) en enrichissant le détail, pas de doublon.
-create = MESSAGES NOUVEAUX seulement. Max 8 actions."""
+Même sujet en SOUVENIRS → update/merge (target_id) en enrichissant, pas de doublon.
+create = MESSAGES NOUVEAUX seulement. Max {max_actions} actions. Souvent 0, rarement plus d'1."""
 
 
 async def extract_memories(
@@ -136,7 +127,7 @@ async def extract_memories(
     batch_text: str,
     existing: list[Memory],
     bot_name: str = "MARIA",
-    max_actions: int = 8,
+    max_actions: int = 3,
     prior_text: str = "",
 ) -> list[dict]:
     """Appelle le LLM d'extraction et renvoie la liste d'actions mémoire."""
@@ -154,9 +145,11 @@ async def extract_memories(
 
     now = datetime.now(PARIS_TZ)
     current_date = f"{now.strftime('%A %d/%m/%Y')} {now.strftime('%H:%M')}"
-    system = _SYSTEM_PROMPT.format(bot_name=bot_name or "MARIA", current_date=current_date)
-    if max_actions != 8:
-        system = system.replace("Max 8 actions.", f"Max {max_actions} actions.")
+    system = _SYSTEM_PROMPT.format(
+        bot_name=bot_name or "MARIA",
+        current_date=current_date,
+        max_actions=max_actions,
+    )
 
     if prior_text.strip():
         messages_block = (
@@ -175,13 +168,13 @@ async def extract_memories(
             "content": (
                 f"SOUVENIRS existants :\n{existing_block}\n\n"
                 f"{messages_block}\n\n"
-                "Priorise les faits PRÉCIS des lignes [→ MARIA]. "
-                "Passif perso : très sélectif. Flou → ignore. "
-                "Si rien de solide → {\"memories\": []}."
+                "Priorise les grands faits d'identité (ville, boulot, anniv, lien, goût ancré). "
+                "Le fil du jour n'est pas un souvenir. Flou / one-shot → ignore. "
+                "Si rien de durable → {\"memories\": []}."
             ),
         },
     ]
-    max_tokens = max(2000, 300 * max_actions)
+    max_tokens = max(800, 220 * max_actions)
     try:
         completion = await llm_client.chat(
             messages,

@@ -1,6 +1,7 @@
 """Contexte de conversation — fenêtre restreinte, trim simple."""
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -12,6 +13,9 @@ TOKENIZER = tiktoken.get_encoding("cl100k_base")
 # Fenêtre restreinte par défaut
 DEFAULT_WINDOW = 8192
 DEFAULT_AGE = timedelta(hours=2)
+# Budget type Honcho : messages récents vs résumé de session (tokens).
+SESSION_MSG_SHARE = 0.60
+SESSION_SUMMARY_CHARS = 1200
 
 
 @dataclass
@@ -192,6 +196,7 @@ class ConversationContext:
         self.max_messages = max_messages  # 0 = pas de limite
         self._messages: list[MessageRecord] = []
         self._needs_trim = False
+        self.session_summary: str = ""
 
     def add_message(self, msg: MessageRecord) -> None:
         self._messages.append(msg)
@@ -242,6 +247,7 @@ class ConversationContext:
     def clear(self) -> None:
         self._messages.clear()
         self._needs_trim = False
+        self.session_summary = ""
 
     def truncate_from(self, predicate) -> list["MessageRecord"]:
         """Retire du contexte le premier message qui matche `predicate` ET tout ce
@@ -279,24 +285,57 @@ class ConversationContext:
                 return age < self._SYSTEM_NOTE_MIN_AGE
             return False
 
+        aged_out = [m for m in self._messages if not _keep_by_age(m)]
         self._messages = [m for m in self._messages if _keep_by_age(m)]
         # Le prompt développeur (instructions + profils injectés) consomme aussi la fenêtre :
         # on le déduit du budget pour éviter de dépasser context_window une fois assemblé.
         dev_tokens = len(TOKENIZER.encode(self.developer_prompt)) if self.developer_prompt else 0
         effective_window = max(self.context_window - dev_tokens, 0)
+        # ~60 % messages récents / ~40 % résumé de session (injecté dans le prompt).
+        if self.session_summary:
+            msg_window = max(int(effective_window * SESSION_MSG_SHARE), 0)
+        else:
+            msg_window = effective_window
         total = 0
         kept: list[MessageRecord] = []
         for m in reversed(self._messages):
             # On conserve toujours au moins le message le plus récent, même s'il dépasse seul.
-            if self.context_window > 0 and kept and total + m.token_count > effective_window:
+            if self.context_window > 0 and kept and total + m.token_count > msg_window:
                 break
             kept.insert(0, m)
             total += m.token_count
         # Plafond de messages (garde les plus récents)
         if self.max_messages > 0 and len(kept) > self.max_messages:
             kept = kept[-self.max_messages:]
+        kept_ids = {id(m) for m in kept}
+        evicted = aged_out + [m for m in self._messages if id(m) not in kept_ids]
+        self._fold_evicted(evicted)
         self._messages = self._sanitize_tool_pairs(kept)
         self._needs_trim = False
+
+    def _fold_evicted(self, messages: list["MessageRecord"]) -> None:
+        """Compacte les messages évincés dans `session_summary` (pas d'appel LLM chaud)."""
+        bits: list[str] = []
+        for m in messages:
+            if m.role == "tool":
+                continue
+            if m.role == "user" and getattr(m, "name", None) == "system":
+                continue
+            text = (m.full_text or "").strip()
+            if not text or text.startswith("[SYSTEM]"):
+                continue
+            text = re.sub(r"\s+", " ", text)
+            if len(text) > 180:
+                text = text[:180].rstrip() + "…"
+            bits.append(text)
+        if not bits:
+            return
+        blob = " · ".join(bits)
+        prev = (self.session_summary or "").strip()
+        merged = f"{prev} | {blob}" if prev else blob
+        if len(merged) > SESSION_SUMMARY_CHARS:
+            merged = merged[-SESSION_SUMMARY_CHARS:].lstrip(" |")
+        self.session_summary = merged
 
     @staticmethod
     def _sanitize_tool_pairs(messages: list) -> list:

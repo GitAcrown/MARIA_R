@@ -12,6 +12,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import GAMES
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.media_hub import attach_media_actions
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Steam")
@@ -96,7 +97,14 @@ def build_game_view(data: dict, commentary: str = "") -> Optional[discord.ui.Lay
     container = _game_container(data["result"])
     if container is None:
         return None
-    return layout_with_commentary(container, commentary)
+    view = layout_with_commentary(container, commentary)
+    return attach_media_actions(
+        view,
+        kind="steam",
+        result=data["result"],
+        hits=data.get("hits") or [],
+        summary=data.get("_llm_summary") or "",
+    )
 
 
 def _game_container(r: dict) -> Optional[discord.ui.Container]:
@@ -184,7 +192,7 @@ class Steam(commands.Cog):
             items = r.json().get("items", [])
             if not items:
                 return {"error": f"Jeu introuvable sur Steam : {query!r}"}
-            return {"first": items[0]}
+            return {"first": items[0], "hits": items[:5]}
         except requests.RequestException as e:
             return {"error": str(e)}
 
@@ -232,6 +240,7 @@ class Steam(commands.Cog):
             "_tool":        "search_game",
             "_llm_summary": llm_summary,
             "result":       result,
+            "hits":         search.get("hits") or [first],
         }, datetime.now(timezone.utc))
 
     @property

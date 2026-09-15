@@ -14,6 +14,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import MUSIC
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.media_hub import attach_media_actions
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Spotify")
@@ -129,7 +130,14 @@ def build_track_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     container = _track_container(data["result"])
     if container is None:
         return None
-    return layout_with_commentary(container, commentary)
+    view = layout_with_commentary(container, commentary)
+    return attach_media_actions(
+        view,
+        kind="spotify",
+        result=data["result"],
+        hits=data.get("hits") or [],
+        summary=data.get("_llm_summary") or "",
+    )
 
 
 def _track_container(t: dict) -> Optional[discord.ui.Container]:
@@ -244,7 +252,8 @@ class Spotify(commands.Cog):
             best = _pick_best_track(items, query)
             if best is None:
                 return {"error": f"Morceau introuvable sur Spotify : {query!r}"}
-            return {"first": best}
+            hits = [best] + [x for x in items if x is not best][:4]
+            return {"first": best, "hits": hits}
         except requests.RequestException as e:
             return {"error": str(e)}
 
@@ -264,6 +273,7 @@ class Spotify(commands.Cog):
             "_tool":        "search_track",
             "_llm_summary": llm_summary,
             "result":       result,
+            "hits":         search.get("hits") or [result],
         }, datetime.now(timezone.utc))
 
     @property

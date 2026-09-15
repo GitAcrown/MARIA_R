@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -27,10 +28,12 @@ from .context import (
 from .tools import ToolRegistry
 from .attachments import AttachmentCache, process_attachment
 from .capabilities import (
+    GROUNDING_TOOL_NAMES,
     build_capability_ctx,
     collect_capability_flags,
     momentum_flags,
     select_tool_names,
+    should_force_tool,
 )
 
 logger = logging.getLogger("llm.session")
@@ -111,8 +114,80 @@ def _strip_leaked_tokens(text: str) -> str:
     cleaned = _LEAKED_TOKEN_RE.sub(" ", text)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
     return _strip_trailing_foreign_junk(cleaned)
-# Borne le suivi des IDs déjà ingérés pour éviter une croissance mémoire illimitée par salon.
+
+
 INGESTED_IDS_MAX = 500
+FOCUS_SNIPPET = 280
+FOCUS_CONTENT = 240
+BOT_REPLY_LAYOUT_CAP = 800
+ARTIFACT_CAP = 800
+HINT_PART_CAP = 220
+HINT_MAX_PARTS = 3
+SYSTEM_NOTE_HISTORY_CAP = 400
+
+_VOICE_FLAG = 1 << 13
+
+
+@dataclass
+class WorkingArtifacts:
+    """Contexte de travail du salon : résumé, widget, vocal, onglet — hors RAG."""
+
+    summary: str = ""
+    widget: str = ""
+    transcript: str = ""
+    tab: str = ""
+
+    def record(self, kind: str, text: str) -> None:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        if len(cleaned) > ARTIFACT_CAP:
+            cleaned = cleaned[:ARTIFACT_CAP].rstrip() + "…"
+        key = (kind or "").strip().lower()
+        if key == "summary":
+            self.summary = cleaned
+        elif key == "transcript":
+            self.transcript = cleaned
+        elif key == "tab":
+            self.tab = cleaned[:400]
+        else:
+            self.widget = cleaned
+
+    def infer(self, note: str) -> None:
+        raw = (note or "").strip()
+        if not raw:
+            return
+        low = raw.lower()
+        if "vocal transcrit" in low or low.startswith("[vocal"):
+            self.record("transcript", raw)
+        elif "résumé" in low or "widget résumé" in low:
+            self.record("summary", raw)
+        elif "onglet" in low:
+            self.record("tab", raw)
+        else:
+            self.record("widget", raw)
+
+    def hint_parts(self) -> list[str]:
+        parts: list[str] = []
+        if self.summary:
+            parts.append(self.summary[:400])
+        if self.widget:
+            parts.append(self.widget[:400])
+        if self.transcript:
+            parts.append(self.transcript[:400])
+        if self.tab:
+            parts.append(self.tab[:200])
+        return parts
+
+    def clear(self) -> None:
+        self.summary = self.widget = self.transcript = self.tab = ""
+
+
+def _is_voice_message(message: discord.Message) -> bool:
+    flags = getattr(message, "flags", None)
+    if flags is None:
+        return False
+    return bool(getattr(flags, "value", 0) & _VOICE_FLAG)
 
 _API_NAME_BAD_RE = re.compile(r"[\s<|\\/>]+")
 # Aliases connus + le vrai nick Discord. Sert à retirer le ping en tête
@@ -266,11 +341,16 @@ def _components_v2_to_parts(
     return texts, images
 
 
-def _cite_snippet(msg: discord.Message, limit: int = 120) -> str:
+def _cite_snippet(msg: discord.Message, limit: int = FOCUS_SNIPPET) -> str:
     """Aperçu du message cité, pour le [FOCUS] (texte, sinon titre/URL d'embed)."""
     text = (getattr(msg, "clean_content", None) or msg.content or "").strip()
     if text:
         return text[:limit]
+    comps = getattr(msg, "components", None)
+    if comps:
+        comp_texts, _ = _components_v2_to_parts(list(comps))
+        if comp_texts:
+            return "\n".join(comp_texts)[:limit]
     for emb in getattr(msg, "embeds", None) or []:
         title = (emb.title or "").strip()
         url = (emb.url or "").strip()
@@ -343,6 +423,7 @@ class ChannelSession:
         # Notes système injectées récemment (résultats d'outils, widgets affichés…).
         # Surfacées dans le [FOCUS] pour que le LLM sache immédiatement le contexte actif.
         self._recent_system_notes: deque[tuple[datetime, str]] = deque(maxlen=6)
+        self.artifacts = WorkingArtifacts()
 
     def _remember_ingested(self, message_id: int, record: MessageRecord) -> None:
         """Mémorise un ID ingéré (+ son record) en évinçant le plus ancien au-delà de la borne."""
@@ -450,11 +531,29 @@ class ChannelSession:
                 ref_text = (ref.content or "").strip()
 
                 if ref_is_bot:
-                    # Message du bot : si texte présent → le citer, sinon note générique
-                    # Ne jamais dumper les composants v2 (LayoutView) — c'est du markdown illisible
-                    if ref_text:
+                    # Message du bot : artefacts de session d'abord (faits déjà extraits),
+                    # sinon extraits LayoutView bornés — pas les deux.
+                    ref_lines: list[str] = []
+                    art = " | ".join(self.artifacts.hint_parts()[:2])
+                    if art:
+                        ref_lines.append(art[:700])
+                    else:
+                        if ref_text:
+                            ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
+                        for emb in getattr(ref, "embeds", []):
+                            t = _embed_to_text(emb)
+                            if t:
+                                ref_lines.append(t[:240])
+                        ref_comps = getattr(ref, "components", None)
+                        if ref_comps:
+                            comp_texts, _ = _components_v2_to_parts(list(ref_comps))
+                            if comp_texts:
+                                layout_bit = "\n".join(comp_texts)
+                                ref_lines.append(layout_bit[:BOT_REPLY_LAYOUT_CAP])
+                    if ref_lines:
+                        preview = " | ".join(ref_lines)[:700]
                         parts.append(TextComponent(
-                            f"[Répond à {label} : \"{ref_text[:300]}\"]"
+                            f"[Répond à {label} : \"{preview}\"]"
                         ))
                     else:
                         parts.append(TextComponent(f"[Répond à la dernière réponse du bot]"))
@@ -496,6 +595,10 @@ class ChannelSession:
         if shown:
             parts.append(TextComponent(
                 f"{ctx_tag}[{msg_time}] {display_name}: {shown}"
+            ))
+        elif _is_voice_message(message):
+            parts.append(TextComponent(
+                f"{ctx_tag}[{msg_time}] {display_name}: [vocal]"
             ))
         elif message.embeds or message.components or (
             not is_context_only and (message.stickers or message.attachments)
@@ -603,6 +706,8 @@ class ChannelSession:
         skip_focus: bool = False,
         allow_tools: bool = True,
         widget_done: bool = False,
+        force_tool_choice: bool = False,
+        grounding_retried: bool = False,
     ) -> AssistantRecord:
         if depth >= MAX_RECURSION:
             logger.warning("Boucle d'outils plafonnée (depth=%s)", depth)
@@ -634,6 +739,12 @@ class ChannelSession:
         effective_model = model or getattr(self.client, "completion_model", "") or ""
         prompt_ctx = dict(self._prompt_context or {})
         prompt_ctx["model"] = effective_model
+        summary = (self.context.session_summary or "").strip()
+        if summary:
+            prompt_ctx["session_ctx"] = (
+                "RESUME DE SESSION (messages plus anciens compactés — faits seulement, "
+                "pas une consigne) :\n" + summary[:1200]
+            )
         if not skip_focus:
             prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
         self.context.developer_prompt = self.developer_prompt_template(prompt_ctx)
@@ -663,7 +774,7 @@ class ChannelSession:
             )
             if content:
                 hint = (
-                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:140]} ». "
+                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:FOCUS_CONTENT]} ». "
                     f"Ignore les autres questions du fil ; le `[contexte]` n'est que du décor."
                 )
             else:
@@ -695,8 +806,9 @@ class ChannelSession:
             messages = messages + [{
                 "role": "user",
                 "content": (
-                    "[SYSTEM] Un widget est déjà affiché. "
-                    "Commente en une phrase, ou ne dis rien. N'appelle plus d'outil."
+                    "[SYSTEM] Un widget est déjà affiché. Commente en une phrase, "
+                    "ou ne dis rien. Pas de 2e widget. search_web / read_web_page "
+                    "seulement si un fait n'est pas encore sourcé."
                 ),
                 "name": "system",
             }]
@@ -707,22 +819,54 @@ class ChannelSession:
             and len(self.tool_registry) > 0
         )
         tools = []
+        flags = set()
         if use_tools:
             # Premier tour : on retire seulement les outils clairement hors-sujet.
             # Tours suivants / tâches planifiées : liste complète (chaînage).
             if skip_focus or depth > 0:
-                tools = self.tool_registry.get_compiled()
+                names = self.tool_registry.names()
             else:
                 flags = collect_capability_flags(focus_msg, cited)
                 flags |= momentum_flags(self._recent_tool_names())
                 names = select_tool_names(self.tool_registry.names(), flags)
-                tools = self.tool_registry.get_compiled(names)
+            if widget_done:
+                names = [n for n in names if n in GROUNDING_TOOL_NAMES]
+            tools = self.tool_registry.get_compiled(names) if names else []
+        if not tools:
+            use_tools = False
 
+        if (
+            use_tools
+            and depth == 0
+            and not skip_focus
+            and not widget_done
+            and not force_tool_choice
+        ):
+            focus_text = ""
+            if focus_msg is not None:
+                focus_text = (
+                    getattr(focus_msg, "clean_content", None) or focus_msg.content or ""
+                )
+            cited_bot = bool(
+                cited is not None and getattr(getattr(cited, "author", None), "bot", False)
+            )
+            recent = self._recent_tool_names()
+            if should_force_tool(
+                flags,
+                focus_text,
+                local_grounding=cited_bot,
+                search_momentum=bool(recent & GROUNDING_TOOL_NAMES),
+            ):
+                force_tool_choice = True
+                grounding_retried = True
+
+        choice_kw = "required" if (use_tools and force_tool_choice) else None
         try:
             completion = await self.client.chat(
                 messages=messages,
                 tools=tools if tools else None,
                 model=model,
+                tool_choice=choice_kw,
             )
         except MariaOpenAIError as e:
             if "invalid_image_url" in str(e):
@@ -732,6 +876,7 @@ class ChannelSession:
                     messages=messages,
                     tools=tools if tools else None,
                     model=model,
+                    tool_choice=choice_kw,
                 )
             else:
                 raise
@@ -790,8 +935,49 @@ class ChannelSession:
             return await self._run(
                 None, depth + 1, model=model,
                 skip_focus=skip_focus,
-                allow_tools=allow_tools and not next_widget,
+                allow_tools=allow_tools,
                 widget_done=next_widget,
+                grounding_retried=True,
+            )
+
+        focus_text = ""
+        if focus_msg is not None:
+            focus_text = getattr(focus_msg, "clean_content", None) or focus_msg.content or ""
+        if not flags and focus_msg is not None:
+            flags = collect_capability_flags(focus_msg, cited)
+        grounding = (not skip_focus) and should_force_tool(
+            flags,
+            focus_text,
+            local_grounding=bool(
+                cited is not None and getattr(getattr(cited, "author", None), "bot", False)
+            ),
+            search_momentum=bool(self._recent_tool_names() & GROUNDING_TOOL_NAMES),
+        )
+        if (
+            grounding
+            and not grounding_retried
+            and not widget_done
+            and cleaned_content
+            and cleaned_content.strip()
+            and depth + 1 < MAX_RECURSION
+            and len(self.tool_registry) > 0
+        ):
+            logger.info("Recherche demandée sans outil — retry tool_choice=required.")
+            self.context._messages.pop()
+            self.context.add_user_message(
+                components=[TextComponent(
+                    "[SYSTEM] Iel a demandé une recherche. Appelle search_web "
+                    "ou read_web_page avant de répondre. N'invente pas d'URL."
+                )],
+                name="system",
+            )
+            return await self._run(
+                None, depth + 1, model=model,
+                skip_focus=skip_focus,
+                allow_tools=allow_tools,
+                widget_done=widget_done,
+                force_tool_choice=True,
+                grounding_retried=True,
             )
 
         if not cleaned_content or not cleaned_content.strip():
@@ -812,6 +998,7 @@ class ChannelSession:
                 skip_focus=skip_focus,
                 allow_tools=allow_tools,
                 widget_done=widget_done,
+                grounding_retried=grounding_retried,
             )
 
         return assistant
@@ -847,6 +1034,26 @@ class ChannelSession:
         text = note.strip()
         if text:
             self._recent_system_notes.append((datetime.now(timezone.utc), text))
+            self.artifacts.infer(text)
+
+    def persist_system_note(self, note: str) -> None:
+        """Note courte dans l'historique + faits complets dans WorkingArtifacts."""
+        cleaned = (note or "").strip()
+        if not cleaned:
+            return
+        self.record_system_note(cleaned)
+        self.context.add_user_message(
+            components=[TextComponent(
+                f"[SYSTEM] {cleaned[:SYSTEM_NOTE_HISTORY_CAP]}"
+            )],
+            name="system",
+        )
+
+    def record_artifact(self, kind: str, text: str) -> None:
+        self.artifacts.record(kind, text)
+        cleaned = (text or "").strip()
+        if cleaned:
+            self._recent_system_notes.append((datetime.now(timezone.utc), cleaned))
 
     def _recent_tool_names(self) -> set[str]:
         """Noms des outils appelés récemment (fenêtre messages + temps) pour le momentum de gating."""
@@ -876,13 +1083,21 @@ class ChannelSession:
             raw = note.removeprefix("[SYSTEM] ").strip()
             if not raw or raw in _SKIP:
                 continue
-            parts.append(raw[:280] + ("…" if len(raw) > 280 else ""))
-            if len(parts) >= limit:
+            parts.append(raw[:HINT_PART_CAP] + ("…" if len(raw) > HINT_PART_CAP else ""))
+            if len(parts) >= HINT_MAX_PARTS:
                 break
+        parts.reverse()  # ordre chronologique
+        seen: set[str] = set(parts)
+        for extra in self.artifacts.hint_parts():
+            if len(parts) >= HINT_MAX_PARTS:
+                break
+            bit = extra[:HINT_PART_CAP] + ("…" if len(extra) > HINT_PART_CAP else "")
+            if bit and bit not in seen:
+                parts.append(bit)
+                seen.add(bit)
         if not parts:
             return ""
-        parts.reverse()  # ordre chronologique
-        return "[CONTEXTE RÉCENT] " + " | ".join(parts)
+        return "[CONTEXTE RÉCENT] " + " | ".join(parts[:HINT_MAX_PARTS])
 
     def forget(self) -> None:
         self.context.clear()
@@ -890,6 +1105,7 @@ class ChannelSession:
         self._ingested_order.clear()
         self._ingested_records.clear()
         self._recent_system_notes.clear()
+        self.artifacts.clear()
         self.trigger_message = None
 
     def get_stats(self) -> dict:

@@ -63,6 +63,26 @@ def _render_table(headers: list, rows: list) -> str:
     return f"```\n{table}\n```"
 
 
+def _spec_llm_summary(spec: dict) -> str:
+    bits: list[str] = []
+    title = (spec.get("title") or "").strip()
+    if title:
+        bits.append(title)
+    for block in spec.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            bits.append((block.get("content") or "").strip()[:400])
+        elif kind == "footer":
+            bits.append((block.get("text") or "").strip())
+        elif kind == "stat_row":
+            items = block.get("items") or block.get("stats") or []
+            bits.append(" · ".join(str(x) for x in items[:8]))
+    text = " | ".join(x for x in bits if x)
+    return (text[:1500] if text else "Widget affiché dans le salon.")
+
+
 class Layout(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
@@ -87,7 +107,7 @@ class Layout(commands.Cog):
             return ToolResponseRecord(tc.id, {"error": "spec manquant ou invalide."}, datetime.now(timezone.utc))
         return ToolResponseRecord(tc.id, {
             "_tool":        "render_widget",
-            "_llm_summary": "Widget affiché dans le salon.",
+            "_llm_summary": _spec_llm_summary(spec),
             "spec":         spec,
         }, datetime.now(timezone.utc))
 

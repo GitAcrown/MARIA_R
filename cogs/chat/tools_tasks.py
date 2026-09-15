@@ -138,7 +138,12 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     else:
         body = "\n\n".join(_format_widget_line(it) for it in items)
         children.append(discord.ui.TextDisplay(body))
-    return layout_with_commentary(discord.ui.Container(*children), commentary)
+    view = layout_with_commentary(discord.ui.Container(*children), commentary)
+    uid = data.get("user_id")
+    if uid:
+        from cogs.chat.views import TasksManageButton
+        view.add_item(discord.ui.ActionRow(TasksManageButton(int(uid))))
+    return view
 
 
 async def _resolve_member(ctx, args: dict) -> tuple[Optional[discord.abc.User], Optional[str]]:

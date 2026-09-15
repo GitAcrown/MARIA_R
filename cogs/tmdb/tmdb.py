@@ -13,6 +13,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.media_hub import attach_media_actions
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.TMDB")
@@ -134,7 +135,14 @@ def build_media_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     container = _media_container(data["result"])
     if container is None:
         return None
-    return layout_with_commentary(container, commentary)
+    view = layout_with_commentary(container, commentary)
+    return attach_media_actions(
+        view,
+        kind="tmdb",
+        result=data["result"],
+        hits=data.get("hits") or [],
+        summary=data.get("_llm_summary") or "",
+    )
 
 
 def _media_container(r: dict) -> Optional[discord.ui.Container]:
@@ -232,7 +240,8 @@ class TMDB(commands.Cog):
             best = _pick_best_result(results, clean_query, year)
             if best is None:
                 return {"error": f"Aucune fiche fiable pour {clean_query!r} ({year}) — probablement pas encore sur TMDB"}
-            return {"first": best}
+            hits = [best] + [x for x in results if x is not best][:4]
+            return {"first": best, "hits": hits}
         except requests.RequestException as e:
             return {"error": str(e)}
 
@@ -272,11 +281,13 @@ class TMDB(commands.Cog):
 
         result      = {**first, **details, "media_type": media_type}
         llm_summary = _media_llm_summary(result)
+        hits = search.get("hits") or [first]
 
         return ToolResponseRecord(tc.id, {
             "_tool":        "search_media",
             "_llm_summary": llm_summary,
             "result":       result,
+            "hits":         hits,
         }, datetime.now(timezone.utc))
 
     @property

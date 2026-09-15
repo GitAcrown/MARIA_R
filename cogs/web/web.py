@@ -194,7 +194,12 @@ class Web(commands.Cog):
                 body = item.get("description", "")
                 if snippets:
                     body = body + " " + " ".join(snippets[:2])
-                results.append({"title": item.get("title", ""), "url": url, "body": body.strip()})
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "body": body.strip(),
+                    "date": item.get("age") or item.get("page_age") or "",
+                })
                 if len(results) >= n:
                     break
             logger.info(f"Brave web search: {len(results)} résultat(s) pour {query!r}")
@@ -308,7 +313,12 @@ class Web(commands.Cog):
                 if not url or url in seen:
                     continue
                 seen.add(url)
-                entry: dict = {"title": r.get("title", ""), "url": url, "body": r.get("body", "")}
+                entry: dict = {
+                    "title": r.get("title", ""),
+                    "url": url,
+                    "body": r.get("body", ""),
+                    "date": r.get("date", "") or "",
+                }
                 results.append(entry)
                 if len(results) <= 2:
                     excerpt = self._crawl_page(url)
@@ -369,21 +379,58 @@ class Web(commands.Cog):
         self._search_cache[key] = (results, time.time())
         return results[:n]
 
+    @staticmethod
+    def _as_sources(results: list[dict]) -> list[dict]:
+        """Normalise les hits pour le LLM et le footer Discord (ids stables, pas d'URL inventée)."""
+        out: list[dict] = []
+        for i, item in enumerate(results, start=1):
+            snippet = (item.get("body") or item.get("excerpt") or "").strip()
+            if len(snippet) > 280:
+                snippet = snippet[:279] + "…"
+            out.append({
+                "id": f"s{i}",
+                "title": (item.get("title") or "").strip(),
+                "url": item.get("url") or "",
+                "snippet": snippet,
+                "date": (item.get("date") or "").strip(),
+            })
+        return out
+
     # ------------------------------------------------------------------
     # Tool handlers (async — exécutent le I/O bloquant dans un thread)
     # ------------------------------------------------------------------
 
     async def _tool_search(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         q = tc.arguments.get("query", "").strip()
-        lang = tc.arguments.get("lang", "fr")
+        lang = tc.arguments.get("lang", "fr") or "fr"
         if not q:
             return ToolResponseRecord(tc.id, {"error": "Requête manquante"}, datetime.now(timezone.utc))
         res = await asyncio.to_thread(self._search, q, lang, 4)
         if not res:
-            return ToolResponseRecord(tc.id, {"error": "Aucun résultat"}, datetime.now(timezone.utc))
+            return ToolResponseRecord(
+                tc.id,
+                {
+                    "error": "Aucun résultat",
+                    "query": q,
+                    "reformulate_hint": (
+                        "Reformule avec un nom propre, une date, un lieu ou un terme plus précis, "
+                        "puis rappelle search_web."
+                    ),
+                },
+                datetime.now(timezone.utc),
+            )
+        sources = self._as_sources(res)
         return ToolResponseRecord(
             tc.id,
-            {"query": q, "results": res, "note": "Utilise read_web_page sur une URL pour plus de détails."},
+            {
+                "query": q,
+                "results": sources,
+                "note": (
+                    "Cite uniquement ces ids (s1, s2…). "
+                    "Si les extraits sont minces, read_web_page sur l'URL. "
+                    "N'invente aucune URL."
+                ),
+            },
             datetime.now(timezone.utc),
         )
 
@@ -426,6 +473,11 @@ class Web(commands.Cog):
                 {"error": "C'est une vidéo YouTube — appelle read_youtube avec cette URL."},
                 datetime.now(timezone.utc),
             )
+        raw_chunk = tc.arguments.get("chunk")
+        try:
+            chunk_idx = 0 if raw_chunk is None else int(raw_chunk)
+        except (TypeError, ValueError):
+            chunk_idx = 0
         content = await asyncio.to_thread(self._crawl_page, url)
         if not content:
             domain = urlparse(url).netloc
@@ -435,9 +487,20 @@ class Web(commands.Cog):
                 datetime.now(timezone.utc),
             )
         chunks = self._chunk_text(content)
+        if not chunks:
+            chunks = [content[:CHUNK_SIZE]]
+        chunk_idx = max(0, min(chunk_idx, len(chunks) - 1))
+        next_chunk = chunk_idx + 1 if chunk_idx + 1 < len(chunks) else None
         return ToolResponseRecord(
             tc.id,
-            {"url": url, "content": chunks[0] if chunks else content[:2000], "total_chunks": len(chunks)},
+            {
+                "id": "p1",
+                "url": url,
+                "content": chunks[chunk_idx],
+                "chunk": chunk_idx,
+                "total_chunks": len(chunks),
+                "next_chunk": next_chunk,
+            },
             datetime.now(timezone.utc),
         )
 
@@ -446,17 +509,34 @@ class Web(commands.Cog):
         return [
             Tool(
                 name="search_web",
-                description="Recherche web. À utiliser pour l'actualité, les événements récents, les faits du monde réel, ou toute info potentiellement obsolète dans tes données d'entraînement.",
+                description=(
+                    "Recherche web pour l'actualité, les faits du monde réel, les dates, "
+                    "chiffres, définitions ou toute info potentiellement obsolète. "
+                    "PAS pour un avis, une blague, ou ce qui s'est dit dans le salon. "
+                    "Les résultats portent des ids (s1, s2…) : cite-les, n'invente pas d'URL."
+                ),
                 properties={
-                    "query": {"type": "string", "description": "Requête précise"},
+                    "query": {"type": "string", "description": "Requête précise (noms, date, lieu)"},
                     "lang": {"type": "string", "description": "Code langue (défaut: fr)"},
                 },
+                optional_props=["lang"],
                 function=self._tool_search,
             ),
             Tool(
                 name="read_web_page",
-                description="Lit le contenu d'une URL. Si les extraits de search_web sont insuffisants. Pas pour YouTube (read_youtube).",
-                properties={"url": {"type": "string", "description": "URL complète"}},
+                description=(
+                    "Lit le contenu d'une URL déjà obtenue (search_web ou lien du message). "
+                    "Si total_chunks > 1, rappelle avec chunk=next_chunk pour la suite. "
+                    "Pas pour YouTube (read_youtube)."
+                ),
+                properties={
+                    "url": {"type": "string", "description": "URL complète https://…"},
+                    "chunk": {
+                        "type": "integer",
+                        "description": "Index du morceau à lire (0 = début).",
+                    },
+                },
+                optional_props=["chunk"],
                 function=self._tool_read,
             ),
             Tool(

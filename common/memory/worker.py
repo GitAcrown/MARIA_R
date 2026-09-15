@@ -16,8 +16,6 @@ from common.memory.agent import extract_memories, parse_user_id
 from common.memory.store import (
     CATEGORY_EVENT,
     CATEGORY_SELF,
-    CATEGORY_SERVER,
-    CONFIDENCE_COLLECTIVE,
     CONFIDENCE_DIRECT,
     CONFIDENCE_PENDING,
     CONFIDENCE_STABLE,
@@ -340,13 +338,13 @@ class MemoryWorker:
         llm_client: Any,
         *,
         model: str,
-        flush_messages: int = 40,
-        flush_minutes: int = 30,
+        flush_messages: int = 50,
+        flush_minutes: int = 40,
         buffer_cap: int = 80,
-        existing_limit: int = 25,
-        max_actions: int = 6,
-        batch_overlap: int = 8,
-        direct_flush_messages: int = 8,
+        existing_limit: int = 12,
+        max_actions: int = 3,
+        batch_overlap: int = 4,
+        direct_flush_messages: int = 16,
         bot_user_id: Optional[int] = None,
         bot_name: str = "MARIA",
         semantic_dedup_distance: float = 0.1,
@@ -418,7 +416,7 @@ class MemoryWorker:
 
         should_flush = len(buf.messages) >= self.flush_messages
         if not should_flush and addressed:
-            # Dialogue avec MARIA : flush plus tôt pour ancrer les faits tout de suite.
+            # Dialogue avec MARIA : un peu plus tôt, toujours pas à chaque réplique.
             should_flush = len(buf.messages) >= self.direct_flush_messages
         if should_flush and not buf.flushing:
             asyncio.create_task(self._flush_key(key))
@@ -618,6 +616,9 @@ class MemoryWorker:
                 return
             if category == CATEGORY_SELF and user_id is None:
                 return
+            if category == CATEGORY_EVENT:
+                logger.debug("Mémoire event ignorée (fil, pas identité): %s", content[:60])
+                return
             # Dédup : fait quasi identique déjà en base pour cette personne/ce serveur.
             dedup_key: Optional[int]
             if category == "user":
@@ -630,9 +631,8 @@ class MemoryWorker:
             if is_near_duplicate(content, existing_contents):
                 logger.debug("Mémoire rejetée (doublon proche): %s", content[:60])
                 return
-            # stable / direct→MARIA / collectif / self → actif ; passif user → pending.
+            # stable / direct→MARIA / self → actif ; passif user + collectif → pending.
             stable = bool(action.get("stable")) and category == "user"
-            collective = category in (CATEGORY_SERVER, CATEGORY_EVENT)
             is_self = category == CATEGORY_SELF
             from_direct = (
                 category == "user"
@@ -640,7 +640,7 @@ class MemoryWorker:
                 and direct_user_ids is not None
                 and user_id in direct_user_ids
             )
-            if stable or collective or from_direct or is_self:
+            if stable or from_direct or is_self:
                 semantic_user_id = self.bot_user_id if is_self else user_id
                 if await self._is_semantic_duplicate(
                     content, category=category, guild_id=guild_id, user_id=semantic_user_id,
@@ -649,10 +649,8 @@ class MemoryWorker:
                     return
                 if stable:
                     conf, label = CONFIDENCE_STABLE, "stable"
-                elif is_self or from_direct:
-                    conf, label = CONFIDENCE_DIRECT, "self" if is_self else "direct"
                 else:
-                    conf, label = CONFIDENCE_COLLECTIVE, "collectif"
+                    conf, label = CONFIDENCE_DIRECT, "self" if is_self else "direct"
                 mem = await asyncio.to_thread(
                     self.store.create,
                     category=category,
@@ -778,6 +776,9 @@ class MemoryWorker:
             archived = await asyncio.to_thread(self.store.apply_decay)
             for mid in archived:
                 await asyncio.to_thread(self.vectors.delete, mid)
+            await asyncio.to_thread(self.store.purge_archived)
+            valid = await asyncio.to_thread(self.store.active_chroma_ids)
+            await asyncio.to_thread(self.vectors.reconcile, valid)
         except Exception as e:
             logger.warning("Decay mémoire échoué: %s", e)
 

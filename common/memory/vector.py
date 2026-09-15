@@ -85,18 +85,35 @@ class VectorStore:
         *,
         guild_id: Optional[int] = None,
         user_id: Optional[int] = None,
+        people_ids: Optional[set[int]] = None,
         n: int = 10,
     ) -> list[dict]:
         """Recherche sémantique.
 
-        - Si `user_id` est fourni : souvenirs du guild **ou** souvenirs perso globaux de ce user.
+        - Si `people_ids` / `user_id` : souvenirs du guild **ou** perso globaux de ces users.
         - Sinon si `guild_id` : filtre guild uniquement.
-        - Sinon : pas de filtre (évité en pratique).
         """
         if not self.available or not text.strip():
             return []
+        people: list[int] = []
+        for uid in people_ids or ():
+            if uid is not None:
+                people.append(int(uid))
+        if user_id is not None and int(user_id) not in people:
+            people.append(int(user_id))
         where = None
-        if user_id is not None and guild_id is not None:
+        user_clauses = [
+            {"$and": [{"category": "user"}, {"user_id": uid}]} for uid in people
+        ]
+        if people and guild_id is not None:
+            where = {
+                "$or": [
+                    {"guild_id": int(guild_id)},
+                    {"category": "self"},
+                    *user_clauses,
+                ]
+            }
+        elif user_id is not None and guild_id is not None:
             where = {
                 "$or": [
                     {"guild_id": int(guild_id)},
@@ -110,6 +127,10 @@ class VectorStore:
                     {"guild_id": int(guild_id)},
                     {"category": "self"},
                 ]
+            }
+        elif people:
+            where = {
+                "$or": user_clauses + [{"category": "self"}],
             }
         elif user_id is not None:
             where = {
@@ -142,3 +163,30 @@ class VectorStore:
                 "metadata": metadatas[i] if i < len(metadatas) else {},
             })
         return out
+
+    def all_ids(self) -> list[str]:
+        if not self.available:
+            return []
+        try:
+            data = self._collection.get(include=[])
+        except Exception as e:
+            logger.warning("Chroma list ids échoué: %s", e)
+            return []
+        return list(data.get("ids") or [])
+
+    def reconcile(self, valid_ids: set[str]) -> int:
+        """Retire de Chroma les ids absents de SQLite active."""
+        existing = self.all_ids()
+        stale = [i for i in existing if i not in valid_ids]
+        deleted = 0
+        chunk = 100
+        for i in range(0, len(stale), chunk):
+            batch = stale[i:i + chunk]
+            try:
+                self._collection.delete(ids=batch)
+                deleted += len(batch)
+            except Exception as e:
+                logger.warning("Chroma reconcile delete échoué: %s", e)
+        if deleted:
+            logger.info("Chroma reconcile : %d id(s) orphelin(s) retirés", deleted)
+        return deleted

@@ -100,6 +100,72 @@ _MEDIA_TOPIC_RE = re.compile(
     r"playlist|artistes?|clip|paroles?)\b",
     re.I,
 )
+# Question factuelle / à jour : hint search_web (pas un required).
+# Les avis (« c'est quoi ton avis ») sont exclus via _OPINION_RE.
+_GROUNDING_RE = re.compile(
+    r"\b(?:"
+    r"actu(?:alit[ée]s?)?|news|"
+    r"c['']est (?:qui|quoi|quand|o[uù]|vrai)|"
+    r"qui (?:est|a|sont|était)|"
+    r"qu['']est[- ]ce (?:que|qu')|"
+    r"d[ée]finition|ça veut dire|"
+    r"combien|"
+    r"prix|co[uû]te|tarif|"
+    r"derni[eè]re?s? (?:nouvelles?|infos?)|"
+    r"v[ée]rifi(?:e|er|able)|"
+    r"selon (?:quelle )?source"
+    r")\b",
+    re.I,
+)
+# Tchat de salon : avis, goût, jugement — jamais un hint/force d'outil.
+_OPINION_RE = re.compile(
+    r"\b(?:"
+    r"avis|go[uû]ts?|"
+    r"(?:t['']en |tu |vous )pens(?:es?|ez)|"
+    r"je (?:trouve|kiffe|pr[eé]f[eè]re)|"
+    r"pour toi|selon toi|[àa] ton avis|"
+    r"franchement|honn[eê]tement|"
+    r"trop (?:nul|fort|bien|moche|beau|chelou|styl[eé]|chiant)|"
+    r"c['']est (?:nul|bien|cool|chiant|chelou|moche|beau|fort|styl[eé])|"
+    r"tu kiffes?|t['']aimes?"
+    r")\b",
+    re.I,
+)
+# Required : iel VEUT une recherche (mots-clés), ou on enchaîne une déjà
+# commencée. Météo / foot / « c'est quoi » / l'actu en passant restent auto.
+_WEB_INTENT_RE = re.compile(
+    r"\b(?:"
+    r"cherche(?:[- ]moi)?|"
+    r"(?:fais|fait|faites)(?:[- ]moi)? une recherche|"
+    r"google(?:r)?|"
+    r"(?:sur|via) (?:internet|le web|le net)|"
+    r"regarde (?:sur|en ligne)|"
+    r"trouve[- ]moi|"
+    r"v[ée]rifi(?:e|er)|"
+    r"selon (?:quelle )?source|"
+    r"lis (?:le |la |cet |cette )?(?:page|article|lien|site)"
+    r")\b",
+    re.I,
+)
+# Relance web seulement si le tour précédent a déjà search_web / read_web_page
+# (« et » / « du coup » seuls = trop de faux positifs salon).
+_SEARCH_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:et (?:apr[eè]s|ensuite|sinon)|sinon|alors|ensuite|apr[eè]s|"
+    r"continue|lis(?:[- ](?:le|la|cet|cette))?|"
+    r"le 2(?:e|[eè]me)?|le deuxi[eè]me|la suite|"
+    r"plus (?:loin|bas|d['']infos?|de (?:d[ée]tails?|sources?|liens?))"
+    r")\b"
+    r"|un autre (?:lien|source|article)"
+    r")",
+    re.I,
+)
+# Hint « fait à jour » (jamais un required) : outils live gated, pas media_topic.
+_HINT_LIVE_FLAGS = frozenset({
+    "weather", "football", "transport", "web", "youtube",
+})
+# Outils de preuve encore autorisés après un widget (pas de 2e vue).
+GROUNDING_TOOL_NAMES = frozenset({"search_web", "read_web_page"})
 
 # Outils envoyés seulement si le flag correspondant est présent.
 # Tout le reste (search_web, mémoire, etc.) reste toujours exposé.
@@ -143,6 +209,12 @@ _HINTS: tuple[tuple[str, str], ...] = (
     ("text_file", "- Fichier texte : le contenu est déjà dans le message."),
     ("file", "- Fichier : tu ne l'ouvres pas (nom seulement, pas le contenu)."),
     ("layout", "- Layout : seulement recette complète, tuto multi-étapes, comparatif dense, ou demande explicite de fiche/layout → render_widget. Question directe, avis, définition, « comment je fais » en deux phrases → tchat, pas de widget."),
+)
+_GROUNDING_HINT = (
+    "- Un fait à jour (actu, prix, score, météo) : tu PEUX search_web ou l'outil "
+    "dédié, n'invente pas. Un avis, un goût, une blague, du tchat : réponds "
+    "toi-même, aucun outil. Cherche seulement si iel le demande ou si tu es "
+    "déjà en train de chercher."
 )
 
 
@@ -274,11 +346,67 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
     return flags
 
 
+def _blob_text(*messages: discord.Message | None) -> str:
+    parts = [_message_text(m) for m in messages if m is not None]
+    return "\n".join(parts)
+
+
+def _is_opinion(text: str) -> bool:
+    return bool(text and _OPINION_RE.search(text))
+
+
+def needs_grounding(flags: set[str], text: str) -> bool:
+    """Hint seulement : fait à jour, pas un avis de salon.
+
+    `media_topic` / résumé / stats ne déclenchent pas ce hint — sinon
+    « t'as vu le film » poussait un search_web. L'outil dédié reste gated
+    à part.
+    """
+    if _is_opinion(text):
+        return False
+    if flags & _HINT_LIVE_FLAGS:
+        return True
+    return bool(text and _GROUNDING_RE.search(text))
+
+
+def _text_has_external_url(text: str) -> bool:
+    for url in _URL_RE.findall(text or ""):
+        host = _host(url)
+        if not host or host in _SKIP_HOSTS or host in _YT_HOSTS:
+            continue
+        return True
+    return False
+
+
+def should_force_tool(
+    flags: set[str],
+    text: str,
+    *,
+    local_grounding: bool = False,
+    search_momentum: bool = False,
+) -> bool:
+    """Required seulement si iel veut une recherche, ou si une recherche est en cours.
+
+    Pas de required sur météo / foot / « c'est quoi » / l'actu en passant :
+    le modèle reste en auto (+ hint via needs_grounding).
+    `flags` / `local_grounding` restent au contrat d'appel (gating, reply-vue)
+    mais ne forcent plus d'outil.
+    """
+    del flags, local_grounding
+    if _is_opinion(text):
+        return False
+    blob = text or ""
+    if _WEB_INTENT_RE.search(blob) or _text_has_external_url(blob):
+        return True
+    return bool(search_momentum and _SEARCH_FOLLOWUP_RE.search(blob))
+
+
 def build_capability_ctx(*messages: discord.Message | None) -> str:
     flags = collect_capability_flags(*messages)
-    if not flags:
-        return ""
-    lines = [text for key, text in _HINTS if key in flags]
+    text = _blob_text(*messages)
+    lines = [hint for key, hint in _HINTS if key in flags]
+    if needs_grounding(flags, text):
+        lines.append(_GROUNDING_HINT)
     if not lines:
         return ""
     return "\nDEMANDE (ce tour seulement) :\n" + "\n".join(lines) + "\n"

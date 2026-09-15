@@ -368,11 +368,11 @@ def _build_summary_payload(
         "blocks": blocks,
     }
     note = (
-        f"Widget résumé de #{name} affiché ({useful} msgs"
+        f"Résumé de #{name} ({useful} msgs"
         + (f", demande : {focus[:80]}" if focus else "")
         + (", cache" if from_cache else "")
-        + "). Le contenu est DANS le widget : aucun texte autour, "
-        "ne reformule rien, ne recopie rien."
+        + ") : "
+        + (summary.strip()[:1500] if summary else "(vide)")
     )
     return {
         "_tool": "summarize_channel",

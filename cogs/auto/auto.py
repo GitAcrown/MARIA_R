@@ -58,6 +58,19 @@ class Auto(commands.Cog):
             return False
         return bool(chat_cog._channel_config(channel).get("auto_transcribe", False))
 
+    async def _ingest_transcript(self, source: discord.Message, transcript: str) -> None:
+        chat = self.bot.get_cog("Chat")
+        if chat is None or not hasattr(chat, "gpt_api"):
+            return
+        author = getattr(source.author, "display_name", None) or getattr(source.author, "name", "?")
+        note = f"[vocal transcrit] {author} : {transcript.strip()[:1200]}"
+        try:
+            await chat.gpt_api.inject_context_note_async(source.channel, note)
+            session = chat.gpt_api.session_manager.get_or_create(source.channel)
+            session.record_artifact("transcript", note)
+        except Exception:
+            logger.debug("Ingest transcription ignoré", exc_info=True)
+
     async def _do_transcribe(
         self,
         att: discord.Attachment,
@@ -100,6 +113,7 @@ class Auto(commands.Cog):
             if requester_name else f"\n-# {TRANSCRIPT} Transcription automatique"
         )
         await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
+        await self._ingest_transcript(reply_to, transcript)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

@@ -34,23 +34,28 @@ DEBOUNCE_SECONDS: float = 0.33
 EDIT_TRIGGER_SECONDS: float = 15
 EDIT_UPDATE_WINDOW_SECONDS: float = 15
 
-# Mémoire long terme — flush hybride + RAG (extraction via MODEL_MAIN)
-# Lots plus gros = meilleur contexte (gags, attribution).
-# Flush hybride : lecture passive plus lente ; dialogue avec MARIA flush plus tôt.
-MEMORY_FLUSH_MESSAGES = 30
-MEMORY_FLUSH_MINUTES = 20
-MEMORY_DIRECT_FLUSH_MESSAGES = 10  # si le lot contient des msgs → MARIA
+# Mémoire long terme — carte d'identité, pas le journal du salon.
+# Le résumé de session couvre déjà le fil récent : on flush peu, on extrait peu.
+MEMORY_FLUSH_MESSAGES = 50
+MEMORY_FLUSH_MINUTES = 40
+MEMORY_DIRECT_FLUSH_MESSAGES = 16  # dialogue → MARIA : un peu plus tôt, pas gourmand
 MEMORY_BUFFER_CAP = 80
-# RAG complémentaire (le perso vient surtout des profils injectés).
-MEMORY_TOP_K = 4
-MEMORY_EXTRACT_MAX_ACTIONS = 8
-MEMORY_EXISTING_LIMIT = 20
+# RAG complémentaire (le perso vient surtout des 3 faits de profil).
+MEMORY_TOP_K = 2
+MEMORY_EXTRACT_MAX_ACTIONS = 3
+MEMORY_EXISTING_LIMIT = 12
 # Chevauchement entre lots : contexte du lot précédent, sans re-create.
-MEMORY_BATCH_OVERLAP = 6
+MEMORY_BATCH_OVERLAP = 4
 # Mini-profils injectés à chaque réponse (auteur + mentions/reply).
-MEMORY_PROFILE_FACTS = 5
+MEMORY_PROFILE_FACTS = 3
 # Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).
 MEMORY_SELF_FACTS = 6
 # Dédup sémantique à la création (distance cosine Chroma) : en dessous de ce seuil,
 # un souvenir actif existant est considéré comme "le même fait" et bloque la création.
 MEMORY_SEMANTIC_DEDUP_DISTANCE = 0.1
+# Retrieval : au-delà, le voisin Chroma n'est pas assez proche (sauf match FTS).
+MEMORY_RAG_MAX_DISTANCE = 0.42
+# Pending auteur injecté dans le profil au-dessus de ce seuil.
+MEMORY_PENDING_PROFILE_MIN = 0.5
+# Archives SQLite purgées après ce délai.
+MEMORY_ARCHIVE_PURGE_DAYS = 90

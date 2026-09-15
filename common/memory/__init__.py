@@ -4,6 +4,7 @@ from common.memory.rag import (
     build_profile_ctx,
     build_self_ctx,
     format_memory_ctx,
+    query_is_collective,
     retrieve_memories,
 )
 from common.memory.store import Memory, MemoryStore, MEMORY_CONTENT_MAX
@@ -17,5 +18,6 @@ __all__ = [
     "build_profile_ctx",
     "build_self_ctx",
     "format_memory_ctx",
+    "query_is_collective",
     "retrieve_memories",
 ]

@@ -360,6 +360,36 @@ async def _publish(bot: discord.Client, rec: _Record, *, live: bool) -> bool:
         return False
 
 
+def store_payload(kind: str, payload: dict, commentary: str = "", selected: int = 0) -> str:
+    """Enregistre un payload (TTL 10 min) pour un DynamicItem hors onglets."""
+    return _insert(kind, payload, commentary, selected)
+
+
+def get_payload(wid: str) -> Optional[_Record]:
+    return _get(wid)
+
+
+def _inject_tab_artifact(
+    interaction: discord.Interaction,
+    rec: _Record,
+    idx: int,
+    labels: list[str],
+) -> None:
+    chat = interaction.client.get_cog("Chat")
+    if chat is None or not hasattr(chat, "gpt_api"):
+        return
+    channel = interaction.channel
+    if channel is None:
+        return
+    try:
+        session = chat.gpt_api.session_manager.get_or_create(channel)
+    except Exception:
+        return
+    label = labels[idx] if 0 <= idx < len(labels) else str(idx)
+    note = f"Onglet actif ({rec.kind}) : {label}"
+    session.record_artifact("tab", note)
+
+
 async def sweep_expired(bot: discord.Client) -> None:
     now = _now()
     for rec in _due_unstripped(now):
@@ -396,6 +426,7 @@ async def _pick_tab(interaction: discord.Interaction, wid: str, idx: int) -> Non
     if view is None:
         return
     await interaction.response.edit_message(view=view)
+    _inject_tab_artifact(interaction, rec, rec.selected, labels)
 
 
 class TabButton(discord.ui.DynamicItem[discord.ui.Button], template=r"maria:tab:(?P<wid>[0-9a-f]{8}):(?P<idx>[0-9]+)"):
