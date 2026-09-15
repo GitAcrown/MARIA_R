@@ -10,10 +10,10 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.discord_ui import section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import attach_media_actions
+from common.media_hub import build_media_layout
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.TMDB")
@@ -132,16 +132,11 @@ def build_media_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     """Construit le LayoutView pour un film ou une série."""
     if "error" in data or "result" not in data:
         return None
-    container = _media_container(data["result"])
-    if container is None:
-        return None
-    view = layout_with_commentary(container, commentary)
-    return attach_media_actions(
-        view,
+    return build_media_layout(
         kind="tmdb",
         result=data["result"],
         hits=data.get("hits") or [],
-        summary=data.get("_llm_summary") or "",
+        commentary=commentary,
     )
 
 
@@ -281,7 +276,24 @@ class TMDB(commands.Cog):
 
         result      = {**first, **details, "media_type": media_type}
         llm_summary = _media_llm_summary(result)
-        hits = search.get("hits") or [first]
+        hits_in = search.get("hits") or [first]
+        seen = {str(media_id)} if media_id else set()
+        others = []
+        for h in hits_in:
+            hid = h.get("id")
+            if hid is None or str(hid) in seen:
+                continue
+            seen.add(str(hid))
+            others.append(h)
+
+        async def _enrich(h: dict) -> dict:
+            hid = h.get("id")
+            mtype = h.get("media_type", "movie")
+            extra = await asyncio.to_thread(self._get_details, int(hid), mtype) if hid else {}
+            return {**h, **(extra or {}), "media_type": mtype}
+
+        rest = await asyncio.gather(*[_enrich(h) for h in others[:4]]) if others else []
+        hits = [result, *rest]
 
         return ToolResponseRecord(tc.id, {
             "_tool":        "search_media",

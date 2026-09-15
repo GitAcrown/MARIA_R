@@ -25,7 +25,6 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary
 from common.emojis import DIRECT, FOOTBALL, FOOTBALL_PLAYER
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import attach_media_actions
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Football")
@@ -316,16 +315,7 @@ def build_football_view(data: dict, commentary: str = "") -> Optional[discord.ui
     if container is None:
         return None
 
-    view = layout_with_commentary(container, commentary)
-    payload = dict(data)
-    payload["_mode"] = mode
-    return attach_media_actions(
-        view,
-        kind="football",
-        result=payload,
-        hits=data.get("results") or ([data["result"]] if data.get("result") else []),
-        summary=data.get("_llm_summary") or "",
-    )
+    return layout_with_commentary(container, commentary)
 
 
 def _match_container(m: dict) -> Optional[discord.ui.Container]:

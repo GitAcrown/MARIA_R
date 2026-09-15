@@ -11,10 +11,10 @@ import requests
 import discord
 from discord.ext import commands
 
-from common.discord_ui import layout_with_commentary, section_with_thumbnail
+from common.discord_ui import section_with_thumbnail
 from common.emojis import MUSIC
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import attach_media_actions
+from common.media_hub import build_media_layout
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Spotify")
@@ -127,16 +127,11 @@ def build_track_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     """Construit le LayoutView pour un morceau Spotify."""
     if "error" in data or "result" not in data:
         return None
-    container = _track_container(data["result"])
-    if container is None:
-        return None
-    view = layout_with_commentary(container, commentary)
-    return attach_media_actions(
-        view,
+    return build_media_layout(
         kind="spotify",
         result=data["result"],
         hits=data.get("hits") or [],
-        summary=data.get("_llm_summary") or "",
+        commentary=commentary,
     )
 
 
