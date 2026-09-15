@@ -164,16 +164,14 @@ def _track_container(t: dict) -> Optional[discord.ui.Container]:
         meta.append(_fmt_duration(dur))
     if explicit:
         meta.append("🅴")
+    if url:
+        meta.append(f"[Spotify]({url})")
     if meta:
         body_lines.append(f"-# {' · '.join(meta)}")
     body_block = discord.ui.TextDisplay("\n".join(body_lines))
     main_section = section_with_thumbnail(body_block, cover)
 
-    children: list = [main_section]
-    if url:
-        children += [discord.ui.TextDisplay(f"-# [Écouter sur Spotify]({url})")]
-
-    return discord.ui.Container(*children)
+    return discord.ui.Container(main_section)
 
 
 # ---------------------------------------------------------------------------

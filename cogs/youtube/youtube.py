@@ -206,13 +206,13 @@ def _youtube_container(data: dict) -> Optional[discord.ui.Container]:
     meta.append(cap)
     if data.get("truncated"):
         meta.append("début seulement")
-    body_lines.append(f"-# {' · '.join(meta)}")
+    if url.startswith("http"):
+        meta.append(f"[YouTube]({url})")
+    if meta:
+        body_lines.append(f"-# {' · '.join(meta)}")
     main = section_with_thumbnail(discord.ui.TextDisplay("\n".join(body_lines)), thumb)
 
-    children: list = [main]
-    if url.startswith("http"):
-        children.append(discord.ui.TextDisplay(f"-# [Ouvrir sur YouTube]({url})"))
-    return discord.ui.Container(*children)
+    return discord.ui.Container(main)
 
 
 # ---------------------------------------------------------------------------

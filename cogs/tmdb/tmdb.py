@@ -198,9 +198,9 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
 
     children: list = [header, sep1, main_section]
     if footer_parts:
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {'  ·  '.join(footer_parts)}")]
+        children.append(discord.ui.TextDisplay(f"-# {' · '.join(footer_parts)}"))
     else:
-        children += [discord.ui.Separator(), discord.ui.TextDisplay("-# Source : The Movie Database (TMDB)")]
+        children.append(discord.ui.TextDisplay("-# TMDB"))
 
     return discord.ui.Container(*children)
 

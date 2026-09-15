@@ -380,7 +380,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
             children += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(stat_lines))]
 
     source = "TheSportsDB" if m.get("_source") == "thesportsdb" else "API-Football"
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Source : {source}")]
+    children += [discord.ui.TextDisplay(f"-# {source}")]
     return discord.ui.Container(*children)
 
 
@@ -406,7 +406,7 @@ def _match_list_container(matches: list, title: str) -> Optional[discord.ui.Cont
     children.append(discord.ui.TextDisplay("\n".join(lines)))
 
     source = "API-Football" if any(m.get("_source") == "apifootball" for m in matches) else "TheSportsDB"
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Source : {source}")]
+    children += [discord.ui.TextDisplay(f"-# {source}")]
     return discord.ui.Container(*children)
 
 
@@ -428,7 +428,7 @@ def _live_list_container(matches: list) -> Optional[discord.ui.Container]:
         min_str = f"`{elapsed}'`" if elapsed else "`live`"
         lines.append(f"{min_str}  {home} **{goals.get('home')}-{goals.get('away')}** {away}")
     children.append(discord.ui.TextDisplay("\n".join(lines)))
-    children += [discord.ui.Separator(), discord.ui.TextDisplay("-# Source : API-Football")]
+    children += [discord.ui.TextDisplay("-# API-Football")]
     return discord.ui.Container(*children)
 
 

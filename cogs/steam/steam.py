@@ -166,7 +166,7 @@ def _game_container(r: dict) -> Optional[discord.ui.Container]:
 
     children: list = [header, sep1, main_section]
     if meta_parts:
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {'  ·  '.join(meta_parts)}")]
+        children.append(discord.ui.TextDisplay(f"-# {' · '.join(meta_parts)}"))
 
     return discord.ui.Container(*children)
 

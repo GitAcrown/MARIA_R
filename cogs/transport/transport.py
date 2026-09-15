@@ -133,7 +133,10 @@ def _place_name_bonus(query: str, name: str) -> int:
 
 
 def _source_label(data: dict) -> str:
-    return data.get("source") or "Île-de-France Mobilités"
+    raw = (data.get("source") or "Île-de-France Mobilités").strip()
+    if raw.lower() in {"île-de-france mobilités", "ile-de-france mobilites"}:
+        return "IDFM"
+    return raw
 
 
 def _uri(ident: str) -> str:
@@ -302,11 +305,8 @@ def _departures_container(data: dict) -> discord.ui.Container:
                 bit = f"{bit}  ·  {waits}"
             lines.append(bit)
         children.append(discord.ui.TextDisplay("\n".join(lines)))
-    stamp = "temps réel" if realtime else "horaire théorique"
-    children += [
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(f"-# {stamp} · {_source_label(data)}"),
-    ]
+    stamp = "temps réel" if realtime else "horaire"
+    children.append(discord.ui.TextDisplay(f"-# {stamp} · {_source_label(data)}"))
     return discord.ui.Container(*children)
 
 
@@ -327,10 +327,7 @@ def _traffic_container(data: dict) -> discord.ui.Container:
             children.append(discord.ui.TextDisplay(n))
     else:
         children.append(discord.ui.TextDisplay("Trafic normal."))
-    children += [
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(f"-# {_source_label(data)}"),
-    ]
+    children.append(discord.ui.TextDisplay(f"-# {_source_label(data)}"))
     return discord.ui.Container(*children)
 
 

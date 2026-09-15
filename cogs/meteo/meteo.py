@@ -214,10 +214,9 @@ def _current_container(city: str, d: dict) -> discord.ui.Container:
         f"  ·  👁 {vis_km} km"
         f"  ·  🌡 {pressure} hPa"
     )
-    sep3   = discord.ui.Separator()
-    footer = discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC  ·  OpenWeatherMap")
+    footer = discord.ui.TextDisplay(f"-# {updated} · OWM")
 
-    return discord.ui.Container(header, sep1, temp_block, sep2, details, sep3, footer)
+    return discord.ui.Container(header, sep1, temp_block, sep2, details, footer)
 
 
 def _forecast_container(city: str, d: dict) -> discord.ui.Container:
@@ -254,7 +253,7 @@ def _forecast_container(city: str, d: dict) -> discord.ui.Container:
         if i < 4:
             children.append(discord.ui.Separator())
 
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC  ·  OpenWeatherMap")]
+    children += [discord.ui.TextDisplay(f"-# {updated} · OWM")]
     return discord.ui.Container(*children)
 
 
@@ -330,7 +329,7 @@ def _day_container(city: str, d: dict, target: date) -> discord.ui.Container:
         f"  ·  💧 {humidity}%"
         f"  ·  💨 {wind_kmh} km/h {_wind_dir(wind_deg)}"
     ))
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# Mis à jour à {updated} UTC  ·  OpenWeatherMap")]
+    children += [discord.ui.TextDisplay(f"-# {updated} · OWM")]
     return discord.ui.Container(*children)
 
 

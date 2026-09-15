@@ -348,7 +348,7 @@ def _build_summary_payload(
     else:
         window = "fenêtre récente"
 
-    footer = f"{useful} msgs utiles / {raw_count} lus · {window}"
+    footer = f"{useful}/{raw_count} · {window}"
     if from_cache:
         footer += " · cache"
 

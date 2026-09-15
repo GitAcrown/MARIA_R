@@ -187,6 +187,13 @@ def _fmt_delay(minutes: int) -> str:
     return f"{d}j{h}h" if h else f"{d}j"
 
 
+def _clip_q(text: str, n: int = 36) -> str:
+    text = (text or "").strip()
+    if len(text) <= n:
+        return text
+    return text[: n - 1] + "…"
+
+
 def _source_domain(url: str) -> str:
     try:
         host = (urlparse(url).netloc or "").lower()
@@ -197,35 +204,32 @@ def _source_domain(url: str) -> str:
     return host
 
 
-def _source_footer_lines(tool_responses) -> list[str]:
-    """Liens réellement renvoyés par les outils — jamais d'URL générée par le modèle."""
-    seen: set[str] = set()
-    lines: list[str] = []
+def _source_footer_line(tool_responses) -> str:
+    """Une ligne de domaines cliquables (max 3) — jamais d'URL inventée par le modèle."""
+    seen_host: set[str] = set()
+    bits: list[str] = []
     for tr in tool_responses or []:
         rd = getattr(tr, "response_data", None)
         if not isinstance(rd, dict) or rd.get("error"):
             continue
+        urls: list[str] = []
         for item in rd.get("results") or []:
-            if not isinstance(item, dict):
+            if isinstance(item, dict):
+                u = (item.get("url") or "").strip()
+                if u:
+                    urls.append(u)
+        page = (rd.get("url") or "").strip()
+        if page and (rd.get("content") or rd.get("chunk") is not None):
+            urls.append(page)
+        for url in urls:
+            domain = _source_domain(url)
+            if not domain or domain in seen_host:
                 continue
-            url = (item.get("url") or "").strip()
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            domain = _source_domain(url) or url
-            title = (item.get("title") or "").strip()
-            label = title[:42] if title else domain
-            lines.append(f"{SMALL_WEB} {label} · {domain}")
-            if len(lines) >= 4:
-                return lines
-        url = (rd.get("url") or "").strip()
-        if url and url not in seen and (rd.get("content") or rd.get("chunk") is not None):
-            seen.add(url)
-            domain = _source_domain(url) or url
-            lines.append(f"{SMALL_WEB} {domain}")
-            if len(lines) >= 4:
-                return lines
-    return lines
+            seen_host.add(domain)
+            bits.append(f"[{domain}]({url})")
+            if len(bits) >= 3:
+                return " · ".join(bits)
+    return " · ".join(bits)
 
 
 DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de potes.
@@ -667,18 +671,18 @@ class Chat(commands.Cog):
         if via_dm:
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# Tâche planifiée · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# <t:{int(task.execute_at.timestamp())}:R>"
         elif origin is not None:
             text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# Tâche planifiée · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# <t:{int(task.execute_at.timestamp())}:R>"
         else:
             if not text:
                 text = f"{mention} {_spoken_task_line(action)}"
             elif mention not in text and f"<@!{task.user_id}>" not in text:
                 text = f"{mention} {text}"
-            footer = f"-# Tâche planifiée · {mention} · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# {mention} · <t:{int(task.execute_at.timestamp())}:R>"
         if footer not in text:
             text = f"{text}\n{footer}"
 
@@ -993,8 +997,9 @@ class Chat(commands.Cog):
 
         text, had_memory_callback = _extract_memory_callback(resp.text)
         visible_parts: list[str] = []
+        source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
-            visible_parts.append(f"{SMALL_BRAIN} Callback mémoire")
+            visible_parts.append(f"{SMALL_BRAIN} mémoire")
             for mem in memories:
                 try:
                     await asyncio.to_thread(self.memory_store.bump_confidence, mem.id)
@@ -1005,17 +1010,19 @@ class Chat(commands.Cog):
             args = t.get("args", {})
             if name in _HIDDEN_TOOLS:
                 continue
+            if name in ("search_web", "read_web_page") and source_line:
+                continue
             if name == "search_web":
-                q = args.get("query", "").strip()
-                label = f'{SMALL_WEB} **Recherche web** — "{q}"' if q else f"{SMALL_WEB} **Recherche web**"
+                q = _clip_q(args.get("query", ""))
+                label = f"{SMALL_WEB} recherche « {q} »" if q else f"{SMALL_WEB} recherche"
             elif name == "search_images":
-                q = args.get("query", "").strip()
-                label = f'{SMALL_WEB} **Recherche d\'images** — "{q}"' if q else f"{SMALL_WEB} **Recherche d'images**"
+                q = _clip_q(args.get("query", ""))
+                label = f"{SMALL_WEB} images « {q} »" if q else f"{SMALL_WEB} images"
             elif name == "read_web_page":
-                url = args.get("url", "")
-                label = f"{SMALL_WEB} **Lecture** — <{url}>" if url else f"{SMALL_WEB} **Lecture**"
+                domain = _source_domain((args.get("url") or "").strip())
+                label = f"{SMALL_WEB} {domain}" if domain else f"{SMALL_WEB} lecture"
             elif name == "schedule_task":
-                desc = (args.get("instruction") or args.get("title") or "").strip()
+                desc = _clip_q(args.get("instruction") or args.get("title") or "", 48)
                 execute_at_str = (args.get("execute_at") or "").strip()
                 if execute_at_str:
                     try:
@@ -1030,43 +1037,40 @@ class Chat(commands.Cog):
                     total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
                     delay_str = f" · dans {_fmt_delay(total)}" if total else ""
                 label = (
-                    f'{SMALL_TASK} **Tâche planifiée** — "{desc}"{delay_str}'
-                    if desc else f"{SMALL_TASK} **Tâche planifiée**"
+                    f"{SMALL_TASK} tâche · « {desc} »{delay_str}"
+                    if desc else f"{SMALL_TASK} tâche{delay_str}"
                 )
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
                 label = (
-                    f"{SMALL_TASK} **Tâche · {action}**"
-                    if action else f"{SMALL_TASK} **Tâche**"
+                    f"{SMALL_TASK} tâche · {action}"
+                    if action else f"{SMALL_TASK} tâche"
                 )
             elif name == "search_memory":
-                q = (args.get("query") or "").strip()
+                q = _clip_q(args.get("query") or "")
                 label = (
-                    f'{SMALL_BRAIN} **Mémoire** — "{q}"' if q else f"{SMALL_BRAIN} **Mémoire**"
+                    f"{SMALL_BRAIN} mémoire « {q} »" if q else f"{SMALL_BRAIN} mémoire"
                 )
             elif name == "remember_fact":
-                fact = (args.get("fact") or "").strip()
-                if len(fact) > 80:
-                    fact = fact[:79] + "…"
+                fact = _clip_q(args.get("fact") or "", 48)
                 label = (
-                    f'{SMALL_BRAIN} **Souvenir retenu** — "{fact}"'
-                    if fact else f"{SMALL_BRAIN} **Souvenir retenu**"
+                    f"{SMALL_BRAIN} retenu · « {fact} »"
+                    if fact else f"{SMALL_BRAIN} retenu"
                 )
             elif name == "forget_fact":
-                label = f"{SMALL_BRAIN} **Souvenir oublié**"
+                label = f"{SMALL_BRAIN} oublié"
             elif name == "create_poll":
-                q = (args.get("question") or "").strip()
-                label = f'{SMALL_POLL} **Sondage** — "{q}"' if q else f"{SMALL_POLL} **Sondage**"
+                q = _clip_q(args.get("question") or "")
+                label = f"{SMALL_POLL} sondage « {q} »" if q else f"{SMALL_POLL} sondage"
             else:
-                label = f"**{name.replace('_', ' ').capitalize()}**"
+                label = name.replace("_", " ")
             if label not in visible_parts:
                 visible_parts.append(label)
-        for src in _source_footer_lines(resp.tool_responses):
-            if src not in visible_parts:
-                visible_parts.append(src)
+        if source_line:
+            visible_parts.append(source_line)
         if visible_parts:
-            tool_lines = "\n".join(f"-# {p}" for p in visible_parts)
-            text = f"{tool_lines}\n{text}"
+            foot = "\n".join(f"-# {p}" for p in visible_parts)
+            text = f"{text.rstrip()}\n{foot}" if (text or "").strip() else foot
 
         sent_tools: list[str] = []
         for tr in resp.tool_responses:

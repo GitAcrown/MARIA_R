@@ -107,8 +107,8 @@ async def _send_dm_confirm(
     if len(desc) > 120:
         desc = desc[:119] + "…"
     body = (
-        f"{SMALL_TASK} **Tâche confirmée** — {desc}\n"
-        f"-# {label} · <t:{ts}:f> (<t:{ts}:R>)"
+        f"{SMALL_TASK} {desc}\n"
+        f"-# {label} · <t:{ts}:R>"
     )
     try:
         await user.send(body, allowed_mentions=discord.AllowedMentions.none())

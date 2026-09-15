@@ -123,7 +123,6 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
         elif btype == "footer":
             text = (raw.get("text") or "").strip()
             if text:
-                children.append(discord.ui.Separator())
                 children.append(discord.ui.TextDisplay(f"-# {text}"))
 
     if not children:
