@@ -1,4 +1,4 @@
-"""Dual channel média : widget public + menu éphémère (Actions DynamicItem)."""
+"""Dual channel média : widget public + menu éphémère (Plus / DynamicItem)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import discord
 
 from common.dyn_widgets import _now, get_payload, store_payload
 from common.menu_layout import (
-    HubTabButton,
     MariaLayout,
     apply_view,
     send_ephemeral_menu,
@@ -21,7 +20,6 @@ from common.menu_layout import (
 
 logger = logging.getLogger("MARIA.MediaHub")
 
-_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 _MAX_HITS = 5
 _PAYLOAD_CHARS = 12000
 
@@ -81,40 +79,6 @@ def _hit_label(kind: str, item: dict, index: int) -> str:
     return item.get("name") or item.get("title") or f"#{index + 1}"
 
 
-def _container_for(kind: str, result: dict):
-    if not result:
-        return None
-    try:
-        if kind == "tmdb":
-            from cogs.tmdb.tmdb import _media_container
-            return _media_container(result)
-        if kind == "steam":
-            from cogs.steam.steam import _game_container
-            return _game_container(result)
-        if kind == "spotify":
-            from cogs.spotify.spotify import _track_container
-            return _track_container(result)
-        if kind == "football":
-            from cogs.football.football import (
-                _live_list_container,
-                _match_container,
-                _match_list_container,
-            )
-            mode = result.get("_mode") or result.get("mode")
-            if mode == "live_list":
-                return _live_list_container(result.get("results") or [])
-            if mode == "match_list":
-                return _match_list_container(
-                    result.get("results") or [], result.get("title") or "Matchs",
-                )
-            payload = result.get("result") if "fixture" not in result else result
-            if payload:
-                return _match_container(payload)
-    except Exception:
-        logger.exception("container média %s", kind)
-    return None
-
-
 def _extra_text(kind: str, result: dict, summary: str) -> str:
     if summary:
         body = summary.strip()
@@ -148,7 +112,7 @@ def attach_media_actions(
     summary: str = "",
     extra: str = "",
 ) -> Optional[discord.ui.LayoutView]:
-    """Ajoute le bouton Actions (DynamicItem) sur le widget public."""
+    """Ajoute le bouton Plus (DynamicItem) sur le widget public."""
     if view is None:
         return None
     slim_hits = []
@@ -194,7 +158,7 @@ class MediaActionsButton(
         super().__init__(
             discord.ui.Button(
                 style=discord.ButtonStyle.secondary,
-                label="Actions",
+                label="Plus",
                 custom_id=f"maria:media:{wid}",
             )
         )
@@ -218,12 +182,20 @@ class MediaActionsButton(
                     "Ce menu a expiré.", ephemeral=True,
                 )
             return
-        view = MediaSessionView(
-            rec.payload,
-            viewer_id=interaction.user.id,
-        )
-        view._build()
-        await send_ephemeral_menu(interaction, view)
+        try:
+            view = MediaSessionView(
+                rec.payload,
+                viewer_id=interaction.user.id,
+            )
+            view._build()
+            await send_ephemeral_menu(interaction, view)
+        except Exception:
+            logger.exception("menu média")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Impossible d'ouvrir le menu.", ephemeral=True,
+                )
+            return
         summary = (rec.payload.get("summary") or "").strip()
         if summary:
             _inject_artifact(interaction, summary, "widget")
@@ -250,22 +222,8 @@ class _HitSelect(discord.ui.Select):
         await self._hub.select_hit(interaction, idx)
 
 
-class _MediaTabButton(HubTabButton):
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await super().callback(interaction)
-        hub = self._hub
-        if not isinstance(hub, MediaSessionView):
-            return
-        current = hub._current()
-        _inject_artifact(
-            interaction,
-            f"Onglet {hub.tab} : {_hit_label(hub.kind, current, hub.selected)}",
-            "tab",
-        )
-
-
 class MediaSessionView(MariaLayout):
-    """Hub éphémère : select multi-hits + onglets fiche / extra."""
+    """Hub éphémère : autres résultats + texte en plus (pas de 2e Container)."""
 
     def __init__(self, payload: dict, *, viewer_id: int):
         super().__init__(viewer_id=viewer_id)
@@ -275,7 +233,6 @@ class MediaSessionView(MariaLayout):
         self.selected = int(payload.get("selected") or 0)
         self.summary = (payload.get("summary") or "").strip()
         self.extra = (payload.get("extra") or "").strip()
-        self.tab = "fiche"
         if self.hits and 0 <= self.selected < len(self.hits):
             current = self.hits[self.selected]
             if current.get("id") and current.get("id") == self.result.get("id"):
@@ -288,7 +245,7 @@ class MediaSessionView(MariaLayout):
             hit = self.hits[self.selected]
             rid = self.result.get("id") or self.result.get("steam_appid")
             hid = hit.get("id") or hit.get("steam_appid")
-            if rid is not None and hid == rid:
+            if rid is not None and hid is not None and str(rid) == str(hid):
                 return self.result
             return hit
         return self.result
@@ -296,38 +253,16 @@ class MediaSessionView(MariaLayout):
     def _build(self) -> None:
         current = self._current()
         labels = [_hit_label(self.kind, h, i) for i, h in enumerate(self.hits)]
+        title = _hit_label(self.kind, current, self.selected)
+        extra = self.extra or _extra_text(self.kind, current, self.summary)
         body: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("## Menu média"),
+            discord.ui.TextDisplay(f"## {title}"),
             sep_tight(),
+            discord.ui.TextDisplay(extra or "-# Rien de plus sur cette fiche."),
         ]
-        if self.tab == "extra":
-            extra = self.extra or _extra_text(self.kind, current, self.summary)
-            body.append(discord.ui.TextDisplay(extra or "-# Rien de plus sur cette fiche."))
-        else:
-            container = _container_for(self.kind, current if self.kind != "football" else {
-                **current,
-                "_mode": current.get("mode"),
-                "result": current.get("result", current),
-                "results": current.get("results"),
-                "title": current.get("title"),
-            })
-            if container is not None:
-                body.append(container)
-            else:
-                body.append(discord.ui.TextDisplay(
-                    f"**{_hit_label(self.kind, current, self.selected)}**"
-                ))
-                extra = _extra_text(self.kind, current, self.summary)
-                if extra:
-                    body.append(discord.ui.TextDisplay(extra[:800]))
-
         rows: list[discord.ui.Item] = []
         if len(labels) >= 2:
             rows.append(discord.ui.ActionRow(_HitSelect(self, labels, self.selected)))
-        rows.append(discord.ui.ActionRow(
-            _MediaTabButton(self, "fiche", "Fiche"),
-            _MediaTabButton(self, "extra", "Extra"),
-        ))
         self.set_layout(body, *rows)
 
     async def select_hit(self, interaction: discord.Interaction, idx: int) -> None:
@@ -336,11 +271,9 @@ class MediaSessionView(MariaLayout):
         self.selected = max(0, min(len(self.hits) - 1, idx))
         hit = self.hits[self.selected]
         fetched = await _fetch_details(interaction, self.kind, hit)
-        if fetched:
-            self.result = fetched
-        else:
-            self.result = hit
-        self.tab = "fiche"
+        self.result = fetched or hit
+        self.extra = ""
+        self.summary = ""
         self._build()
         await apply_view(interaction, self)
         _inject_artifact(
