@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import layout_with_commentary
-from common.emojis import SMALL_TASK
+from common.emojis import REPEAT_REMINDER, SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
     SCHEDULE_DAILY,
@@ -118,6 +118,60 @@ async def _send_dm_confirm(
             "Impossible d'envoyer en MP (MP fermés ou bot bloqué). "
             "Tâche annulée. Ouvre tes MP avec moi, ou programme-la dans le salon."
         )
+
+
+def _task_execute_ts(data: dict) -> Optional[int]:
+    ts = data.get("execute_at_ts")
+    if isinstance(ts, int) and ts > 0:
+        return ts
+    raw = (data.get("execute_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=PARIS_TZ)
+    return int(dt.timestamp())
+
+
+def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Mini-carte non interactive : confirmation qu'une tâche vient d'être programmée."""
+    if not isinstance(data, dict) or data.get("error") or not data.get("success"):
+        return None
+    ts = _task_execute_ts(data)
+    if ts is None:
+        return None
+    desc = (data.get("instruction") or data.get("title") or "").strip()
+    if len(desc) > 240:
+        desc = desc[:239] + "…"
+    kind = data.get("schedule_kind") or SCHEDULE_ONCE
+    icon = REPEAT_REMINDER if kind != SCHEDULE_ONCE else SMALL_TASK
+    bits: list[str] = []
+    if kind != SCHEDULE_ONCE:
+        label = (data.get("schedule_label") or data.get("schedule") or "").strip()
+        if label:
+            bits.append(label)
+        bits.append(f"prochaine <t:{ts}:R>")
+        until_ts = data.get("until_at_ts")
+        if isinstance(until_ts, int) and until_ts > 0:
+            bits.append(f"jusqu'au <t:{until_ts}:d>")
+    else:
+        bits.append(f"<t:{ts}:f>")
+        bits.append(f"<t:{ts}:R>")
+    via = (data.get("via") or "").strip().lower()
+    if data.get("deliver_dm") or via in ("mp", "dm", "private"):
+        bits.append("MP")
+    else:
+        bits.append("salon")
+    body = f"{desc}\n-# {' · '.join(bits)}" if desc else f"-# {' · '.join(bits)}"
+    container = discord.ui.Container(
+        discord.ui.TextDisplay(f"## {icon} Programmé"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(body),
+    )
+    return layout_with_commentary(container, commentary)
 
 
 def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -303,12 +357,26 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 return ToolResponseRecord(
                     tc.id, {"error": dm_err}, datetime.now(timezone.utc),
                 )
+        payload = _serialize_task(created) if created else {
+            "id": tid,
+            "title": title or instruction,
+            "instruction": instruction,
+            "execute_at": execute_at.isoformat(),
+            "execute_at_ts": int(execute_at.timestamp()),
+            "schedule_kind": kind,
+            "weekdays": days,
+            "time_of_day": time_of_day,
+            "status": STATUS_PENDING,
+            "schedule_label": label,
+            "deliver_dm": deliver_dm,
+        }
         return ToolResponseRecord(tc.id, {
+            "_tool": "schedule_task",
             "success": True,
             "task_id": tid,
-            "execute_at": execute_at.isoformat(),
             "schedule": label,
             "via": dest,
+            **payload,
             "_llm_summary": f"Tâche programmée ({label}, {dest}).",
         }, datetime.now(timezone.utc))
 

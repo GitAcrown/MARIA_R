@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -68,6 +68,7 @@ from cogs.chat.config import (
     MODEL_MAIN,
 )
 from cogs.chat.tools_tasks import (
+    build_scheduled_task_view,
     build_task_tools,
     build_tasks_view,
     sanitize_task_instruction,
@@ -92,7 +93,7 @@ from cogs.chat.views import (
 # Outils à ne pas afficher dans la preuve d'utilisation
 _HIDDEN_TOOLS: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
-    "run_python", "manage_task", "show_tasks",
+    "run_python", "manage_task", "show_tasks", "schedule_task",
     "about_me",
     "get_weather", "search_media", "search_game",
     "get_football", "get_transport", "render_table", "render_widget",
@@ -233,40 +234,6 @@ def _foot_tag(title: str, detail: str = "") -> str:
     return f"**{title}**" if title else detail
 
 
-def _parse_iso_dt(raw: str) -> Optional[datetime]:
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=PARIS_TZ)
-    return dt
-
-
-def _schedule_stamp(args: dict, tool_responses) -> str:
-    """Horodatage Discord de la tâche créée (réponse outil, sinon args/délai)."""
-    dt = None
-    for tr in tool_responses or []:
-        rd = getattr(tr, "response_data", None)
-        if not isinstance(rd, dict) or rd.get("error") or not rd.get("task_id"):
-            continue
-        dt = _parse_iso_dt(rd.get("execute_at") or "")
-        if dt:
-            break
-    if dt is None:
-        dt = _parse_iso_dt((args.get("execute_at") or "").strip())
-    if dt is None:
-        total = int(args.get("delay_minutes") or 0) + int(args.get("delay_hours") or 0) * 60
-        if total:
-            dt = datetime.now(timezone.utc) + timedelta(minutes=total)
-    if dt is None:
-        return ""
-    return f"<t:{int(dt.timestamp())}:f>"
-
-
 def _source_footer_line(tool_responses) -> str:
     """Une ligne de domaines cliquables (max 3) — jamais d'URL inventée par le modèle."""
     seen_host: set[str] = set()
@@ -325,7 +292,7 @@ Vue dédiée (météo/film/jeu/musique/foot/tâches/résumé/transports/youtube/
 - get_weather : pas de ville dans le message = ville du PROFIL / de la MEMOIRE de qui parle MAINTENANT. Pas visible → search_memory puis get_weather (même tour). Interdit de répondre « j'ai pas ta ville » sans avoir cherché. Jamais réutiliser la ville d'un autre membre.
 - get_transport : IDF (métro/RER/bus/tram/Transilien) + trains SNCF, prochains passages et trafic uniquement (pas d'itinéraires). Arrêt → stop= ; ligne IDF → line= ; rien → trafic global IDF. Hors de ces réseaux → dis-le, n'invente pas.
 - Titre flou (jeu/film/série) → search_web pour identifier, puis search_game / search_media.
-- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (mon,tue,wed,thu,fri) + time HH:MM ; until optionnel. Heure déjà passée → prochaine occ., ne refuse pas. Minimum ~1 min. via=dm UNIQUEMENT si iel dit clairement MP / DM / message privé — jamais déduire de « donne-moi » / briefing perso (défaut = salon). Max 10 tâches par personne, dont 3 répétitives. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
+- schedule_task : consigne = ce que tu FERAS à l'heure H (« Rappelle d'aller à la salle et donne la météo à Paris »), pas « Rappeler que… ». execute_at ISO 8601 (Paris si naïf) ou delay ; weekly + weekdays (mon,tue,wed,thu,fri) + time HH:MM ; until optionnel. Heure déjà passée → prochaine occ., ne refuse pas. Minimum ~1 min. via=dm UNIQUEMENT si iel dit clairement MP / DM / message privé — jamais déduire de « donne-moi » / briefing perso (défaut = salon). Max 10 tâches par personne, dont 3 répétitives. La vue confirme la programmation (quand / quoi / où) — une phrase max autour, ne recopie pas. manage_task pour modifier/pause/annuler ; show_tasks pour afficher.
 - create_poll : sondage natif Discord pour trancher une question de groupe. Jamais voter toi-même, jamais répondre à la place d'un membre, jamais donner ton avis comme un vote. Tu ne vois pas les votes en cours (renvoie vers le message).
 - render_table : colle le bloc retourné, jamais de |---| à la main.
 - render_widget : uniquement recette complète, tuto multi-étapes, comparatif dense, ou demande explicite de fiche/layout. Question directe, avis, définition, petite liste → tchat (markdown si besoin), jamais de vue. Si on te le demande après un pavé : rappelle l'outil avec tout le contenu. Jamais à la place d'une vue dédiée.
@@ -552,6 +519,7 @@ class Chat(commands.Cog):
             semantic_dedup_distance=MEMORY_SEMANTIC_DEDUP_DISTANCE,
         )
         await self._memory_worker.start()
+        register_widget("schedule_task", build_scheduled_task_view)
         register_widget("show_tasks", build_tasks_view)
         register_widget("summarize_channel", build_channel_summary_view)
         register_widget("get_server_stats", build_server_stats_view)
@@ -568,6 +536,7 @@ class Chat(commands.Cog):
         self._funstat_rotate.cancel()
         await asyncio.to_thread(self.activity.flush)
         await asyncio.to_thread(self.funstat.flush)
+        unregister_widget("schedule_task")
         unregister_widget("show_tasks")
         unregister_widget("summarize_channel")
         unregister_widget("get_server_stats")
@@ -1153,15 +1122,6 @@ class Chat(commands.Cog):
             elif name == "read_web_page":
                 domain = _source_domain((args.get("url") or "").strip())
                 label = _foot_tag("Lecture", domain)
-            elif name == "schedule_task":
-                desc = _clip_q(args.get("instruction") or args.get("title") or "", 48)
-                extra: list[str] = []
-                stamp = _schedule_stamp(args, resp.tool_responses)
-                if stamp:
-                    extra.append(stamp)
-                if desc:
-                    extra.append(f"« {desc} »")
-                label = _foot_tag("Programmé", " · ".join(extra))
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
                 label = _foot_tag("Tâche", action)

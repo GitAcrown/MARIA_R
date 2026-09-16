@@ -1090,7 +1090,7 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
 
 def _task_heading(t: ScheduledTask) -> str:
     raw = (t.title or "").strip() or (t.instruction or "").strip() or "Sans consigne"
-    return f"**{_clip(raw, 120)}**"
+    return f"**{' '.join(raw.split())}**"
 
 
 def _task_meta(t: ScheduledTask) -> str:
@@ -1104,17 +1104,17 @@ def _task_meta(t: ScheduledTask) -> str:
     return " · ".join(bits)
 
 
-def _task_section(hub: "TasksView", t: ScheduledTask) -> discord.ui.Section:
-    lines: list[discord.ui.TextDisplay] = [
-        discord.ui.TextDisplay(_task_heading(t)),
+def _task_catalog_items(hub: "TasksView", t: ScheduledTask) -> list[discord.ui.Item]:
+    """Consigne en pleine largeur (elle wrappe) ; le crayon reste sur la ligne méta."""
+    meta: list[discord.ui.TextDisplay] = [
         discord.ui.TextDisplay(f"-# {_task_meta(t)}"),
     ]
     if t.last_error:
-        lines.append(discord.ui.TextDisplay(f"-# {_clip(t.last_error, 80)}"))
-    return discord.ui.Section(
-        *lines,
-        accessory=_OpenTaskButton(hub, t),
-    )
+        meta.append(discord.ui.TextDisplay(f"-# {_clip(t.last_error, 80)}"))
+    return [
+        discord.ui.TextDisplay(_task_heading(t)),
+        discord.ui.Section(*meta, accessory=_OpenTaskButton(hub, t)),
+    ]
 
 
 def _format_task_body(t: ScheduledTask) -> str:
@@ -1406,7 +1406,7 @@ class TasksView(MariaLayout):
         else:
             for t in shown:
                 body.append(sep_tight())
-                body.append(_task_section(self, t))
+                body.extend(_task_catalog_items(self, t))
         extra: list[discord.ui.Button] = []
         if self.tasks:
             extra.append(_CancelAllTasksButton(self))
