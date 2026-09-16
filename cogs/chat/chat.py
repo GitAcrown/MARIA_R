@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -183,17 +183,6 @@ async def _keep_typing(channel) -> None:
         return
 
 
-def _fmt_delay(minutes: int) -> str:
-    """Convertit un délai en minutes en texte lisible."""
-    if minutes < 60:
-        return f"{minutes} min"
-    h, m = divmod(minutes, 60)
-    if h < 24:
-        return f"{h}h{m:02d}" if m else f"{h}h"
-    d, h = divmod(h, 24)
-    return f"{d}j{h}h" if h else f"{d}j"
-
-
 def _clip_q(text: str, n: int = 36) -> str:
     text = (text or "").strip()
     if len(text) <= n:
@@ -218,6 +207,40 @@ def _foot_tag(title: str, detail: str = "") -> str:
     if title and detail:
         return f"**{title}** · {detail}"
     return f"**{title}**" if title else detail
+
+
+def _parse_iso_dt(raw: str) -> Optional[datetime]:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=PARIS_TZ)
+    return dt
+
+
+def _schedule_stamp(args: dict, tool_responses) -> str:
+    """Horodatage Discord de la tâche créée (réponse outil, sinon args/délai)."""
+    dt = None
+    for tr in tool_responses or []:
+        rd = getattr(tr, "response_data", None)
+        if not isinstance(rd, dict) or rd.get("error") or not rd.get("task_id"):
+            continue
+        dt = _parse_iso_dt(rd.get("execute_at") or "")
+        if dt:
+            break
+    if dt is None:
+        dt = _parse_iso_dt((args.get("execute_at") or "").strip())
+    if dt is None:
+        total = int(args.get("delay_minutes") or 0) + int(args.get("delay_hours") or 0) * 60
+        if total:
+            dt = datetime.now(timezone.utc) + timedelta(minutes=total)
+    if dt is None:
+        return ""
+    return f"<t:{int(dt.timestamp())}:f>"
 
 
 def _source_footer_line(tool_responses) -> str:
@@ -247,7 +270,10 @@ def _source_footer_line(tool_responses) -> str:
                 break
         if len(bits) >= 3:
             break
-    return _foot_tag("Source", " · ".join(bits)) if bits else ""
+    if not bits:
+        return ""
+    title = "Sources" if len(bits) > 1 else "Source"
+    return _foot_tag(title, " · ".join(bits))
 
 
 DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de potes.
@@ -687,21 +713,23 @@ class Chat(commands.Cog):
                 origin = await origin_channel.fetch_message(task.message_id)
             except (discord.NotFound, discord.HTTPException, discord.Forbidden):
                 origin = None
+        stamp = f"<t:{int(task.execute_at.timestamp())}:f>"
+        programmed = _foot_tag("Programmé", stamp)
         if via_dm:
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# {programmed}"
         elif origin is not None:
             text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# {programmed}"
         else:
             if not text:
                 text = f"{mention} {_spoken_task_line(action)}"
             elif mention not in text and f"<@!{task.user_id}>" not in text:
                 text = f"{mention} {text}"
-            footer = f"-# {mention} · <t:{int(task.execute_at.timestamp())}:R>"
+            footer = f"-# {programmed}"
         if footer not in text:
             text = f"{text}\n{footer}"
 
@@ -1043,23 +1071,13 @@ class Chat(commands.Cog):
                 label = _foot_tag("Lecture", domain)
             elif name == "schedule_task":
                 desc = _clip_q(args.get("instruction") or args.get("title") or "", 48)
-                execute_at_str = (args.get("execute_at") or "").strip()
                 extra: list[str] = []
+                stamp = _schedule_stamp(args, resp.tool_responses)
+                if stamp:
+                    extra.append(stamp)
                 if desc:
                     extra.append(f"« {desc} »")
-                if execute_at_str:
-                    try:
-                        dt = datetime.fromisoformat(execute_at_str)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=PARIS_TZ)
-                        extra.append(f"<t:{int(dt.timestamp())}:f>")
-                    except ValueError:
-                        extra.append(execute_at_str)
-                else:
-                    total = (args.get("delay_minutes") or 0) + (args.get("delay_hours") or 0) * 60
-                    if total:
-                        extra.append(f"dans {_fmt_delay(total)}")
-                label = _foot_tag("Tâche", " · ".join(extra))
+                label = _foot_tag("Programmé", " · ".join(extra))
             elif name == "manage_task":
                 action = (args.get("action") or "").strip()
                 label = _foot_tag("Tâche", action)
