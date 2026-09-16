@@ -116,11 +116,12 @@ class Auto(commands.Cog):
             and chat.transcript_addresses_bot(transcript)
         )
         if requester_name:
-            suffix = f"\n-# {requester_name}"
+            detail = requester_name
         elif mentioned:
-            suffix = "\n-# **Transcription** · Mention détectée"
+            detail = "Mention détectée"
         else:
-            suffix = "\n-# **Transcription**"
+            detail = ""
+        suffix = f"\n-# **Transcription** · {detail}" if detail else "\n-# **Transcription**"
 
         posted = await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
         responded = False
