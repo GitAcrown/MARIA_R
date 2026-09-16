@@ -108,12 +108,32 @@ class Auto(commands.Cog):
                 return
         if len(transcript) > 1900:
             transcript = transcript[:1900] + "..."
-        suffix = (
-            f"\n-# {requester_name}"
-            if requester_name else "\n-# auto"
+
+        chat = self.bot.get_cog("Chat")
+        mentioned = bool(
+            requester_name is None
+            and chat is not None
+            and chat.transcript_addresses_bot(transcript)
         )
-        await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
-        await self._ingest_transcript(reply_to, transcript)
+        if requester_name:
+            suffix = f"\n-# {requester_name}"
+        elif mentioned:
+            suffix = "\n-# **Transcription** · Mention détectée"
+        else:
+            suffix = "\n-# **Transcription**"
+
+        posted = await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
+        responded = False
+        if mentioned and chat is not None:
+            logger.info("Mention détectée dans la transcription — réponse auto")
+            try:
+                responded = await chat.respond_to_transcript(
+                    reply_to, transcript, reply_anchor=posted,
+                )
+            except Exception:
+                logger.error("Réponse auto à la transcription échouée", exc_info=True)
+        if not responded:
+            await self._ingest_transcript(reply_to, transcript)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

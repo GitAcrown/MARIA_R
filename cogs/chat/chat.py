@@ -148,6 +148,30 @@ def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
     return False
 
 
+class _ContentOverride:
+    """Message Discord dont le contenu est remplacé (transcription vocale → texte)."""
+
+    def __init__(self, message: discord.Message, content: str):
+        self._message = message
+        self._content = content
+
+    @property
+    def content(self) -> str:
+        return self._content
+
+    @property
+    def clean_content(self) -> str:
+        return self._content
+
+    @property
+    def attachments(self):
+        # La PJ audio a déjà été transcrite : on évite un 2e appel Whisper au run.
+        return []
+
+    def __getattr__(self, name: str):
+        return getattr(self._message, name)
+
+
 _MEM_CALLBACK_RE = re.compile(r"\[\[MEM\]\](.*?)\[\[/MEM\]\]", re.DOTALL)
 _SOURCE_MARK_RE = re.compile(r"\s*[\[(]s\d+[)\]]", re.IGNORECASE)
 
@@ -857,6 +881,63 @@ class Chat(commands.Cog):
                 return True
         return False
 
+    def transcript_addresses_bot(self, transcript: str) -> bool:
+        """True si la transcription s'adresse au bot (même heuristique que greedy)."""
+        if not self.bot.user:
+            return False
+        return _greedy_name_addresses_bot(transcript or "", self.bot.user.name)
+
+    async def respond_to_transcript(
+        self,
+        source: discord.Message,
+        transcript: str,
+        *,
+        reply_anchor: Optional[discord.Message] = None,
+    ) -> bool:
+        """Traite une transcription vocale comme un message classique. True si une réponse part."""
+        text = (transcript or "").strip()
+        if not text or not self.transcript_addresses_bot(text):
+            return False
+        if source.guild:
+            mode = self.data.get(source.guild).settings("guild_config").get(
+                "chatbot_mode", "strict",
+            )
+            if mode == "off":
+                return False
+        if source.id in self._answered:
+            return False
+
+        # Annule une réponse déjà debouncee sur le vocal vide (reply au bot, cache…).
+        debounce_key = (source.channel.id, source.author.id)
+        pending = self._pending_responses.pop(debounce_key, None)
+        if pending:
+            pending.cancel()
+        self._first_triggers.pop(debounce_key, None)
+
+        trigger = _ContentOverride(source, text)
+        session = self.gpt_api.session_manager.get_or_create(source.channel)
+        await session.ingest_message(trigger, is_context_only=False)
+
+        if source.guild:
+            self.activity.bump_summon(
+                source.guild.id, source.channel.id, source.author.id,
+            )
+            if self._memory_worker:
+                self._memory_worker.ingest(
+                    guild_id=source.guild.id,
+                    channel_id=source.channel.id,
+                    author_id=source.author.id,
+                    author_name=source.author.name,
+                    content=text,
+                    addressed_to_bot=True,
+                )
+
+        self._answered.append(source.id)
+        await self._send_response(
+            trigger, use_reply=True, reply_anchor=reply_anchor,
+        )
+        return True
+
     def _poll_ctx_text(self, channel_id: int) -> str:
         """Sondage(s) actif(s) dans ce salon — persiste bien au-delà de la fenêtre
         [CONTEXTE RÉCENT] (~20 min), pour que MARIA sache qu'un vote est en cours
@@ -945,12 +1026,15 @@ class Chat(commands.Cog):
     async def _send_response(
         self, message: discord.Message, *, use_reply: bool = True,
         edit_target: Optional[discord.Message] = None,
+        reply_anchor: Optional[discord.Message] = None,
     ) -> None:
         """Génère et envoie la réponse au message déclencheur.
 
         `edit_target` (édition tardive du déclencheur, cf. _maybe_redo_response) : si la
         nouvelle réponse tient en un seul message texte, édite ce message existant au lieu
-        d'en poster un nouveau. Sinon (widget, réponse multi-chunks), repli sur un envoi normal."""
+        d'en poster un nouveau. Sinon (widget, réponse multi-chunks), repli sur un envoi normal.
+        `reply_anchor` : message Discord auquel répondre visuellement (ex. la transcription
+        postée), distinct du déclencheur utilisé comme FOCUS."""
         self_ctx = ""
         profile_ctx = ""
         memory_ctx = ""
@@ -1119,7 +1203,7 @@ class Chat(commands.Cog):
                 continue
             try:
                 if use_reply and not sent_tools:
-                    posted = await message.reply(view=view)
+                    posted = await (reply_anchor or message).reply(view=view)
                 else:
                     posted = await message.channel.send(view=view)
             except discord.HTTPException as e:
@@ -1154,7 +1238,10 @@ class Chat(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-        posted = await send_long(message.channel, text, reply_to=message if use_reply else None)
+        posted = await send_long(
+            message.channel, text,
+            reply_to=(reply_anchor or message) if use_reply else None,
+        )
         self._remember_reply(message.id, posted[0] if len(posted) == 1 else None)
 
     # ------------------------------------------------------------------
