@@ -150,10 +150,14 @@ def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[disc
     via = (data.get("via") or "").strip().lower()
     dest = "en MP" if (data.get("deliver_dm") or via in ("mp", "dm", "private")) else "sur ce salon"
     foot = f"-# {SMALL_TASK} <t:{ts}:f> · <t:{ts}:R> · {dest}"
+    accent = data.get("accent_colour")
+    kwargs: dict = {}
+    if isinstance(accent, int) and accent:
+        kwargs["accent_colour"] = discord.Colour(accent)
     container = discord.ui.Container(
         discord.ui.TextDisplay(head),
-        discord.ui.Separator(),
         discord.ui.TextDisplay(foot),
+        **kwargs,
     )
     return layout_with_commentary(container, commentary)
 
@@ -354,6 +358,8 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "schedule_label": label,
             "deliver_dm": deliver_dm,
         }
+        colour = getattr(ctx.trigger_message.author, "colour", None)
+        accent = colour.value if colour is not None and getattr(colour, "value", 0) else None
         return ToolResponseRecord(tc.id, {
             "_tool": "schedule_task",
             "success": True,
@@ -361,6 +367,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "schedule": label,
             "via": dest,
             **payload,
+            "accent_colour": accent,
             "_llm_summary": f"Tâche programmée ({label}, {dest}).",
         }, datetime.now(timezone.utc))
 
