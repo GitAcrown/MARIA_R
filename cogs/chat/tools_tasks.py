@@ -6,7 +6,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import layout_with_commentary
-from common.emojis import REPEAT_REMINDER, SMALL_TASK
+from common.emojis import SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
     SCHEDULE_DAILY,
@@ -143,33 +143,17 @@ def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[disc
     ts = _task_execute_ts(data)
     if ts is None:
         return None
-    desc = (data.get("instruction") or data.get("title") or "").strip()
-    if len(desc) > 240:
-        desc = desc[:239] + "…"
-    kind = data.get("schedule_kind") or SCHEDULE_ONCE
-    icon = REPEAT_REMINDER if kind != SCHEDULE_ONCE else SMALL_TASK
-    bits: list[str] = []
-    if kind != SCHEDULE_ONCE:
-        label = (data.get("schedule_label") or data.get("schedule") or "").strip()
-        if label:
-            bits.append(label)
-        bits.append(f"prochaine <t:{ts}:R>")
-        until_ts = data.get("until_at_ts")
-        if isinstance(until_ts, int) and until_ts > 0:
-            bits.append(f"jusqu'au <t:{until_ts}:d>")
-    else:
-        bits.append(f"<t:{ts}:f>")
-        bits.append(f"<t:{ts}:R>")
+    desc = " ".join((data.get("instruction") or data.get("title") or "").split())
+    if len(desc) > 160:
+        desc = desc[:159] + "…"
+    head = f"**Programmé** · *{desc}*" if desc else "**Programmé**"
     via = (data.get("via") or "").strip().lower()
-    if data.get("deliver_dm") or via in ("mp", "dm", "private"):
-        bits.append("MP")
-    else:
-        bits.append("salon")
-    body = f"{desc}\n-# {' · '.join(bits)}" if desc else f"-# {' · '.join(bits)}"
+    dest = "en MP" if (data.get("deliver_dm") or via in ("mp", "dm", "private")) else "sur ce salon"
+    foot = f"-# {SMALL_TASK} <t:{ts}:f> · <t:{ts}:R> · {dest}"
     container = discord.ui.Container(
-        discord.ui.TextDisplay(f"## {icon} Programmé"),
+        discord.ui.TextDisplay(head),
         discord.ui.Separator(),
-        discord.ui.TextDisplay(body),
+        discord.ui.TextDisplay(foot),
     )
     return layout_with_commentary(container, commentary)
 
