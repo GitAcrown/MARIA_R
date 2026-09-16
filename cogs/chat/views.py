@@ -14,6 +14,7 @@ from typing import Optional
 
 import discord
 
+from common.discord_ui import member_accent_colour
 from common.emojis import PENCIL, REPEAT_REMINDER, SMALL_TASK
 from common.menu_layout import (
     HubPageButton,
@@ -1133,8 +1134,18 @@ def _format_task_body(t: ScheduledTask) -> str:
     )
 
 
-def _reload_tasks(store: TaskStore, user_id: int, *, note: str = "", page: int = 0) -> "TasksView":
-    return TasksView(store, user_id, store.get_user_tasks(user_id), note=note, page=page)
+def _reload_tasks(
+    store: TaskStore,
+    user_id: int,
+    *,
+    note: str = "",
+    page: int = 0,
+    accent_colour: Optional[discord.Colour] = None,
+) -> "TasksView":
+    return TasksView(
+        store, user_id, store.get_user_tasks(user_id),
+        note=note, page=page, accent_colour=accent_colour,
+    )
 
 
 class EditTaskModal(discord.ui.Modal, title="Modifier la tâche"):
@@ -1331,8 +1342,12 @@ class TasksView(MariaLayout):
         *,
         note: str = "",
         page: int = 0,
+        accent_colour: Optional[discord.Colour] = None,
     ):
-        super().__init__(viewer_id=user_id)
+        super().__init__(
+            viewer_id=user_id,
+            accent_colour=accent_colour,
+        )
         self.store = store
         self.user_id = user_id
         self.tasks = tasks
@@ -1472,5 +1487,8 @@ class TasksManageButton(
             await interaction.response.send_message("Indisponible.", ephemeral=True)
             return
         tasks = await asyncio.to_thread(chat.tasks.get_user_tasks, self.uid)
-        view = TasksView(chat.tasks, self.uid, tasks)
+        view = TasksView(
+            chat.tasks, self.uid, tasks,
+            accent_colour=member_accent_colour(interaction.user),
+        )
         await send_ephemeral_menu(interaction, view)

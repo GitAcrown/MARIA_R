@@ -16,7 +16,7 @@ logger = logging.getLogger("MARIA.Chat")
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from common.discord_ui import suppress_link_embeds
+from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
 from common.funstat import FunStatTracker, propose_campaign
@@ -1408,7 +1408,10 @@ class Chat(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         tasks = await asyncio.to_thread(self.tasks.get_user_tasks, interaction.user.id)
         await interaction.followup.send(
-            view=TasksView(self.tasks, interaction.user.id, tasks),
+            view=TasksView(
+                self.tasks, interaction.user.id, tasks,
+                accent_colour=member_accent_colour(interaction.user),
+            ),
             ephemeral=True,
         )
 

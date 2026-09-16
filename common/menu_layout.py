@@ -116,9 +116,16 @@ async def publish_layout_message(
 class MariaLayout(discord.ui.LayoutView):
     """Base des hubs interactifs : un Container, état objet, `_build()` + `push`."""
 
-    def __init__(self, *, timeout: float | None = MENU_TIMEOUT, viewer_id: int | None = None):
+    def __init__(
+        self,
+        *,
+        timeout: float | None = MENU_TIMEOUT,
+        viewer_id: int | None = None,
+        accent_colour: discord.Colour | None = None,
+    ):
         super().__init__(timeout=timeout)
         self.viewer_id = viewer_id
+        self.accent_colour = accent_colour
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
 
@@ -195,7 +202,10 @@ class MariaLayout(discord.ui.LayoutView):
                 children.append(sep_tight())
             children.append(row)
         if children:
-            self.add_item(discord.ui.Container(*children))
+            kwargs: dict = {}
+            if self.accent_colour is not None:
+                kwargs["accent_colour"] = self.accent_colour
+            self.add_item(discord.ui.Container(*children, **kwargs))
 
     def _build(self) -> None:
         """À surcharger : reconstruit le layout depuis l'état de l'instance."""

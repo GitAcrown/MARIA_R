@@ -5,7 +5,7 @@ from typing import Optional
 
 import discord
 
-from common.discord_ui import layout_with_commentary
+from common.discord_ui import layout_with_commentary, member_accent_colour, member_accent_value
 from common.emojis import SMALL_TASK
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.tasks import (
@@ -94,6 +94,14 @@ def _format_widget_line(item: dict) -> str:
     return f"-# <t:{ts}:f> (<t:{ts}:R>){dest}{status_bit}\n› {desc}"
 
 
+def _accent_kwargs(accent) -> dict:
+    if isinstance(accent, discord.Colour) and accent.value:
+        return {"accent_colour": accent}
+    if isinstance(accent, int) and accent:
+        return {"accent_colour": discord.Colour(accent)}
+    return {}
+
+
 async def _send_dm_confirm(
     user: discord.abc.User,
     *,
@@ -103,15 +111,23 @@ async def _send_dm_confirm(
 ) -> str | None:
     """Confirme en MP. None si OK, sinon message d'erreur (MP fermés, etc.)."""
     ts = int(execute_at.timestamp())
-    desc = (instruction or "").strip()
-    if len(desc) > 120:
-        desc = desc[:119] + "…"
-    body = (
-        f"{SMALL_TASK} {desc}\n"
-        f"-# {label} · <t:{ts}:R>"
-    )
+    desc = " ".join((instruction or "").split())
+    if len(desc) > 160:
+        desc = desc[:159] + "…"
+    head = f"**Programmé** · *{desc}*" if desc else "**Programmé**"
+    bits = [f"{SMALL_TASK} <t:{ts}:f>", f"<t:{ts}:R>"]
+    if label and label != "une fois":
+        bits.append(label)
+    bits.append("en MP")
+    foot = f"-# {' · '.join(bits)}"
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(head),
+        discord.ui.TextDisplay(foot),
+        **_accent_kwargs(member_accent_colour(user)),
+    ))
     try:
-        await user.send(body, allowed_mentions=discord.AllowedMentions.none())
+        await user.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         return None
     except (discord.Forbidden, discord.HTTPException):
         return (
@@ -151,13 +167,10 @@ def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[disc
     dest = "en MP" if (data.get("deliver_dm") or via in ("mp", "dm", "private")) else "sur ce salon"
     foot = f"-# {SMALL_TASK} <t:{ts}:f> · <t:{ts}:R> · {dest}"
     accent = data.get("accent_colour")
-    kwargs: dict = {}
-    if isinstance(accent, int) and accent:
-        kwargs["accent_colour"] = discord.Colour(accent)
     container = discord.ui.Container(
         discord.ui.TextDisplay(head),
         discord.ui.TextDisplay(foot),
-        **kwargs,
+        **_accent_kwargs(accent),
     )
     return layout_with_commentary(container, commentary)
 
@@ -180,7 +193,10 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     else:
         body = "\n\n".join(_format_widget_line(it) for it in items)
         children.append(discord.ui.TextDisplay(body))
-    view = layout_with_commentary(discord.ui.Container(*children), commentary)
+    view = layout_with_commentary(
+        discord.ui.Container(*children, **_accent_kwargs(data.get("accent_colour"))),
+        commentary,
+    )
     uid = data.get("user_id")
     if uid:
         from cogs.chat.views import TasksManageButton
@@ -358,8 +374,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "schedule_label": label,
             "deliver_dm": deliver_dm,
         }
-        colour = getattr(ctx.trigger_message.author, "colour", None)
-        accent = colour.value if colour is not None and getattr(colour, "value", 0) else None
+        accent = member_accent_value(ctx.trigger_message.author)
         return ToolResponseRecord(tc.id, {
             "_tool": "schedule_task",
             "success": True,
@@ -562,6 +577,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "display_name": name,
             "count": len(items),
             "tasks": items,
+            "accent_colour": member_accent_value(ctx.trigger_message.author),
             "_llm_summary": (
                 f"Widget tâches de {name} affiché ({len(items)})."
                 if items else f"Aucune tâche en attente pour {name}."

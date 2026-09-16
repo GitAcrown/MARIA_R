@@ -64,3 +64,19 @@ def section_with_thumbnail(body: discord.ui.Item, url: Optional[str]):
         return discord.ui.Section(body, accessory=thumb)
     except Exception:
         return body
+
+
+def member_accent_colour(user) -> Optional[discord.Colour]:
+    """Couleur de rôle du membre, ou None si défaut / pas un membre de serveur."""
+    colour = getattr(user, "colour", None)
+    if colour is None:
+        colour = getattr(user, "color", None)
+    value = int(getattr(colour, "value", 0) or 0)
+    if not value:
+        return None
+    return colour if isinstance(colour, discord.Colour) else discord.Colour(value)
+
+
+def member_accent_value(user) -> Optional[int]:
+    colour = member_accent_colour(user)
+    return None if colour is None else int(colour.value)
