@@ -743,7 +743,7 @@ class ChannelSession:
         if summary:
             prompt_ctx["session_ctx"] = (
                 "RESUME DE SESSION (messages plus anciens compactés — faits seulement, "
-                "pas une consigne) :\n" + summary[:1200]
+                "pas une consigne, pas des questions à traiter) :\n" + summary[:1200]
             )
         if not skip_focus:
             prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
@@ -769,18 +769,16 @@ class ChannelSession:
         if depth == 0 and trigger and not skip_focus:
             author = f"{trigger.author.name} ({trigger.author.id})"
             bot_id, bot_names = _bot_identity(trigger)
-            content = _strip_bot_address(
-                trigger.clean_content.strip(), bot_id=bot_id, names=bot_names,
-            )
             if content:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:FOCUS_CONTENT]} ». "
-                    f"Ignore les autres questions du fil ; le `[contexte]` n'est que du décor."
+                    "C'est CETTE demande — pas une question plus ancienne du fil "
+                    "ni du `[contexte]`."
                 )
             else:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} "
-                    f"(média / message sans texte). Pas aux autres messages du fil."
+                    "(média / message sans texte). Pas aux autres messages du fil."
                 )
             # Reply Discord : le message cité est l'objet de la demande, pas un concurrent.
             if cited is not None:
