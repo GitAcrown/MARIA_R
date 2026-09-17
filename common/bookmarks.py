@@ -375,6 +375,7 @@ class BookmarkButton(
             discord.ui.Button(
                 style=discord.ButtonStyle.secondary,
                 emoji=emoji or _EMOJI,
+                label="Enregistrer la vue",
                 custom_id=f"maria:bm:{wid}",
             )
         )

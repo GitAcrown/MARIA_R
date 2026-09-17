@@ -221,10 +221,15 @@ def _bot_identity(message: Optional[discord.Message]) -> tuple[Optional[int], li
 
 
 def _strip_bot_address(text: str, *, bot_id: Optional[int], names: list[str]) -> str:
-    """Retire un ping / nom de bot en tête (« @MARIA … » / « Maria, … »)."""
+    """Retire un ping / nom de bot en tête (« @MARIA … » / « Maria, … »).
+
+    Si le message n'est QUE le nom (« Maria ? »), on le garde : le vider ferait
+    croire à un message vide.
+    """
     out = (text or "").strip()
     if not out:
         return out
+    original = out
     if bot_id is not None:
         out = re.sub(rf"^<@!?{bot_id}>\s*", "", out)
     for n in names:
@@ -238,7 +243,8 @@ def _strip_bot_address(text: str, *, bot_id: Optional[int], names: list[str]) ->
         if nxt != out:
             out = nxt
             break
-    return out.lstrip()
+    out = out.lstrip()
+    return out if out else original
 
 
 def _is_identity_stub(text: str, names: list[str]) -> bool:
