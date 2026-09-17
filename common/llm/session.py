@@ -769,6 +769,9 @@ class ChannelSession:
         if depth == 0 and trigger and not skip_focus:
             author = f"{trigger.author.name} ({trigger.author.id})"
             bot_id, bot_names = _bot_identity(trigger)
+            content = _strip_bot_address(
+                trigger.clean_content.strip(), bot_id=bot_id, names=bot_names,
+            )
             if content:
                 hint = (
                     f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:FOCUS_CONTENT]} ». "
