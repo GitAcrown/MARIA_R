@@ -347,6 +347,13 @@ def _components_v2_to_parts(
     return texts, images
 
 
+def _reply_cite_line(label: str, preview: Optional[str] = None) -> str:
+    """Barre Discord reply : citation d'un autre message, jamais le texte du membre."""
+    if preview:
+        return f'[Cité (reply, pas le texte de ce membre) — {label} : "{preview}"]'
+    return f"[Cité (reply, pas le texte de ce membre) — {label}]"
+
+
 def _cite_snippet(msg: discord.Message, limit: int = FOCUS_SNIPPET) -> str:
     """Aperçu du message cité, pour le [FOCUS] (texte, sinon titre/URL d'embed)."""
     text = (getattr(msg, "clean_content", None) or msg.content or "").strip()
@@ -531,7 +538,7 @@ class ChannelSession:
 
             if ref_id and self._still_in_context(ref_id):
                 # Message encore réellement visible dans le contexte courant : pas de doublon
-                parts.append(TextComponent(f"[Suite de : {label}]"))
+                parts.append(TextComponent(_reply_cite_line(f"suite de {label}")))
             else:
                 # Message hors contexte (avant restart, autre session…)
                 ref_text = (ref.content or "").strip()
@@ -558,11 +565,9 @@ class ChannelSession:
                                 ref_lines.append(layout_bit[:BOT_REPLY_LAYOUT_CAP])
                     if ref_lines:
                         preview = " | ".join(ref_lines)[:700]
-                        parts.append(TextComponent(
-                            f"[Répond à {label} : \"{preview}\"]"
-                        ))
+                        parts.append(TextComponent(_reply_cite_line(label, preview)))
                     else:
-                        parts.append(TextComponent(f"[Répond à la dernière réponse du bot]"))
+                        parts.append(TextComponent(_reply_cite_line("ta dernière réponse")))
                 else:
                     # Message utilisateur → aperçu texte (+ embeds / LayoutView)
                     ref_lines: list[str] = []
@@ -581,7 +586,7 @@ class ChannelSession:
                             ref_lines.append(layout_bit[:300 if is_context_only else 400])
                     if ref_lines:
                         preview = " | ".join(ref_lines)[:500]
-                        parts.append(TextComponent(f"[Répond à {label} : \"{preview}\"]"))
+                        parts.append(TextComponent(_reply_cite_line(label, preview)))
 
             if not is_context_only:
                 for att in getattr(ref, "attachments", []):
@@ -780,28 +785,28 @@ class ChannelSession:
             )
             if content:
                 hint = (
-                    f"[FOCUS] Réponds UNIQUEMENT à {author} : « {content[:FOCUS_CONTENT]} ». "
-                    "C'est CETTE demande — pas une question plus ancienne du fil "
-                    "ni du `[contexte]`."
+                    f"[FOCUS] Texte écrit par {author} : « {content[:FOCUS_CONTENT]} ». "
+                    "C'est SON message. Réponds à ça, pas à une autre question du `[contexte]`."
                 )
             else:
                 hint = (
-                    f"[FOCUS] Réponds UNIQUEMENT à {author} "
-                    "(média / message sans texte). Pas aux autres messages du fil."
+                    f"[FOCUS] {author} t'envoie un média / message sans texte propre."
                 )
-            # Reply Discord : le message cité est l'objet de la demande, pas un concurrent.
+            # Reply Discord = barre de citation, jamais le texte du membre.
             if cited is not None:
                 snippet = _cite_snippet(cited)
-                if snippet:
-                    hint += (
-                        f" Iel répond à : « {snippet} ». La demande porte sur ce contenu "
-                        f"(lien, média, propos), pas sur tout le salon — sauf demande explicite."
-                    )
+                cited_author = getattr(getattr(cited, "author", None), "name", None)
+                cited_is_bot = bool(getattr(getattr(cited, "author", None), "bot", False))
+                who = "toi" if cited_is_bot else (cited_author or "un autre message")
+                cite_bit = f" « {snippet} »" if snippet else ""
+                hint += (
+                    f" Iel a utilisé un reply Discord vers {who} :{cite_bit}."
+                    " C'est une CITATION, pas son texte — ne lui attribue pas."
+                )
+                if content:
+                    hint += " Traite uniquement ce qu'iel a écrit."
                 else:
-                    hint += (
-                        " C'est une réponse Discord : la demande porte sur le message cité "
-                        "(lien, média, propos), pas sur tout le salon."
-                    )
+                    hint += " Son message est vide : la demande porte sur le message cité."
             # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
             # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
             ctx_hint = self._build_context_hint()
