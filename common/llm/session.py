@@ -424,6 +424,10 @@ class ChannelSession:
         )
         self._lock = asyncio.Lock()
         self.trigger_message: Optional[discord.Message] = None
+        # Une search_web réussie par message utilisateur. Une 2e n'est autorisée
+        # que si la première n'a rien ramené (reformulation).
+        self._web_searches_this_turn = 0
+        self._web_search_reformulate = False
         self._prompt_context: Optional[dict] = None
         # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence).
         # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
@@ -728,6 +732,9 @@ class ChannelSession:
             return self.context.add_assistant_message(
                 components=[MetadataComponent("EMPTY")],
             )
+        if depth == 0:
+            self._web_searches_this_turn = 0
+            self._web_search_reformulate = False
 
         # Ne pas écraser le trigger entre tours d'outils (depth>0 passe souvent None).
         if trigger is not None:
@@ -805,14 +812,22 @@ class ChannelSession:
                 cited_is_bot = bool(getattr(getattr(cited, "author", None), "bot", False))
                 who = "toi" if cited_is_bot else (cited_author or "un autre message")
                 cite_bit = f" « {snippet} »" if snippet else ""
-                hint += (
-                    f" Iel a utilisé un reply Discord vers {who} :{cite_bit}."
-                    " C'est une CITATION, pas son texte — ne lui attribue pas."
-                )
-                if content:
-                    hint += " Traite uniquement ce qu'iel a écrit."
+                hint += f" Iel a utilisé un reply Discord vers {who} :{cite_bit}."
+                if cited_is_bot:
+                    hint += (
+                        " C'est TA réponse, pas son texte. Son message la précise ou la corrige : "
+                        "reste sur CE sujet. Consulter son profil ou la mémoire ne change pas la question. "
+                        "« moi » / « perso » / « personnellement » = adapte cette réponse à cette personne, "
+                        "sans nouveau search_web si les faits sont déjà là."
+                    )
+                    if not content:
+                        hint += " Son message est vide : la demande porte sur le message cité."
                 else:
-                    hint += " Son message est vide : la demande porte sur le message cité."
+                    hint += " C'est une CITATION, pas son texte — ne lui attribue pas."
+                    if content:
+                        hint += " Traite uniquement ce qu'iel a écrit."
+                    else:
+                        hint += " Son message est vide : la demande porte sur le message cité."
             # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
             # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
             ctx_hint = self._build_context_hint()
@@ -1021,25 +1036,34 @@ class ChannelSession:
 
         return assistant
 
+    def _refuse_extra_search(self, tc: ToolCallRecord) -> None:
+        logger.info("search_web ignorée — déjà une recherche ce tour")
+        self.context.add_message(
+            ToolResponseRecord(
+                tool_call_id=tc.id,
+                response_data={
+                    "error": (
+                        "Une search_web suffit. Utilise ces résultats "
+                        "ou read_web_page, ne relance pas."
+                    ),
+                },
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
     async def _execute_tools(self, tool_calls: list[ToolCallRecord]) -> None:
         search_web_done = False
         for tc in tool_calls:
             if tc.function_name == "search_web":
-                if search_web_done:
-                    self.context.add_message(
-                        ToolResponseRecord(
-                            tool_call_id=tc.id,
-                            response_data={
-                                "error": (
-                                    "Une search_web suffit. Utilise ces résultats "
-                                    "ou read_web_page, ne relance pas."
-                                ),
-                            },
-                            created_at=datetime.now(timezone.utc),
-                        )
-                    )
+                extra = search_web_done or self._web_searches_this_turn >= 2 or (
+                    self._web_searches_this_turn >= 1 and not self._web_search_reformulate
+                )
+                if extra:
+                    self._refuse_extra_search(tc)
                     continue
                 search_web_done = True
+                self._web_search_reformulate = False
+                self._web_searches_this_turn += 1
             tool = self.tool_registry.get(tc.function_name)
             if not tool:
                 logger.warning(f"Outil inconnu : {tc.function_name}")
@@ -1053,6 +1077,10 @@ class ChannelSession:
                 continue
             try:
                 resp = await tool.execute(tc, self)
+                if tc.function_name == "search_web":
+                    data = getattr(resp, "response_data", None) or {}
+                    if data.get("error") == "Aucun résultat" and self._web_searches_this_turn < 2:
+                        self._web_search_reformulate = True
                 self.context.add_message(resp)
             except Exception as e:
                 logger.error(f"Outil {tc.function_name}: {e}", exc_info=True)

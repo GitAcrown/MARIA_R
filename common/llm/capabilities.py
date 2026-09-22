@@ -323,6 +323,8 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("media_topic")
         if _SERVER_STATS_RE.search(text):
             flags.add("server_stats")
+        # Le footer « Sources » d'une réponse du bot n'est pas une demande de lecture.
+        author_is_bot = bool(getattr(getattr(msg, "author", None), "bot", False))
         for url in _urls_in(msg):
             host = _host(url)
             ext = _path_ext(url)
@@ -330,6 +332,8 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
                 continue
             if ext in _VID_EXT:
                 flags.add("video_file")
+                continue
+            if author_is_bot:
                 continue
             flags.add("web")
         for att in msg.attachments or []:
