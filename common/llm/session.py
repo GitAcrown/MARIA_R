@@ -354,6 +354,33 @@ def _reply_cite_line(label: str, preview: Optional[str] = None) -> str:
     return f"[Cité (reply, pas le texte de ce membre) — {label}]"
 
 
+def _reply_anchor_preview(ref: discord.Message, limit: int = 160) -> str:
+    """Courte citation, pour qu'un reply reste lisible si l'original est évincé."""
+    text = (getattr(ref, "clean_content", None) or ref.content or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        for emb in getattr(ref, "embeds", None) or []:
+            bit = (emb.title or emb.description or "").strip()
+            if bit:
+                text = re.sub(r"\s+", " ", bit)
+                break
+    if not text:
+        comps = getattr(ref, "components", None)
+        if comps:
+            comp_texts, _ = _components_v2_to_parts(list(comps))
+            if comp_texts:
+                text = re.sub(r"\s+", " ", " ".join(comp_texts))
+    if not text:
+        if getattr(ref, "attachments", None):
+            return "[média]"
+        if getattr(ref, "stickers", None):
+            return "[sticker]"
+        return ""
+    if len(text) > limit:
+        return text[: limit - 1].rstrip() + "…"
+    return text
+
+
 def _cite_snippet(msg: discord.Message, limit: int = FOCUS_SNIPPET) -> str:
     """Aperçu du message cité, pour le [FOCUS] (texte, sinon titre/URL d'embed)."""
     text = (getattr(msg, "clean_content", None) or msg.content or "").strip()
@@ -533,70 +560,82 @@ class ChannelSession:
             ref_name = getattr(ref_author, "name", "?") if ref_author else "?"
             ref_author_id = getattr(ref_author, "id", None) if ref_author else None
             ref_id = getattr(ref, "id", None)
-            if ref_is_bot:
+            bot_id, _ = _bot_identity(message)
+            is_self = bool(
+                ref_is_bot and ref_author_id is not None and bot_id is not None
+                and ref_author_id == bot_id
+            )
+            if is_self:
                 label = "ton message"
             elif ref_author_id is not None:
                 label = f"{ref_name} ({ref_author_id})"
             else:
                 label = ref_name
 
-            if ref_id and self._still_in_context(ref_id):
-                # Message encore réellement visible dans le contexte courant : pas de doublon
-                parts.append(TextComponent(_reply_cite_line(f"suite de {label}")))
-            else:
-                # Message hors contexte (avant restart, autre session…)
+            in_context = bool(ref_id and self._still_in_context(ref_id))
+            if in_context:
+                # L'original est dans la fenêtre, mais le trim peut l'enlever ensuite
+                # (surtout un [contexte] ancien). La citation courte reste sur le reply.
+                preview = _reply_anchor_preview(ref)
+                parts.append(TextComponent(_reply_cite_line(f"répond à {label}", preview or None)))
+            elif is_self:
+                # Message du bot hors historique ingéré : artefacts, sinon le texte / la vue.
                 ref_text = (ref.content or "").strip()
-
-                if ref_is_bot:
-                    # Message du bot : artefacts de session d'abord (faits déjà extraits),
-                    # sinon extraits LayoutView bornés — pas les deux.
-                    ref_lines: list[str] = []
-                    art = " | ".join(self.artifacts.hint_parts()[:2])
-                    if art:
-                        ref_lines.append(art[:700])
-                    else:
-                        if ref_text:
-                            ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
-                        for emb in getattr(ref, "embeds", []):
-                            t = _embed_to_text(emb)
-                            if t:
-                                ref_lines.append(t[:240])
-                        ref_comps = getattr(ref, "components", None)
-                        if ref_comps:
-                            comp_texts, _ = _components_v2_to_parts(list(ref_comps))
-                            if comp_texts:
-                                layout_bit = "\n".join(comp_texts)
-                                ref_lines.append(layout_bit[:BOT_REPLY_LAYOUT_CAP])
-                    if ref_lines:
-                        preview = " | ".join(ref_lines)[:700]
-                        parts.append(TextComponent(_reply_cite_line(label, preview)))
-                    else:
-                        parts.append(TextComponent(_reply_cite_line("ta dernière réponse")))
+                ref_lines: list[str] = []
+                art = " | ".join(self.artifacts.hint_parts()[:2])
+                if art:
+                    ref_lines.append(art[:700])
                 else:
-                    # Message utilisateur → aperçu texte (+ embeds / LayoutView)
-                    ref_lines: list[str] = []
                     if ref_text:
                         ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
-                    ref_cap = 200 if is_context_only else 300
                     for emb in getattr(ref, "embeds", []):
                         t = _embed_to_text(emb)
                         if t:
-                            ref_lines.append(t[:ref_cap])
+                            ref_lines.append(t[:240])
                     ref_comps = getattr(ref, "components", None)
                     if ref_comps:
                         comp_texts, _ = _components_v2_to_parts(list(ref_comps))
                         if comp_texts:
                             layout_bit = "\n".join(comp_texts)
-                            ref_lines.append(layout_bit[:300 if is_context_only else 400])
-                    if ref_lines:
-                        preview = " | ".join(ref_lines)[:500]
-                        parts.append(TextComponent(_reply_cite_line(label, preview)))
+                            ref_lines.append(layout_bit[:BOT_REPLY_LAYOUT_CAP])
+                if ref_lines:
+                    preview = " | ".join(ref_lines)[:700]
+                    parts.append(TextComponent(_reply_cite_line(f"répond à {label}", preview)))
+                else:
+                    parts.append(TextComponent(_reply_cite_line("répond à ta dernière réponse")))
+            else:
+                # Membre ou autre bot, message hors fenêtre : le texte cité.
+                ref_text = (getattr(ref, "clean_content", None) or ref.content or "").strip()
+                ref_lines = []
+                if ref_text:
+                    ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
+                ref_cap = 200 if is_context_only else 300
+                for emb in getattr(ref, "embeds", []):
+                    t = _embed_to_text(emb)
+                    if t:
+                        ref_lines.append(t[:ref_cap])
+                ref_comps = getattr(ref, "components", None)
+                if ref_comps:
+                    comp_texts, _ = _components_v2_to_parts(list(ref_comps))
+                    if comp_texts:
+                        layout_bit = "\n".join(comp_texts)
+                        ref_lines.append(layout_bit[:300 if is_context_only else 400])
+                if ref_lines:
+                    preview = " | ".join(ref_lines)[:500]
+                    parts.append(TextComponent(_reply_cite_line(f"répond à {label}", preview)))
+                else:
+                    anchor = _reply_anchor_preview(ref)
+                    parts.append(TextComponent(_reply_cite_line(f"répond à {label}", anchor or None)))
 
             if not is_context_only:
                 for att in getattr(ref, "attachments", []):
                     fn = (att.filename or "").lower()
                     if (att.content_type or "").startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".webp")):
                         parts.append(ImageComponent(att.url, detail="low"))
+        elif message.reference is not None:
+            parts.append(TextComponent(
+                "[Cité (reply, pas le texte de ce membre) — message d'origine introuvable]"
+            ))
 
         # --- Texte principal ---
         # Les messages non adressés au bot sont tagués [contexte] pour que le LLM
@@ -619,6 +658,13 @@ class ChannelSession:
             not is_context_only and (message.stickers or message.attachments)
         ):
             parts.append(TextComponent(f"{ctx_tag}[{msg_time}] {display_name}:"))
+
+        for snap in getattr(message, "message_snapshots", None) or []:
+            snap_text = (getattr(snap, "content", None) or "").replace("\n", " ").strip()
+            if len(snap_text) > 200:
+                snap_text = snap_text[:199].rstrip() + "…"
+            if snap_text:
+                parts.append(TextComponent(f'[Transfère : "{snap_text}"]'))
 
         # --- Embeds + LayoutView : texte toujours ; images seulement si adressé au bot ---
         embed_cap = 300 if is_context_only else 600
