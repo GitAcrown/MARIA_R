@@ -108,45 +108,13 @@ _TASK_TOOL_DENY: frozenset[str] = frozenset({
     "about_me", "summarize_channel",
 })
 
-# Mode greedy : le nom du bot déclenche une réponse n'importe où dans la phrase
-# (habitude bien ancrée chez les membres), SAUF quand il est immédiatement suivi
-# d'un verbe conjugué à la 3e personne qui indique qu'on parle D'ELLE plutôt qu'À
-# elle (« Maria est bête », « Maria pense que… »). Liste courte et volontairement
-# limitée : imparfait par nature, mais sans coût/latence ajoutés (pas d'appel LLM).
-_GREEDY_DENY_VERBS = frozenset({
-    "est", "a", "avait", "était", "va", "fait", "disait", "pense", "pensait",
-    "sait", "veut", "voulait", "peut", "aime", "adore", "déteste", "kiffe",
-})
-# « dit » est ambigu : 3e pers. (« Maria dit que… ») ET impératif relâché
-# (« maria dit camion » = dis « camion »). On ne le traite comme 3e pers.
-# que s'il est suivi d'un marqueur de discours rapporté.
-_GREEDY_DIT_ABOUT = frozenset({
-    "que", "qu", "ça", "ca", "cela", "toujours", "souvent", "jamais",
-    "rien", "pas", "aussi", "même", "meme",
-})
-_GREEDY_NEXT_WORD = re.compile(r"[a-zàâäéèêëîïôöùûüç']+")
-
-
 def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
-    """True si le nom du bot apparaît sans être suivi d'un verbe « à la 3e personne »."""
-    text = (content or "").lower()
-    pattern = r"(?<![a-z0-9_])" + re.escape(bot_name.lower()) + r"(?![a-z0-9_])"
-    for m in re.finditer(pattern, text):
-        after = text[m.end():].lstrip()
-        if after.startswith("est-ce") or after.startswith("est ce"):
-            return True
-        nxt = _GREEDY_NEXT_WORD.match(after)
-        if nxt and nxt.group(0) in _GREEDY_DENY_VERBS:
-            continue
-        if nxt and nxt.group(0) == "dit":
-            rest = after[nxt.end():].lstrip()
-            if rest.startswith("qu'"):
-                continue
-            fol = _GREEDY_NEXT_WORD.match(rest)
-            if fol and fol.group(0) in _GREEDY_DIT_ABOUT:
-                continue
-        return True
-    return False
+    """True si le nom du bot apparaît comme mot (pas un fragment d'un autre mot)."""
+    name = (bot_name or "").strip().lower()
+    if not name:
+        return False
+    pattern = r"(?<![a-z0-9_])" + re.escape(name) + r"(?![a-z0-9_])"
+    return re.search(pattern, (content or "").lower()) is not None
 
 
 class _ContentOverride:
@@ -843,7 +811,7 @@ class Chat(commands.Cog):
         return False
 
     def transcript_addresses_bot(self, transcript: str) -> bool:
-        """True si la transcription s'adresse au bot (même heuristique que greedy)."""
+        """True si la transcription contient le nom du bot."""
         if not self.bot.user:
             return False
         return _greedy_name_addresses_bot(transcript or "", self.bot.user.name)
