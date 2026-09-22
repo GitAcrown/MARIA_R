@@ -685,9 +685,12 @@ class ChannelSession:
         if existing is not None and self._still_in_context(message.id):
             existing.components = parts
             existing.metadata["discord_message"] = message
+            existing.metadata["context_only"] = is_context_only
             return existing
 
-        record = self.context.add_user_message(components=parts, name=api_name)
+        record = self.context.add_user_message(
+            components=parts, name=api_name, context_only=is_context_only,
+        )
         if hasattr(record, "metadata"):
             record.metadata["discord_message"] = message
         self._remember_ingested(message.id, record)
@@ -786,7 +789,10 @@ class ChannelSession:
             if content:
                 hint = (
                     f"[FOCUS] Texte écrit par {author} : « {content[:FOCUS_CONTENT]} ». "
-                    "C'est SON message. Réponds à ça, pas à une autre question du `[contexte]`."
+                    "C'est SON message. Réponds à ça, pas à une autre question du `[contexte]`. "
+                    "Lis l'intention, pas l'orthographe : faute, lettre en trop ou en moins, "
+                    "mot collé, argot = le mot visé par le fil récent, pas un sujet nouveau. "
+                    "Deux lectures possibles → le fil tranche ; toujours ambigu → demande, n'invente pas."
                 )
             else:
                 hint = (

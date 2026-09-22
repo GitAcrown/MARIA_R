@@ -16,6 +16,11 @@ DEFAULT_AGE = timedelta(hours=2)
 # Budget type Honcho : messages récents vs résumé de session (tokens).
 SESSION_MSG_SHARE = 0.60
 SESSION_SUMMARY_CHARS = 1200
+# [contexte] récent gardé avec les messages adressés, pour résoudre « ça » et une faute.
+CONTEXT_KEEP_RECENT = 8
+# En dessous, une ligne [contexte] évincée (ok, mdr) ne revient pas dans le résumé.
+CONTEXT_CHATTER_MAX_WORDS = 3
+CONTEXT_CHATTER_MAX_CHARS = 20
 
 
 @dataclass
@@ -179,6 +184,32 @@ class ToolResponseRecord(MessageRecord):
         }
 
 
+def _is_context_chatter(message: "MessageRecord") -> bool:
+    """True si un [contexte] évincé ne dit presque rien (ok, mdr) — pas de résumé."""
+    if not (message.metadata or {}).get("context_only"):
+        return False
+    text = (message.full_text or "").strip()
+    if not text:
+        return True
+    if any(mark in text for mark in ("[EMBED]", "[LAYOUT]", "[VIDEO:")):
+        return False
+    bodies: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("[Cité"):
+            continue
+        if line.startswith("[contexte]"):
+            idx = line.find(": ")
+            bodies.append(line[idx + 2 :].strip() if idx >= 0 else "")
+            continue
+        return False
+    speech = " ".join(b for b in bodies if b).strip()
+    if not speech:
+        return True
+    words = speech.split()
+    return len(words) <= CONTEXT_CHATTER_MAX_WORDS and len(speech) <= CONTEXT_CHATTER_MAX_CHARS
+
+
 class ConversationContext:
     """Contexte restreint — trim par tokens, âge et nombre de messages."""
 
@@ -273,6 +304,8 @@ class ConversationContext:
         Les notes système récentes (name='system', < 15 min) sont toujours conservées
         même si leur âge dépasse context_age : elles portent le contexte actif (widget
         affiché, match en cours…) indispensable à la cohérence de la prochaine réponse.
+        À budget égal, le [contexte] ancien part avant les messages adressés au bot,
+        les réponses, les tool-calls et une courte queue de [contexte] récent.
         """
         now = datetime.now(timezone.utc)
 
@@ -296,22 +329,108 @@ class ConversationContext:
             msg_window = max(int(effective_window * SESSION_MSG_SHARE), 0)
         else:
             msg_window = effective_window
-        total = 0
-        kept: list[MessageRecord] = []
-        for m in reversed(self._messages):
-            # On conserve toujours au moins le message le plus récent, même s'il dépasse seul.
-            if self.context_window > 0 and kept and total + m.token_count > msg_window:
-                break
-            kept.insert(0, m)
-            total += m.token_count
-        # Plafond de messages (garde les plus récents)
-        if self.max_messages > 0 and len(kept) > self.max_messages:
-            kept = kept[-self.max_messages:]
+        priority_signal, recent_ctx, old_ctx = self._split_context_priority(self._messages)
+        if self.context_window <= 0:
+            selected = list(self._messages)
+        else:
+            selected = self._take_newest(priority_signal, msg_window)
+            spent = sum(m.token_count for m in selected)
+            for pool in (recent_ctx, old_ctx):
+                room = msg_window - spent
+                if room <= 0:
+                    break
+                extra = self._take_newest(pool, room, keep_oversize=False)
+                selected.extend(extra)
+                spent += sum(m.token_count for m in extra)
+        selected_ids = {id(m) for m in selected}
+        kept = [m for m in self._messages if id(m) in selected_ids]
+        kept = self._cap_messages(kept, old_ctx)
         kept_ids = {id(m) for m in kept}
         evicted = aged_out + [m for m in self._messages if id(m) not in kept_ids]
         self._fold_evicted(evicted)
         self._messages = self._sanitize_tool_pairs(kept)
         self._needs_trim = False
+
+    @staticmethod
+    def _is_context_only(message: "MessageRecord") -> bool:
+        return bool((message.metadata or {}).get("context_only"))
+
+    @classmethod
+    def _split_context_priority(
+        cls, messages: list["MessageRecord"]
+    ) -> tuple[list["MessageRecord"], list["MessageRecord"], list["MessageRecord"]]:
+        """Signal, [contexte] récent, [contexte] ancien.
+
+        Le signal (messages adressés, réponses, outils, notes) est rempli en premier.
+        Les CONTEXT_KEEP_RECENT derniers [contexte] suivent, pour que « ça » et une
+        faute se résolvent. Le reste du [contexte] ne rentre que s'il reste du budget.
+        """
+        ctx = [m for m in messages if cls._is_context_only(m)]
+        recent_ids = {id(m) for m in ctx[-CONTEXT_KEEP_RECENT:]}
+        signal: list[MessageRecord] = []
+        recent: list[MessageRecord] = []
+        old: list[MessageRecord] = []
+        for m in messages:
+            if not cls._is_context_only(m):
+                signal.append(m)
+            elif id(m) in recent_ids:
+                recent.append(m)
+            else:
+                old.append(m)
+        return signal, recent, old
+
+    def _take_newest(
+        self,
+        pool: list["MessageRecord"],
+        budget: int,
+        *,
+        keep_oversize: bool = True,
+    ) -> list["MessageRecord"]:
+        """Garde les plus récents de `pool` dans `budget` tokens.
+
+        `keep_oversize` : le plus récent est gardé même s'il dépasse seul
+        (le message à traiter). Le [contexte] de remplissage ne l'est pas.
+        """
+        if not pool:
+            return []
+        total = 0
+        chosen: list[MessageRecord] = []
+        for m in reversed(pool):
+            if (
+                self.context_window > 0
+                and total + m.token_count > budget
+                and (chosen or not keep_oversize)
+            ):
+                break
+            chosen.append(m)
+            total += m.token_count
+        chosen.reverse()
+        return chosen
+
+    def _cap_messages(
+        self,
+        kept: list["MessageRecord"],
+        expendable: list["MessageRecord"],
+    ) -> list["MessageRecord"]:
+        """Plafond de comptage : le [contexte] ancien part avant le reste."""
+        if self.max_messages <= 0 or len(kept) <= self.max_messages:
+            return kept
+        overflow = len(kept) - self.max_messages
+        expendable_ids = {id(m) for m in expendable}
+        drop: set[int] = set()
+        for m in kept:
+            if overflow <= 0:
+                break
+            if id(m) in expendable_ids:
+                drop.add(id(m))
+                overflow -= 1
+        for m in kept:
+            if overflow <= 0:
+                break
+            if id(m) not in drop:
+                drop.add(id(m))
+                overflow -= 1
+        return [m for m in kept if id(m) not in drop]
 
     def _fold_evicted(self, messages: list["MessageRecord"]) -> None:
         """Compacte les messages évincés dans `session_summary` (pas d'appel LLM chaud)."""
@@ -323,6 +442,8 @@ class ConversationContext:
                 continue
             text = (m.full_text or "").strip()
             if not text or text.startswith("[SYSTEM]"):
+                continue
+            if _is_context_chatter(m):
                 continue
             text = re.sub(r"\s+", " ", text)
             if len(text) > 180:

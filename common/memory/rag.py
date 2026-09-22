@@ -99,13 +99,7 @@ def build_self_ctx(
     if not facts:
         return "", seen
 
-    header = (
-        f"TES GOÛTS / TOI ({name}) — trait de fond, PAS un sujet à amener toi-même : "
-        "ne les mentionne QUE si on te demande explicitement ton avis sur CE sujet précis, "
-        "et reste cohérente avec quand tu le fais. Sinon ignore complètement cette liste — "
-        "ne la récite pas, ne la glisse pas dans une réponse sans rapport, jamais deux fois "
-        "de suite sur le même point même si le sujet revient :"
-    )
+    header = f"TES GOÛTS / TOI ({name}) :"
     return header + "\n- " + " · ".join(facts), seen
 
 
@@ -182,10 +176,7 @@ def build_profile_ctx(
     if not lines:
         return "", seen_contents
 
-    header = (
-        "PROFILS (grands faits — personnalise / allusion naturelle si ça colle au fil, "
-        "ne récite pas, ne force aucun callback, ne confonds pas les ids) :"
-    )
+    header = "PROFILS :"
     return header + "\n" + "\n".join(lines), seen_contents
 
 
@@ -286,10 +277,7 @@ def format_memory_ctx(
         return ""
     names = name_by_user_id or {}
     name = (bot_name or "MARIA").strip() or "MARIA"
-    lines = [
-        "MEMOIRE PERTINENTE (complément — allusion OK si pertinent au fil, "
-        "sinon ignore ; ne récite pas, n'invente aucun détail) :"
-    ]
+    lines = ["MEMOIRE PERTINENTE :"]
     for m in memories:
         content = m.content
         if m.category == CATEGORY_SELF:

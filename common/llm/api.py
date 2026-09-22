@@ -79,7 +79,7 @@ class MariaGptApi:
         api_key: str,
         developer_prompt_template: Callable[..., str],
         *,
-        completion_model: str = "gpt-5.6-luna",
+        completion_model: str = "gpt-6-luna",
         transcription_model: str = "gpt-4o-transcribe",
         max_tokens: int = 1536,
         context_window: int = 12000,

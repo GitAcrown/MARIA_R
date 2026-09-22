@@ -5,7 +5,7 @@ Centralise les valeurs qui étaient auparavant éparpillées et incohérentes en
 """
 
 # Modèles OpenAI
-MODEL_MAIN = "gpt-5.6-luna"
+MODEL_MAIN = "gpt-6-luna"
 
 # Fenêtre de contexte / budget de la session de chat
 # CONTEXT_WINDOW est la vraie limite (en tokens) ; MAX_MESSAGES est un filet
@@ -24,7 +24,7 @@ MAX_MESSAGES = 80
 # Plafond, pas un coût fixe (une réponse courte ne consomme que ce qu'elle écrit).
 # Doit couvrir le pire cas d'un tool call render_widget rempli à fond : 12 blocs
 # à ~800 caractères chacun ≈ 2500 tokens rien que pour l'argument JSON — d'où la marge.
-MAX_TOKENS = 4000
+MAX_TOKENS = 5000
 
 # Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
 DEBOUNCE_SECONDS: float = 0.33
@@ -36,16 +36,16 @@ EDIT_UPDATE_WINDOW_SECONDS: float = 15
 
 # Mémoire long terme — carte d'identité, pas le journal du salon.
 # Le résumé de session couvre déjà le fil récent : on flush peu, on extrait peu.
-MEMORY_FLUSH_MESSAGES = 50
-MEMORY_FLUSH_MINUTES = 40
-MEMORY_DIRECT_FLUSH_MESSAGES = 16  # dialogue → MARIA : un peu plus tôt, pas gourmand
+MEMORY_FLUSH_MESSAGES = 40
+MEMORY_FLUSH_MINUTES = 30
+MEMORY_DIRECT_FLUSH_MESSAGES = 12  # dialogue → MARIA : un peu plus tôt, pas gourmand
 MEMORY_BUFFER_CAP = 80
 # RAG complémentaire (le perso vient surtout des 3 faits de profil).
 MEMORY_TOP_K = 2
-MEMORY_EXTRACT_MAX_ACTIONS = 3
-MEMORY_EXISTING_LIMIT = 12
+MEMORY_EXTRACT_MAX_ACTIONS = 5
+MEMORY_EXISTING_LIMIT = 16
 # Chevauchement entre lots : contexte du lot précédent, sans re-create.
-MEMORY_BATCH_OVERLAP = 4
+MEMORY_BATCH_OVERLAP = 5
 # Mini-profils injectés à chaque réponse (auteur + mentions/reply).
 MEMORY_PROFILE_FACTS = 3
 # Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).

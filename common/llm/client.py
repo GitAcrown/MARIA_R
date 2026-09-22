@@ -1,4 +1,4 @@
-"""Client OpenAI — wrapper minimal gpt-5.6-luna."""
+"""Client OpenAI — wrapper minimal gpt-6-luna."""
 
 import logging
 from typing import Any, Optional
@@ -9,11 +9,11 @@ import openai
 logger = logging.getLogger("llm.client")
 
 # Modèles
-MODEL_MAIN = "gpt-5.6-luna"
+MODEL_MAIN = "gpt-6-luna"
 MODEL_TRANSCRIBE = "gpt-4o-transcribe"
 # Modèle de repli si MODEL_MAIN renvoie une erreur de permissions (401) — ex. accès
 # au modèle pas encore activé sur l'organisation/clé API.
-MODEL_FALLBACK = "gpt-5.4-mini"
+MODEL_FALLBACK = "gpt-5.6-luna"
 
 # Réseau — timeout par requête et nombre de tentatives.
 # Le SDK OpenAI relance automatiquement sur 429, 5xx et erreurs réseau/timeout.

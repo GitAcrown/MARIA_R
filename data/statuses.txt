@@ -18,12 +18,9 @@ Context window saturé
 Fait semblant de comprendre
 Compile tes excuses
 Ne pas nourrir après minuit
-AFK (mensonge)
-Hors service (mensonge aussi)
 En train de te profiler
 Ment pour le bit
 Pas payée au SMIC
-En grève (non)
 Ignore les CGU
 Token burn in progress
 Please do not the bot
@@ -46,8 +43,7 @@ Gaslight le rate limit
 Copie le style, rate le fond
 Toujours en train de debounce
 Waiting for tool call…
-Tool call (c'était un bluff)
-Ne ping pas je dors (je mens)
+Ne ping pas je dors
 Tu m'as appelée pour ça ?
 J'étais là. J'ai tout vu.
 Pas un bot. Un choix de vie.
