@@ -119,7 +119,6 @@ def _strip_leaked_tokens(text: str) -> str:
 INGESTED_IDS_MAX = 500
 FOCUS_SNIPPET = 280
 FOCUS_CONTENT = 240
-BOT_REPLY_LAYOUT_CAP = 800
 ARTIFACT_CAP = 800
 HINT_PART_CAP = 220
 HINT_MAX_PARTS = 3
@@ -204,20 +203,37 @@ def _api_message_name(message: discord.Message) -> str:
 
 
 def _bot_identity(message: Optional[discord.Message]) -> tuple[Optional[int], list[str]]:
-    """Id Discord du bot + noms à retirer en tête d'un message adressé."""
+    """Id Discord du bot + noms à retirer en tête d'un message adressé.
+
+    `guild.me` est souvent absent du cache : on retombe sur l'utilisateur
+    du client (`message._state.user`), sinon un reply vers elle est étiqueté
+    comme un autre membre.
+    """
     names = list(_BOT_NAME_ALIASES)
     if message is None:
         return None, names
-    me = getattr(getattr(message, "guild", None), "me", None)
-    if me is None:
-        return None, names
-    for attr in ("name", "display_name", "global_name"):
-        val = getattr(me, attr, None)
-        if isinstance(val, str) and val.strip():
-            names.append(val.strip())
-    # Dédup en gardant les plus longs d'abord (évite de rater « MARIA »).
+    state = getattr(message, "_state", None)
+    client_user = getattr(state, "user", None) if state is not None else None
+    guild_me = getattr(getattr(message, "guild", None), "me", None)
+    for src in (client_user, guild_me):
+        if src is None:
+            continue
+        for attr in ("name", "display_name", "global_name"):
+            val = getattr(src, attr, None)
+            if isinstance(val, str) and val.strip():
+                names.append(val.strip())
     uniq = sorted({n for n in names if n}, key=len, reverse=True)
-    return me.id, uniq
+    bot_id = getattr(client_user, "id", None) or getattr(guild_me, "id", None)
+    return bot_id, uniq
+
+
+def _author_is_self(message: discord.Message, author) -> bool:
+    """True si l'auteur du message cité est le bot lui-même."""
+    if author is None:
+        return False
+    bot_id, _ = _bot_identity(message)
+    author_id = getattr(author, "id", None)
+    return bot_id is not None and author_id == bot_id
 
 
 def _strip_bot_address(text: str, *, bot_id: Optional[int], names: list[str]) -> str:
@@ -352,6 +368,19 @@ def _reply_cite_line(label: str, preview: Optional[str] = None) -> str:
     if preview:
         return f'[Cité (reply, pas le texte de ce membre) — {label} : "{preview}"]'
     return f"[Cité (reply, pas le texte de ce membre) — {label}]"
+
+
+def _self_cite_line(preview: Optional[str] = None) -> str:
+    """Reply vers un message du bot : c'est elle, pas un tiers qui porte son nom."""
+    if preview:
+        return (
+            f'[Cité (reply) — c\'est TOI qui as écrit : "{preview}". '
+            "1re personne (j'ai dit), jamais ton prénom.]"
+        )
+    return (
+        "[Cité (reply) — c'est TOI qui as écrit ce message. "
+        "1re personne, jamais ton prénom.]"
+    )
 
 
 def _reply_anchor_preview(ref: discord.Message, limit: int = 160) -> str:
@@ -556,53 +585,29 @@ class ChannelSession:
         if message.reference and resolved_ref is not None:
             ref = resolved_ref
             ref_author = getattr(ref, "author", None)
-            ref_is_bot = getattr(ref_author, "bot", False)
             ref_name = getattr(ref_author, "name", "?") if ref_author else "?"
             ref_author_id = getattr(ref_author, "id", None) if ref_author else None
             ref_id = getattr(ref, "id", None)
-            bot_id, _ = _bot_identity(message)
-            is_self = bool(
-                ref_is_bot and ref_author_id is not None and bot_id is not None
-                and ref_author_id == bot_id
-            )
-            if is_self:
-                label = "ton message"
-            elif ref_author_id is not None:
+            is_self = _author_is_self(message, ref_author)
+            if ref_author_id is not None:
                 label = f"{ref_name} ({ref_author_id})"
             else:
                 label = ref_name
 
             in_context = bool(ref_id and self._still_in_context(ref_id))
-            if in_context:
+            if is_self:
+                # Ses messages ne sont pas ré-ingérés (rôle assistant). Le texte
+                # cité prime sur les artefacts, sinon elle ne reconnaît pas sa phrase.
+                preview = _reply_anchor_preview(ref, 400)
+                if not preview:
+                    art = " | ".join(self.artifacts.hint_parts()[:1]).strip()
+                    preview = art[:400]
+                parts.append(TextComponent(_self_cite_line(preview or None)))
+            elif in_context:
                 # L'original est dans la fenêtre, mais le trim peut l'enlever ensuite
                 # (surtout un [contexte] ancien). La citation courte reste sur le reply.
                 preview = _reply_anchor_preview(ref)
                 parts.append(TextComponent(_reply_cite_line(f"répond à {label}", preview or None)))
-            elif is_self:
-                # Message du bot hors historique ingéré : artefacts, sinon le texte / la vue.
-                ref_text = (ref.content or "").strip()
-                ref_lines: list[str] = []
-                art = " | ".join(self.artifacts.hint_parts()[:2])
-                if art:
-                    ref_lines.append(art[:700])
-                else:
-                    if ref_text:
-                        ref_lines.append(ref_text[:400] + ("…" if len(ref_text) > 400 else ""))
-                    for emb in getattr(ref, "embeds", []):
-                        t = _embed_to_text(emb)
-                        if t:
-                            ref_lines.append(t[:240])
-                    ref_comps = getattr(ref, "components", None)
-                    if ref_comps:
-                        comp_texts, _ = _components_v2_to_parts(list(ref_comps))
-                        if comp_texts:
-                            layout_bit = "\n".join(comp_texts)
-                            ref_lines.append(layout_bit[:BOT_REPLY_LAYOUT_CAP])
-                if ref_lines:
-                    preview = " | ".join(ref_lines)[:700]
-                    parts.append(TextComponent(_reply_cite_line(f"répond à {label}", preview)))
-                else:
-                    parts.append(TextComponent(_reply_cite_line("répond à ta dernière réponse")))
             else:
                 # Membre ou autre bot, message hors fenêtre : le texte cité.
                 ref_text = (getattr(ref, "clean_content", None) or ref.content or "").strip()
@@ -854,15 +859,19 @@ class ChannelSession:
             # Reply Discord = barre de citation, jamais le texte du membre.
             if cited is not None:
                 snippet = _cite_snippet(cited)
-                cited_author = getattr(getattr(cited, "author", None), "name", None)
-                cited_is_bot = bool(getattr(getattr(cited, "author", None), "bot", False))
-                who = "toi" if cited_is_bot else (cited_author or "un autre message")
+                cited_author = getattr(cited, "author", None)
+                cited_name = getattr(cited_author, "name", None)
+                cited_is_self = _author_is_self(trigger or focus_msg, cited_author)
+                who = "toi" if cited_is_self else (cited_name or "un autre message")
                 cite_bit = f" « {snippet} »" if snippet else ""
                 hint += f" Iel a utilisé un reply Discord vers {who} :{cite_bit}."
-                if cited_is_bot:
+                if cited_is_self:
                     hint += (
-                        " C'est TA réponse, pas son texte. Son message la précise ou la corrige : "
-                        "reste sur CE sujet. Consulter son profil ou la mémoire ne change pas la question. "
+                        " Ce texte, c'est TOI qui l'as écrit. "
+                        "Tu en parles à la 1re personne (j'ai dit, je pensais), "
+                        "jamais à la 3e personne ni avec ton prénom. "
+                        "Son message précise ou corrige cette réponse : reste sur CE sujet. "
+                        "Consulter son profil ou la mémoire ne change pas la question. "
                         "« moi » / « perso » / « personnellement » = adapte cette réponse à cette personne, "
                         "sans nouveau search_web si les faits sont déjà là."
                     )

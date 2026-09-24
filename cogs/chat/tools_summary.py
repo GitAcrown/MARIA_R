@@ -1,12 +1,15 @@
 """Outil LLM — résumé d'un salon / thread Discord.
 
-Stratégie : si le transcript est court → 1 passe. Sinon → résumés partiels
-par lots, puis synthèse finale (map-reduce léger).
+Stratégie : on jette le bruit (ok, mdr, ping seul) avant le modèle.
+Transcript court → 1 passe. Sinon lots larges mis en cache, puis une fusion :
+seul le lot modifié et la fusion rappellent le modèle.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -20,18 +23,31 @@ from common.widget_catalog import render_free_widget
 
 logger = logging.getLogger("MARIA.Chat.Summary")
 
+# Sans fenêtre horaire : un extrait récent, pas tout l'historique du salon.
 _DEFAULT_LIMIT = 60
 _MAX_LIMIT = 500
-# Fenêtre longue (journée…) : on lit plus sans attendre que le LLM monte le limit.
-_LONG_WINDOW_LIMIT = 400
-_MAX_CHARS = 80_000
-_CHUNK_CHARS = 10_000
+# Avec hours : la fenêtre de temps borne la lecture. Filet anti-emballement seulement.
+_WINDOW_SAFETY_CAP = 4000
+_MAX_CHARS = 200_000
+# Lots larges : moins d'appels. Le cache de lot évite de les refaire si seul
+# le bout du fil a changé.
+_CHUNK_CHARS = 24_000
 _PARTIAL_MAX_TOKENS = 350
 _SUMMARY_MAX_TOKENS = 700
 # Cache process-local : même salon / fenêtre / focus, tant que le dernier msg
 # n'a pas bougé et que l'entrée n'est pas trop vieille.
 _CACHE_TTL = timedelta(hours=6)
 _CACHE_MAX = 64
+_PARTIAL_CACHE_MAX = 256
+# Réactions sans contenu. « oui » / « non » restent : souvent une décision.
+_NOISE_BODY_RE = re.compile(
+    r"^(?:ok+|okay|k{2,}|mdr+|lol+|lmao|ptdr+|ah+|oh+|"
+    r"ha(?:ha)+|he(?:he)+|jsp|osef|wtf|omg|\+1|-1)$",
+    re.IGNORECASE,
+)
+_MENTION_RE = re.compile(r"<@!?\d+>")
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+_NOISE_PUNCT_RE = re.compile(r"[\s!.?…,~'\"`]+")
 
 
 @dataclass
@@ -48,6 +64,9 @@ class _SummaryCacheEntry:
 
 
 _summary_cache: dict[tuple, _SummaryCacheEntry] = {}
+# Résumés de lots, clé = hash du texte. Indépendant du dernier message :
+# un « ok » filtré ou un lot inchangé ne relance pas le modèle.
+_partial_cache: dict[str, tuple[datetime, str]] = {}
 
 
 def _cache_key(channel_id: int, hours: Optional[float], limit: int, focus: str) -> tuple:
@@ -73,6 +92,42 @@ def _cache_put(key: tuple, entry: _SummaryCacheEntry) -> None:
         oldest_key = next(iter(_summary_cache))
         _summary_cache.pop(oldest_key, None)
     _summary_cache[key] = entry
+
+
+def _text_key(*parts: str) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _partial_get(key: str) -> Optional[str]:
+    hit = _partial_cache.get(key)
+    if hit is None:
+        return None
+    created_at, text = hit
+    if datetime.now(timezone.utc) - created_at > _CACHE_TTL:
+        _partial_cache.pop(key, None)
+        return None
+    return text
+
+
+def _partial_put(key: str, text: str) -> None:
+    if len(_partial_cache) >= _PARTIAL_CACHE_MAX and key not in _partial_cache:
+        oldest_key = next(iter(_partial_cache))
+        _partial_cache.pop(oldest_key, None)
+    _partial_cache[key] = (datetime.now(timezone.utc), text)
+
+
+def _is_noise_body(body: str) -> bool:
+    """Ping seul, emoji seul, ou réaction (« ok », « mdr ») — pas un fait à résumer."""
+    text = _MENTION_RE.sub(" ", body)
+    text = _CUSTOM_EMOJI_RE.sub(" ", text).strip()
+    if not text or text == "[embed]":
+        return True
+    core = _NOISE_PUNCT_RE.sub("", text)
+    return bool(core) and _NOISE_BODY_RE.fullmatch(core) is not None
 
 
 async def _channel_tip_id(channel: discord.abc.Messageable) -> Optional[int]:
@@ -116,13 +171,17 @@ def build_channel_summary_view(data: dict, commentary: str = "") -> Optional[dis
     return render_free_widget(data.get("spec"), commentary=commentary)
 
 
-def _clamp_limit(raw: Any, *, hours: Optional[float]) -> int:
+def _history_limit(raw: Any, *, hours: Optional[float]) -> int:
+    """Avec une fenêtre horaire, on lit tout l'intervalle (filet haut seulement).
+
+    Le défaut 60 ne s'applique que sans `hours` — sinon le modèle l'envoie
+    et coupe une journée au 60e message.
+    """
+    if hours is not None and hours > 0:
+        return _WINDOW_SAFETY_CAP
     try:
         n = int(raw)
     except (TypeError, ValueError):
-        # Journée / fenêtre longue → lire large sans forcer le LLM à le demander.
-        if hours is not None and hours >= 12:
-            return _LONG_WINDOW_LIMIT
         return _DEFAULT_LIMIT
     return max(5, min(n, _MAX_LIMIT))
 
@@ -168,7 +227,7 @@ def _format_line(msg: discord.Message) -> Optional[str]:
     if msg.embeds and not content:
         bits.append("[embed]")
     body = " ".join(bits).strip()
-    if not body:
+    if not body or _is_noise_body(body):
         return None
     return f"[{when}] {author}: {body[:400]}"
 
@@ -244,6 +303,33 @@ async def _llm_text(
     return (completion.choices[0].message.content or "").strip()
 
 
+async def _cached_llm_text(
+    llm_client: Any,
+    *,
+    kind: str,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    key_parts: list[str],
+) -> tuple[str, bool]:
+    """Retourne (texte, True si servit par le cache)."""
+    key = _text_key(kind, model, *key_parts)
+    cached = _partial_get(key)
+    if cached is not None:
+        return cached, True
+    text = await _llm_text(
+        llm_client,
+        model=model,
+        system=system,
+        user=user,
+        max_tokens=max_tokens,
+    )
+    if text:
+        _partial_put(key, text)
+    return text, False
+
+
 async def _summarize(
     llm_client: Any,
     *,
@@ -257,6 +343,31 @@ async def _summarize(
         if focus else ""
     )
     chunks = _chunk_lines(lines)
+    calls = 0
+    hits = 0
+
+    async def _call(
+        kind: str,
+        system: str,
+        user: str,
+        max_tokens: int,
+        key_parts: list[str],
+    ) -> str:
+        nonlocal calls, hits
+        text, hit = await _cached_llm_text(
+            llm_client,
+            kind=kind,
+            model=model,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+            key_parts=key_parts,
+        )
+        if hit:
+            hits += 1
+        else:
+            calls += 1
+        return text
 
     # Petit volume → une seule passe (comportement d'origine).
     if len(chunks) <= 1:
@@ -266,68 +377,67 @@ async def _summarize(
             f"Messages ({len(lines)}) :\n"
             + "\n".join(lines)
         )
-        return await _llm_text(
-            llm_client,
-            model=model,
-            system=_SYSTEM_FINAL,
-            user=user,
-            max_tokens=_SUMMARY_MAX_TOKENS,
+        summary = await _call(
+            "final", _SYSTEM_FINAL, user, _SUMMARY_MAX_TOKENS,
+            [channel_name, focus, "\n".join(lines)],
         )
+        logger.info(
+            "Résumé salon #%s : %d msgs, 1 lot, %d appel(s), %d cache",
+            channel_name, len(lines), calls, hits,
+        )
+        return summary
 
-    # Gros volume → résumés partiels puis fusion.
-    logger.info(
-        "Résumé salon #%s : %d msgs → %d lots",
-        channel_name, len(lines), len(chunks),
-    )
+    # Gros volume → résumés partiels puis fusion. Chaque lot est caché sur son
+    # texte : seul le lot qui a changé, puis la fusion, rappellent le modèle.
     partials: list[str] = []
     for i, chunk in enumerate(chunks, start=1):
+        body = "\n".join(chunk)
         user = (
             f"Salon : #{channel_name}\n"
             f"Extrait {i}/{len(chunks)} ({len(chunk)} msgs)\n"
             f"{focus_block}"
             f"Messages :\n"
-            + "\n".join(chunk)
+            f"{body}"
         )
-        part = await _llm_text(
-            llm_client,
-            model=model,
-            system=_SYSTEM_PARTIAL,
-            user=user,
-            max_tokens=_PARTIAL_MAX_TOKENS,
+        part = await _call(
+            "partial", _SYSTEM_PARTIAL, user, _PARTIAL_MAX_TOKENS,
+            [channel_name, focus, body],
         )
         if part:
-            partials.append(f"[Extrait {i}/{len(chunks)}]\n{part}")
+            partials.append(part)
 
     if not partials:
+        logger.info(
+            "Résumé salon #%s : %d lots vides, %d appel(s), %d cache",
+            channel_name, len(chunks), calls, hits,
+        )
         return ""
-    if len(partials) == 1:
-        # Un seul partial utile → reformule en format final.
+
+    numbered = [f"[Extrait {i}/{len(partials)}]\n{part}" for i, part in enumerate(partials, start=1)]
+    if len(numbered) == 1:
         user = (
             f"Salon : #{channel_name}\n"
             f"{focus_block}"
-            f"Notes :\n{partials[0]}"
+            f"Notes :\n{numbered[0]}"
         )
-        return await _llm_text(
-            llm_client,
-            model=model,
-            system=_SYSTEM_MERGE,
-            user=user,
-            max_tokens=_SUMMARY_MAX_TOKENS,
+        kind = "merge-one"
+    else:
+        user = (
+            f"Salon : #{channel_name}\n"
+            f"{focus_block}"
+            f"Résumés partiels chronologiques ({len(numbered)}) :\n\n"
+            + "\n\n".join(numbered)
         )
-
-    user = (
-        f"Salon : #{channel_name}\n"
-        f"{focus_block}"
-        f"Résumés partiels chronologiques ({len(partials)}) :\n\n"
-        + "\n\n".join(partials)
+        kind = "merge"
+    summary = await _call(
+        kind, _SYSTEM_MERGE, user, _SUMMARY_MAX_TOKENS,
+        [channel_name, focus, "\n\n".join(partials)],
     )
-    return await _llm_text(
-        llm_client,
-        model=model,
-        system=_SYSTEM_MERGE,
-        user=user,
-        max_tokens=_SUMMARY_MAX_TOKENS,
+    logger.info(
+        "Résumé salon #%s : %d msgs → %d lots, %d appel(s), %d cache",
+        channel_name, len(lines), len(chunks), calls, hits,
     )
+    return summary
 
 
 def _build_summary_payload(
@@ -409,7 +519,7 @@ def build_channel_summary_tools(
             elif hours is not None:
                 hours = min(hours, 72.0)
 
-        limit = _clamp_limit(args.get("limit"), hours=hours)
+        limit = _history_limit(args.get("limit"), hours=hours)
         focus = (args.get("focus") or "").strip()
         name = getattr(channel, "name", None) or str(channel.id)
         cache_key = _cache_key(channel.id, hours, limit, focus)
@@ -507,7 +617,8 @@ def build_channel_summary_tools(
                 "en widget. « résume le salon » / « récap » sans angle → résumé général. "
                 "Demande précise (« ce qu'a dit X », « les décisions », « le plan soirée ») "
                 "→ focus = cette demande, pas un récap global. "
-                "Défaut : salon actuel. Pour une journée : hours=24. "
+                "Défaut : salon actuel. Pour une journée : hours=24, sans limit "
+                "(la fenêtre couvre tous les messages de l'intervalle). "
                 "Après l'appel : aucun texte autour — le widget contient déjà le résumé."
             ),
             properties={
@@ -518,13 +629,17 @@ def build_channel_summary_tools(
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"Nombre max de messages à lire (défaut {_DEFAULT_LIMIT}, "
-                        f"auto ~{_LONG_WINDOW_LIMIT} si hours≥12, max {_MAX_LIMIT})."
+                        "Sans hours seulement : nombre max de messages "
+                        f"(défaut {_DEFAULT_LIMIT}, max {_MAX_LIMIT}). "
+                        "Ne pas passer si hours est défini."
                     ),
                 },
                 "hours": {
                     "type": "number",
-                    "description": "Ne garder que les messages des N dernières heures (optionnel, max 72)",
+                    "description": (
+                        "Messages des N dernières heures (max 72). "
+                        "hours=24 lit toute la journée, pas un plafond de 60 messages."
+                    ),
                 },
                 "focus": {
                     "type": "string",
