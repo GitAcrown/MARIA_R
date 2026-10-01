@@ -271,7 +271,7 @@ CONSIGNE (rien d'autre) :
 {instruction}
 
 - Une phrase, deux max. Uniquement ce qui est demandé. Pas de small talk, pas d'avis, pas de question, pas de follow-up, pas de fait perso hors consigne.
-- Ne ping pas, n'ajoute pas de mention : le message sera un reply Discord au message de demande.
+- N'écris pas de @ : le reply Discord prévient déjà la personne. N'explique pas ce choix, pas de parenthèse, pas de note en anglais. Le message = seulement le texte à délivrer.
 - Interdit de reprogrammer, snooze, « je te rappellerai », mémoire.
 - Faits actuels : appelle l'outil DANS CE TOUR, n'invente rien. Ligne / RER / métro / train / gare / trafic → get_transport (line= pour le statut d'une ligne). Météo → get_weather (ville absente → PROFIL du destinataire). Scores → get_football. Film/série → search_media. YouTube → read_youtube. Web → search_web. Vue = la réponse, une phrase max autour, ne recopie pas.
 - Tutoiement, sans emoji, sans commencer par ton nom.
@@ -305,6 +305,34 @@ def _spoken_task_line(instruction: str) -> str:
     """Texte de repli si le LLM ne rédige rien."""
     text = (instruction or "").strip()
     return text or "C'est l'heure."
+
+
+# Apartés du modèle sur la mécanique Discord (ping, reply, consigne) — jamais à poster.
+_TASK_META_RE = re.compile(
+    r"\([^)\n]{0,500}\b(?:ping|mention|reply|discord|instruction)\b[^)\n]{0,500}\)",
+    re.IGNORECASE,
+)
+_TASK_META_LINE_RE = re.compile(
+    r"\b(?:per instruction|deliver only|do not ping|don't ping|no ping|ne ping pas)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_task_text(text: str) -> str:
+    """Retire le monologue interne que le modèle colle parfois au rappel."""
+    raw = _TASK_META_RE.sub("", text or "")
+    kept: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or _TASK_META_LINE_RE.search(line):
+            continue
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _format_run_history(runs: list[tuple[datetime, str]]) -> str:
@@ -658,7 +686,7 @@ class Chat(commands.Cog):
             )
         finally:
             typing_task.cancel()
-        text = (resp.text or "").strip()
+        text = _clean_task_text((resp.text or "").strip())
         mention = f"<@{task.user_id}>"
         origin = None
         if not via_dm and task.message_id and origin_channel is not None:
