@@ -225,6 +225,22 @@ FOLLOWUP_MAX_CHECKS = 2
 _FOLLOWUP_MAX_ENTRIES = 200
 
 
+_TAB_SWITCH_LINES = (
+    "J'ai update la vue.",
+    "Vue à jour.",
+    "Voilà, j'ai changé l'onglet.",
+    "C'est switché.",
+)
+
+
+def _tab_switch_line(label: str) -> str:
+    short = " ".join((label or "").split())
+    if len(short) > 40:
+        short = short[:39].rstrip() + "…"
+    base = random.choice(_TAB_SWITCH_LINES)
+    return f"{base} ({short})" if short else base
+
+
 @dataclass
 class _Followup:
     until: float
@@ -1088,21 +1104,23 @@ class Chat(commands.Cog):
             dyn_wid=dyn_wid if isinstance(dyn_wid, str) else None,
         )
 
-    async def _try_followup_tab_switch(self, message: discord.Message, follow: _Followup) -> bool:
-        """Bascule un onglet du widget live si le follow-up le désigne. True = rien d'autre à faire."""
+    async def _try_followup_tab_switch(
+        self, message: discord.Message, follow: _Followup,
+    ) -> str | None:
+        """Bascule un onglet du widget live si le follow-up le désigne. Libellé ou None."""
         wid = follow.dyn_wid
         if not wid:
-            return False
+            return None
         text = (message.clean_content or message.content or "").strip()
         if not text:
-            return False
+            return None
         try:
             return await try_switch_tab_for_query(
                 self.bot, wid, text, typesafe=self.typesafe,
             )
         except Exception:
             logger.debug("bascule d'onglet follow-up échouée", exc_info=True)
-            return False
+            return None
 
     async def _followup_decision(
         self, message: discord.Message, resolved_ref,
@@ -1585,13 +1603,23 @@ class Chat(commands.Cog):
             followup, follow = await self._followup_decision(message, resolved_ref)
             key = (message.channel.id, message.author.id)
             if followup == "respond" and follow is not None:
-                if await self._try_followup_tab_switch(message, follow):
+                tab_label = await self._try_followup_tab_switch(message, follow)
+                if tab_label is not None:
                     self._followups.pop(key, None)
                     session = self.gpt_api.session_manager.get_or_create(message.channel)
                     await session.ingest_message(message, is_context_only=True)
-                    text = (message.clean_content or message.content or "").strip()
+                    line = _tab_switch_line(tab_label)
+                    try:
+                        posted = await message.channel.send(line)
+                    except discord.HTTPException:
+                        logger.debug("Annonce bascule d'onglet refusée", exc_info=True)
+                        posted = None
+                    if posted is not None:
+                        await self.gpt_api.record_assistant_post(
+                            message.channel, line, discord_messages=[posted],
+                        )
                     session.record_artifact(
-                        "tab", f"Onglet basculé suite à « {text[:80]} »",
+                        "tab", f"Onglet basculé → {tab_label[:80]}",
                     )
                     return
                 self._followups.pop(key, None)

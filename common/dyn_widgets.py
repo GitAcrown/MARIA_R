@@ -414,26 +414,29 @@ async def try_switch_tab_for_query(
     wid: str,
     query: str,
     typesafe: Any = None,
-) -> bool:
-    """Si `query` désigne un autre onglet du widget live, bascule et édite le message."""
+) -> str | None:
+    """Si `query` désigne un autre onglet du widget live, bascule et édite le message.
+
+    Retourne le libellé de l'onglet choisi, ou None si rien n'a changé.
+    """
     if not _ID_RE.match(wid or ""):
-        return False
+        return None
     rec = _get(wid)
     if rec is None or rec.stripped or rec.expires_at <= _now():
-        return False
+        return None
     if not rec.channel_id or not rec.message_id:
-        return False
+        return None
     # Libellés complets (sans troncature bouton) pour le matching.
     pair = _RENDERERS.get(rec.kind)
     if not pair:
-        return False
+        return None
     try:
         raw_labels = [str(x).strip() for x in (pair[0](rec.payload) or []) if str(x).strip()]
     except Exception:
         logger.exception("labels follow-up %s", rec.kind)
-        return False
+        return None
     if len(raw_labels) < 2:
-        return False
+        return None
 
     idx: int | None = None
     if typesafe is not None and hasattr(typesafe, "pick_tab"):
@@ -446,19 +449,18 @@ async def try_switch_tab_for_query(
         from common.llm.typesafe_client import _heuristic_tab
         idx = _heuristic_tab(query, raw_labels)
     if idx is None or idx == rec.selected:
-        return False
+        return None
     if not (0 <= idx < len(raw_labels)):
-        return False
+        return None
 
+    label = raw_labels[idx]
     rec.selected = idx
     _set_selected(rec.id, idx)
     ok = await _publish(bot, rec, live=True)
-    if ok:
-        logger.info(
-            "Onglet basculé (%s) → %s [%d]",
-            rec.kind, raw_labels[idx][:40], idx,
-        )
-    return ok
+    if not ok:
+        return None
+    logger.info("Onglet basculé (%s) → %s [%d]", rec.kind, label[:40], idx)
+    return label
 
 
 async def sweep_expired(bot: discord.Client) -> None:
