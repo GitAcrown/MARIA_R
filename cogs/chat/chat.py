@@ -199,9 +199,18 @@ def _strip_source_marks(text: str) -> str:
     return re.sub(r" {2,}", " ", cleaned).strip()
 
 
-async def _keep_typing(channel) -> None:
-    """Discord coupe l'indicateur ~10 s : on le relance pendant la boucle d'outils."""
+_SILENCE_TYPING_DELAY = 2.5
+
+
+async def _keep_typing(channel, *, delay: float = 0.0) -> None:
+    """Discord coupe l'indicateur ~10 s : on le relance pendant la boucle d'outils.
+
+    `delay` : attente avant le premier indicateur, pour qu'un silence décidé vite
+    n'affiche jamais « écrit… » (l'indicateur survit ~10 s à l'annulation).
+    """
     try:
+        if delay > 0:
+            await asyncio.sleep(delay)
         while True:
             async with channel.typing():
                 await asyncio.sleep(8)
@@ -1173,7 +1182,9 @@ class Chat(commands.Cog):
             "can_stay_silent": can_stay_silent,
         }
 
-        typing_task = asyncio.create_task(_keep_typing(message.channel))
+        typing_task = asyncio.create_task(
+            _keep_typing(message.channel, delay=_SILENCE_TYPING_DELAY if can_stay_silent else 0.0)
+        )
         try:
             resp = await self.gpt_api.run_completion(
                 message.channel,
