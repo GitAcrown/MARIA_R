@@ -127,7 +127,9 @@ class Auto(commands.Cog):
             else f"\n-# {TRANSCRIPT_SUB} **Transcription**"
         )
 
-        posted = await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
+        # `>` par ligne (pas `>>>`) : le footer reste hors de la citation.
+        quoted = "\n".join(f"> {line}" if line else ">" for line in transcript.splitlines())
+        posted = await reply_to.reply(f"{quoted}{suffix}", mention_author=False)
         responded = False
         if mentioned and chat is not None:
             logger.info("Mention détectée dans la transcription — réponse auto")

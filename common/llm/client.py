@@ -139,11 +139,16 @@ class MariaLLMClient:
         )
 
     async def transcribe(self, audio_file, *, model: Optional[str] = None) -> str:
-        """Transcription audio."""
+        """Transcription audio (FR/EN biaisés — sans ça Whisper invente parfois une autre langue)."""
         try:
             t = await self._client.audio.transcriptions.create(
                 model=model or self.transcription_model,
                 file=audio_file,
+                prompt=(
+                    "Discord voice message. The speaker uses French or English only. "
+                    "Transcribe faithfully in the spoken language. "
+                    "Bonjour, salut, ouais. Hello, yeah, thanks."
+                ),
             )
             return t.text
         except (openai.BadRequestError, openai.OpenAIError) as e:
