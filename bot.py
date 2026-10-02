@@ -306,6 +306,59 @@ async def main() -> None:
                 await ctx.send(f"**Erreur ·** `{type(e).__name__}: {e}`")
 
         # -------------------------------------------------------------------
+        # Commande owner — Clés API / JEV
+        # -------------------------------------------------------------------
+
+        # (nom .env, obligatoire, libellé court)
+        _ENV_KEYS: tuple[tuple[str, bool, str], ...] = (
+            ("TOKEN", True, "Discord"),
+            ("APP_ID", True, "Discord"),
+            ("OPENAI_API_KEY", True, "LLM"),
+            ("TYPESAFE_API_KEY", False, "JEV"),
+            ("TMDB_API_KEY", False, "Films"),
+            ("OPENWEATHERMAP_API_KEY", False, "Météo"),
+            ("BRAVE_API_KEY", False, "Web"),
+            ("SPOTIFY_CLIENT_ID", False, "Spotify"),
+            ("SPOTIFY_CLIENT_SECRET", False, "Spotify"),
+            ("PRIM_API_KEY", False, "Transport IDFM"),
+            ("SNCF_API_KEY", False, "Transport SNCF"),
+        )
+
+        def _mask_key(raw: str | None) -> str:
+            val = (raw or "").strip()
+            if not val:
+                return "manquante"
+            if len(val) <= 6:
+                return f"présente · {len(val)} car."
+            return f"présente · {len(val)} car. · …{val[-4:]}"
+
+        @bot.command(name="keys")
+        @commands.is_owner()
+        async def keys(ctx: commands.Context) -> None:
+            """Liste les clés .env connues (masquées) et ping JEV si présent."""
+            cfg = getattr(bot, "config", {}) or {}
+            lines: list[str] = ["**Clés .env**"]
+            for name, required, label in _ENV_KEYS:
+                status = _mask_key(cfg.get(name))
+                flag = "·" if status.startswith("présente") else ("!" if required else "·")
+                lines.append(f"`{flag}` `{name}` ({label}) — {status}")
+
+            chat = bot.get_cog("Chat")
+            typesafe = getattr(chat, "typesafe", None) if chat else None
+            lines.append("")
+            if typesafe is None:
+                lines.append("**JEV** · cog Chat / client TypeSafe introuvable")
+            else:
+                async with ctx.typing():
+                    ok, detail = await typesafe.healthcheck()
+                mark = "OK" if ok else "KO"
+                lines.append(f"**JEV** · {mark} — {detail}")
+                from common.llm.typesafe_client import REQUEST_TIMEOUT
+                lines.append(f"-# enabled={typesafe.enabled} · timeout={REQUEST_TIMEOUT}s")
+
+            await ctx.send("\n".join(lines))
+
+        # -------------------------------------------------------------------
         # Commande owner — Synchronisation des slash commands
         # -------------------------------------------------------------------
 

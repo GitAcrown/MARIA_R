@@ -104,6 +104,31 @@ class MariaTypeSafeClient:
             logger.warning("TypeSafe system_one échoué: %s", e)
             return None
 
+    async def healthcheck(self) -> tuple[bool, str]:
+        """Petit appel JEV pour vérifier la clé. (ok, détail)."""
+        if not self.enabled:
+            return False, "clé absente"
+        try:
+            from typesafe_sdk import Noul
+        except ImportError as e:
+            return False, f"SDK manquant ({e})"
+        result = await self.system_one(
+            {"ping": "ok"},
+            {
+                "alive": Noul(
+                    instructions="Is the value of `ping` equal to the string ok?",
+                    criteria={"true": "yes", "false": "no"},
+                ),
+            },
+        )
+        if result is None:
+            return False, "timeout ou erreur (voir logs)"
+        try:
+            noul = float(result.nouls["alive"].noul)
+        except (KeyError, AttributeError, TypeError, ValueError) as e:
+            return False, f"réponse illisible ({e})"
+        return True, f"ok · noul={noul:.2f} · modèle {self._model}"
+
     async def is_addressed_to_bot(
         self,
         message: str,

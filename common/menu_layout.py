@@ -125,6 +125,7 @@ class MariaLayout(discord.ui.LayoutView):
         self.accent_colour = accent_colour
         self._interaction: discord.Interaction | None = None
         self._message: discord.WebhookMessage | discord.Message | None = None
+        self.message: discord.WebhookMessage | discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.viewer_id is None or interaction.user.id == self.viewer_id:
@@ -156,7 +157,7 @@ class MariaLayout(discord.ui.LayoutView):
     async def on_timeout(self) -> None:
         for item in list(self.children):
             _disable_interactive(item)
-        message = self.message or self._message
+        message = getattr(self, "message", None) or self._message
         if message is None:
             return
         try:
@@ -175,12 +176,12 @@ class MariaLayout(discord.ui.LayoutView):
         try:
             if interaction is not None:
                 await apply_view(interaction, self)
-                mid = getattr(self.message, "id", None) or (
+                mid = getattr(getattr(self, "message", None), "id", None) or (
                     interaction.message.id if interaction.message else None
                 )
                 _remember_session_view(interaction, self, mid)
                 return
-            message = self.message or self._message
+            message = getattr(self, "message", None) or self._message
             if message is not None:
                 await message.edit(view=self, allowed_mentions=NO_PINGS)
                 return
