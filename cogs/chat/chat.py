@@ -177,13 +177,27 @@ _REACT_REQUEST_RE = re.compile(
 )
 _MINE_RE = re.compile(r"\b(?:mon|ma|mes)\b", re.IGNORECASE)
 _REACT_REQUEST_MAX_LEN = 80
+_REACT_REQUEST_LONG_MAX_LEN = 400
+# Impératif / demande explicite uniquement (pas « réagit », « réaction » seul) : sert aux messages longs.
+_REACT_REQUEST_STRONG_RE = re.compile(
+    r"\br[ée]agis\b|\br[ée]agir\b|\br[ée]agissez\b"
+    r"|\b(?:mets?|ajoute[rz]?|fais|ajouter|mettre|faire|rajoute)\s+(?:moi\s+)?(?:une?\s+|des\s+)?(?:petite?\s+)?r[ée]action\b"
+    r"|\b(?:mets?|ajoute[rz]?|ajouter|mettre)\s+(?:une?\s+)?(?:emoji|smiley|[ée]moji)\b.{0,40}\br[ée]action\b",
+    re.IGNORECASE,
+)
 _FALLBACK_REACTION = "👍"
 
 
 def _is_reaction_request(text: str) -> bool:
-    """Demande explicite et courte de réaction (pas une phrase qui parle de réactions)."""
+    """Demande explicite de réaction (pas une phrase qui parle de réactions)."""
     text = (text or "").strip()
-    return 0 < len(text) <= _REACT_REQUEST_MAX_LEN and bool(_REACT_REQUEST_RE.search(text))
+    if not text:
+        return False
+    if len(text) <= _REACT_REQUEST_MAX_LEN:
+        return bool(_REACT_REQUEST_RE.search(text) or _REACT_REQUEST_STRONG_RE.search(text))
+    if len(text) <= _REACT_REQUEST_LONG_MAX_LEN:
+        return bool(_REACT_REQUEST_STRONG_RE.search(text))
+    return False
 
 
 _REACT_RE = re.compile(r"\[\[REACT(?::[^\]]*)?\]\]", re.IGNORECASE)
