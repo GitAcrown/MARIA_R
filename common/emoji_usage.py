@@ -1,4 +1,4 @@
-"""Usage des emojis custom appris via les réactions Discord."""
+"""Usage des emojis (custom + Unicode) appris via les réactions et les messages du serveur."""
 
 from __future__ import annotations
 
@@ -44,8 +44,46 @@ CHROME_EMOJI_IDS = _chrome_emoji_ids()
 
 
 def unicode_emoji_id(char: str) -> int:
-    """Id synthétique négatif et stable pour un emoji Unicode (les ids custom sont > 0)."""
-    return -(zlib.crc32(char.encode("utf8")) + 1)
+    """Id synthétique négatif et stable pour un emoji Unicode (les ids custom sont > 0).
+
+    Le sélecteur de variation U+FE0F est ignoré : « ❤ » et « ❤️ » comptent pour le même emoji.
+    """
+    return -(zlib.crc32(char.replace("\ufe0f", "").encode("utf8")) + 1)
+
+
+_UNI_BASE = (
+    "[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B50\u2B55\u2B1B\u2B1C\u231A\u231B"
+    "\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA-\u25AB\u25B6\u25C0\u25FB-\u25FE\u2934\u2935\u3030\u303D\u3297\u3299]"
+)
+_UNI_UNIT = _UNI_BASE + "\ufe0f?[\U0001F3FB-\U0001F3FF]?"
+_UNICODE_EMOJI_RE = re.compile(
+    "[\U0001F1E6-\U0001F1FF]{2}"
+    "|[#*0-9]\ufe0f?\u20e3"
+    f"|{_UNI_UNIT}(?:\u200d{_UNI_UNIT})*"
+)
+_CUSTOM_EMOJI_RE = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d+)>")
+_MAX_EMOJIS_PER_MESSAGE = 4
+
+
+def extract_emojis(text: str) -> list[tuple[int, str, bool]]:
+    """Emojis distincts d'un message : [(emoji_id, nom, animé)], dans l'ordre d'apparition."""
+    found: dict[int, tuple[int, str, bool]] = {}
+    for m in _CUSTOM_EMOJI_RE.finditer(text or ""):
+        eid = int(m.group(3))
+        found.setdefault(eid, (eid, m.group(2), bool(m.group(1))))
+    stripped = _CUSTOM_EMOJI_RE.sub(" ", text or "")
+    for m in _UNICODE_EMOJI_RE.finditer(stripped):
+        char = m.group(0)
+        eid = unicode_emoji_id(char)
+        found.setdefault(eid, (eid, char, False))
+    return list(found.values())[:_MAX_EMOJIS_PER_MESSAGE]
+
+
+def strip_emojis(text: str) -> str:
+    """Texte sans emojis (contexte lexical où l'emoji est employé)."""
+    out = _CUSTOM_EMOJI_RE.sub(" ", text or "")
+    out = _UNICODE_EMOJI_RE.sub(" ", out)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 # Repli quand le serveur n'a pas encore assez d'historique : (emoji, usage).
@@ -169,6 +207,24 @@ class EmojiUsageTracker:
             if text:
                 self._buf_samples.append((guild_id, emoji_id, name, animated, text, now))
 
+    def observe_text(self, guild_id: int, text: str, *, context: str = "") -> int:
+        """Apprend les emojis (custom + Unicode) employés dans un message.
+
+        L'extrait mémorisé est le texte sans emojis ; si le message n'est qu'un emoji,
+        `context` (le message auquel il répond) sert d'extrait. Retourne le nombre appris.
+        """
+        emojis = extract_emojis(text)
+        if not emojis:
+            return 0
+        excerpt = strip_emojis(text)
+        if len(excerpt) < 3:
+            excerpt = strip_emojis(context)
+        for emoji_id, name, animated in emojis:
+            self.observe(
+                guild_id, emoji_id=emoji_id, emoji_name=name, animated=animated, excerpt=excerpt,
+            )
+        return len(emojis)
+
     def flush(self) -> None:
         with self._lock:
             stats = list(self._buf_stats.items())
@@ -235,11 +291,13 @@ class EmojiUsageTracker:
         *,
         k: int = SHORTLIST_K,
         unicode: bool = False,
+        only_ids: Optional[set[int]] = None,
     ) -> list[EmojiCandidate]:
         """Top k candidats : fréquence × overlap lexical avec les extraits.
 
         `unicode=False` : emojis custom du serveur uniquement.
         `unicode=True` : emojis classiques appris, complétés par les défauts.
+        `only_ids` : restreint les custom aux emojis réellement utilisables par le bot.
         """
         self.flush()
         sign = "<" if unicode else ">"
@@ -271,6 +329,8 @@ class EmojiUsageTracker:
         scored: list[tuple[float, EmojiCandidate]] = []
         for row in stats:
             eid = int(row["emoji_id"])
+            if only_ids is not None and eid > 0 and eid not in only_ids:
+                continue
             samples = tuple(samples_by.get(eid, [])[:3])
             sample_tok: set[str] = set()
             for s in samples:

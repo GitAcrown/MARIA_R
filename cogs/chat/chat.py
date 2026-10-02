@@ -615,6 +615,8 @@ class Chat(commands.Cog):
         self._followups: dict[tuple[int, int], _Followup] = {}
         self._pending_name_ack: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
+        # Messages que JEV a jugé « à répondre » : pas de silence possible, typing immédiat.
+        self._confirmed_reply: deque[int] = deque(maxlen=200)
         # (auteur_id, auteur_bot, extrait) des messages récents : évite un fetch API par réaction.
         self._msg_meta: OrderedDict[int, tuple[int, bool, str]] = OrderedDict()
         self._reaction_humans: OrderedDict[tuple[int, str], set[int]] = OrderedDict()
@@ -973,6 +975,7 @@ class Chat(commands.Cog):
                     message.content or "", bot_name=self.bot.user.name,
                 )
                 if decision == "respond":
+                    self._confirmed_reply.append(message.id)
                     return True
                 if decision == "react":
                     self._pending_name_ack.add(message.id)
@@ -1109,6 +1112,7 @@ class Chat(commands.Cog):
                 candidates = await asyncio.to_thread(
                     self.emoji_usage.shortlist, message.guild.id, content,
                     unicode=unicode_stage,
+                    only_ids=None if unicode_stage else {e.id for e in message.guild.emojis if e.available},
                 )
             except Exception:
                 logger.debug("shortlist emoji échoué", exc_info=True)
@@ -1233,6 +1237,8 @@ class Chat(commands.Cog):
             return False
         bot = self.bot.user
         if bot is None or bot in message.mentions or message.mention_everyone:
+            return False
+        if message.id in self._confirmed_reply:
             return False
         if "?" in (message.content or ""):
             return False
@@ -1782,6 +1788,16 @@ class Chat(commands.Cog):
                 and resolved_ref.author.id == self.bot.user.id
             ):
                 reply_to_bot = True
+        if message.guild and not other_bot and not edited:
+            ref_text = ""
+            if resolved_ref is not None and not getattr(resolved_ref.author, "bot", False):
+                ref_text = (resolved_ref.clean_content or resolved_ref.content or "")[:200]
+            try:
+                self.emoji_usage.observe_text(
+                    message.guild.id, message.content or "", context=ref_text,
+                )
+            except Exception:
+                logger.debug("Apprentissage emojis (message) échoué", exc_info=True)
         should_respond = False if other_bot else await self._should_respond_async(
             message, reply_to_bot=reply_to_bot,
         )
@@ -1815,6 +1831,7 @@ class Chat(commands.Cog):
                     )
                     return
                 self._followups.pop(key, None)
+                self._confirmed_reply.append(message.id)
                 should_respond = True
             elif followup == "react":
                 self._followups.pop(key, None)
