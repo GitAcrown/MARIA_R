@@ -165,36 +165,68 @@ class MariaTypeSafeClient:
         bot_name: str,
     ) -> bool:
         """True si l'auteur s'adresse au bot. Sans JEV / erreur → True."""
+        decision = await self.classify_bot_mention(message, bot_name=bot_name)
+        return decision == "respond"
+
+    async def classify_bot_mention(
+        self,
+        message: str,
+        *,
+        bot_name: str,
+    ) -> str:
+        """Mention / nom du bot : respond | react | ignore.
+
+        Sans JEV / erreur → respond (fail-open comme avant).
+        """
         if not self.enabled:
-            return True
-        from typesafe_sdk import Noul
+            return "respond"
+        from typesafe_sdk import Choice
 
         name = (bot_name or "Maria").strip() or "Maria"
         result = await self.system_one(
-            {"bot_name": name, "message": (message or "").strip()},
+            {"bot_name": name, "message": (message or "").strip()[:500]},
             {
-                "addressed_to_bot": Noul(
+                "mention": Choice(
                     instructions=(
-                        "Does the author address the bot named `bot_name`, "
-                        "asking or expecting a reply from it?"
+                        "The bot `bot_name` was named or mentioned in `message`. "
+                        "How should she handle it in a casual Discord group chat?"
                     ),
                     criteria={
-                        "true": "Direct address, question, or request to the bot",
-                        "false": (
-                            "Talking about the bot to someone else, "
-                            "or mere name drop with no expectation of a reply"
+                        "respond": (
+                            "Direct address: question, request, greeting to her, "
+                            "or clear expectation of a written reply"
+                        ),
+                        "react": (
+                            "Worth a light emoji ack without words: joke she is in, "
+                            "talking about her with room for a vibe reaction, "
+                            "group banter she can nod to — NOT asking her to answer"
+                        ),
+                        "ignore": (
+                            "Passive name-drop only: listed among other members, "
+                            "roll call, invite list, tags list, or talking about her "
+                            "to someone else with no reason to acknowledge"
                         ),
                     },
                 ),
             },
         )
         if result is None:
-            return True
+            return "respond"
         try:
-            noul = float(result.nouls["addressed_to_bot"].noul)
+            ans = result.choices["mention"]
+            choice = str(ans.choice or "respond")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         except (KeyError, AttributeError, TypeError, ValueError):
-            return True
-        return noul >= ADDRESS_THRESHOLD
+            return "respond"
+        if choice not in ("respond", "react", "ignore"):
+            return "respond"
+        if conf < CATEGORY_CONFIDENCE:
+            # Réaction à faible confiance → ignore (évite le spam).
+            # Réponse : fail-open léger si le modèle penche quand même respond.
+            if choice == "respond" and conf >= 0.35:
+                return "respond"
+            return "ignore"
+        return choice
 
     def prefetch_intent(self, text: str) -> None:
         """Démarre resolve_intent en arrière-plan (même clé = même tâche)."""
