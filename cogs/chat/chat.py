@@ -6,7 +6,9 @@ import asyncio
 import logging
 import random
 import re
+import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -215,6 +217,18 @@ def _strip_source_marks(text: str) -> str:
 
 
 _SILENCE_TYPING_DELAY = 2.5
+
+# Fenêtre où le message suivant du même membre (sans mention) est soumis à JEV.
+FOLLOWUP_WINDOW_SECONDS = 45.0
+FOLLOWUP_MAX_CHECKS = 2
+_FOLLOWUP_MAX_ENTRIES = 200
+
+
+@dataclass
+class _Followup:
+    until: float
+    bot_text: str
+    checks: int = 0
 
 
 async def _keep_typing(channel, *, delay: float = 0.0) -> None:
@@ -558,6 +572,7 @@ class Chat(commands.Cog):
         # Debounce par (channel_id, author_id).
         self._pending_responses: dict[tuple[int, int], asyncio.Task] = {}
         self._first_triggers: dict[tuple[int, int], discord.Message] = {}
+        self._followups: dict[tuple[int, int], _Followup] = {}
 
     async def cog_load(self) -> None:
         self._tasks_worker = TaskWorker(self.tasks, self._exec_task)
@@ -1058,6 +1073,49 @@ class Chat(commands.Cog):
             return True
         return False
 
+    def _open_followup(self, message, bot_text: str) -> None:
+        """MARIA vient de répondre à ce membre : son prochain message est surveillé quelques secondes."""
+        if not getattr(message, "guild", None):
+            return
+        now = time.monotonic()
+        if len(self._followups) >= _FOLLOWUP_MAX_ENTRIES:
+            self._followups = {k: v for k, v in self._followups.items() if v.until > now}
+        self._followups[(message.channel.id, message.author.id)] = _Followup(
+            until=now + FOLLOWUP_WINDOW_SECONDS, bot_text=bot_text,
+        )
+
+    async def _followup_decision(self, message: discord.Message, resolved_ref) -> str:
+        """respond / react / ignore pour un message sans mention qui suit une réponse de MARIA."""
+        if not message.guild or message.author.bot:
+            return "ignore"
+        key = (message.channel.id, message.author.id)
+        follow = self._followups.get(key)
+        if follow is None:
+            return "ignore"
+        if time.monotonic() > follow.until or follow.checks >= FOLLOWUP_MAX_CHECKS:
+            self._followups.pop(key, None)
+            return "ignore"
+        if self.data.get(message.guild).settings("guild_config").get("chatbot_mode") == "off":
+            return "ignore"
+        # Adressé à quelqu'un d'autre : reply à un autre membre ou mention d'un autre membre.
+        if resolved_ref is not None and getattr(resolved_ref.author, "id", None) != getattr(self.bot.user, "id", None):
+            return "ignore"
+        if any(u.id != self.bot.user.id and not u.bot for u in message.mentions):
+            return "ignore"
+        text = (message.clean_content or message.content or "").strip()
+        if not text:
+            return "ignore"
+        follow.checks += 1
+        try:
+            decision = await self.typesafe.classify_followup(text, bot_last=follow.bot_text)
+        except Exception:
+            logger.debug("classify_followup JEV échoué", exc_info=True)
+            return "ignore"
+        if decision != "ignore":
+            self._followups.pop(key, None)
+            logger.info("Suite d'échange détectée dans #%s : %s", message.channel.id, decision)
+        return decision
+
     async def _try_explicit_reaction(self, message) -> bool:
         """« réagis à mon msg » : réaction directe, sans passer par le modèle.
 
@@ -1267,6 +1325,7 @@ class Chat(commands.Cog):
             )
             self._remember_reply(message.id, None)
             return
+        self._open_followup(message, text or "(vue ou résultat d'outil)")
         visible_parts: list[str] = []
         source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
@@ -1494,6 +1553,12 @@ class Chat(commands.Cog):
         should_respond = False if other_bot else await self._should_respond_async(
             message, reply_to_bot=reply_to_bot,
         )
+        if not should_respond and not other_bot and not edited:
+            followup = await self._followup_decision(message, resolved_ref)
+            if followup == "respond":
+                should_respond = True
+            elif followup == "react":
+                await self._apply_learned_reaction(message)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
 

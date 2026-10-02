@@ -19,6 +19,7 @@ FORCE_CONFIDENCE = 0.5
 RAG_SCORE_MIN = 1.0
 RAG_CONFIDENCE_MIN = 0.4
 DURABLE_THRESHOLD = 0.5
+FOLLOWUP_CONFIDENCE = 0.55
 REACTION_CONFIDENCE = 0.45
 
 GATED_CATEGORIES = (
@@ -381,6 +382,55 @@ class MariaTypeSafeClient:
                     (action.get("content") or "")[:80],
                 )
         return kept
+
+    async def classify_followup(self, message: str, *, bot_last: str) -> str:
+        """Message du même membre juste après une réponse de MARIA : respond / react / ignore.
+
+        Sans JEV, ou en cas d'erreur ou de doute : ignore.
+        """
+        text = (message or "").strip()
+        if not self.enabled or not text:
+            return "ignore"
+        from typesafe_sdk import Choice
+
+        result = await self.system_one(
+            {"bot_last": (bot_last or "")[:400], "message": text[:400]},
+            {
+                "followup": Choice(
+                    instructions=(
+                        "`bot_last` is what the bot MARIA just said to this member. "
+                        "`message` is what the same member wrote right after, without "
+                        "mentioning her. How would a friend in the group chat handle it?"
+                    ),
+                    criteria={
+                        "respond": (
+                            "Continues the conversation with MARIA and expects words back "
+                            "(question, request, follow-up, reaction to her answer that "
+                            "invites a reply)"
+                        ),
+                        "react": (
+                            "Short acknowledgement or closing aimed at her (thanks, ok, "
+                            "lol, nice, got it) — an emoji reaction is enough, no text"
+                        ),
+                        "ignore": (
+                            "Unrelated to her answer, aimed at someone else, or nothing "
+                            "to answer"
+                        ),
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return "ignore"
+        try:
+            ans = result.choices["followup"]
+            choice = str(ans.choice or "ignore")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return "ignore"
+        if choice not in ("respond", "react") or conf < FOLLOWUP_CONFIDENCE:
+            return "ignore"
+        return choice
 
     async def pick_reaction(
         self,
