@@ -71,7 +71,8 @@ def _semantic_search(
     """Recherche par similarité (Chroma), utile quand le mot-clé exact n'existe pas
     dans le texte (paraphrase, synonyme). Résultats triés par proximité."""
     results = vectors.query(query, guild_id=guild_id, user_id=user_id, n=limit * 2)
-    out: list[Memory] = []
+    # 1 requête SQLite groupée au lieu d'un store.get() par voisin (N+1).
+    wanted: list[str] = []
     seen: set[str] = set()
     for r in results:
         mid = r.get("id")
@@ -82,10 +83,16 @@ def _semantic_search(
             continue
         if user_id is not None and meta.get("category") == CATEGORY_USER and meta.get("user_id") != user_id:
             continue
-        mem = store.get(mid)
+        seen.add(mid)
+        wanted.append(mid)
+    if not wanted:
+        return []
+    by_id = {m.id: m for m in store.get_many(wanted)}
+    out: list[Memory] = []
+    for mid in wanted:  # ordre = proximité Chroma
+        mem = by_id.get(mid)
         if mem is None or mem.status != STATUS_ACTIVE:
             continue
-        seen.add(mid)
         out.append(mem)
         if len(out) >= limit:
             break
@@ -130,7 +137,8 @@ def build_memory_tools(
                 category=category, user_id=user_id, limit=_MAX_RESULTS,
             )
         else:
-            memories = store.search_active(
+            memories = await asyncio.to_thread(
+                store.search_active,
                 guild_id,
                 query=query,
                 category=category,

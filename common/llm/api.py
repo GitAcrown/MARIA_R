@@ -9,6 +9,7 @@ from .client import MariaLLMClient
 from .session import ChannelSession, ChannelSessionManager
 from .tools import Tool, ToolRegistry
 from .context import AssistantRecord, TextComponent
+from .typesafe_client import MariaTypeSafeClient
 
 
 def _tool_response_failed(tr) -> bool:
@@ -85,6 +86,7 @@ class MariaGptApi:
         context_window: int = 12000,
         context_age_hours: float = 2,
         max_messages: int = 0,
+        typesafe: Optional[MariaTypeSafeClient] = None,
     ):
         self.client = MariaLLMClient(
             api_key=api_key,
@@ -92,6 +94,7 @@ class MariaGptApi:
             transcription_model=transcription_model,
             max_tokens=max_tokens,
         )
+        self.typesafe = typesafe
         self.tool_registry = ToolRegistry()
         self.session_manager = ChannelSessionManager(
             client=self.client,
@@ -100,6 +103,7 @@ class MariaGptApi:
             context_window=context_window,
             context_age_hours=context_age_hours,
             max_messages=max_messages,
+            typesafe=typesafe,
         )
 
     async def run_completion(
@@ -150,6 +154,7 @@ class MariaGptApi:
             context_window=mgr._context_window,
             context_age_hours=mgr._context_age_hours,
             max_messages=mgr._max_messages,
+            typesafe=self.typesafe,
         )
         session.context.add_user_message(
             components=[TextComponent(user_text)],
@@ -200,3 +205,5 @@ class MariaGptApi:
 
     async def close(self) -> None:
         await self.client.close()
+        if self.typesafe is not None:
+            await self.typesafe.close()

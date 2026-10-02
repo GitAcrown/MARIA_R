@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -54,7 +55,8 @@ def build_poll_tools(store: PollStore) -> list[Tool]:
             )
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=hours)
-        store.create(
+        await asyncio.to_thread(
+            store.create,
             message_id=posted.id,
             channel_id=message.channel.id,
             guild_id=message.guild.id,

@@ -5,7 +5,7 @@ from common.memory.rag import (
     build_self_ctx,
     format_memory_ctx,
     query_is_collective,
-    retrieve_memories,
+    retrieve_memories_async,
 )
 from common.memory.store import Memory, MemoryStore, MEMORY_CONTENT_MAX
 from common.memory.worker import MemoryWorker
@@ -19,5 +19,5 @@ __all__ = [
     "build_self_ctx",
     "format_memory_ctx",
     "query_is_collective",
-    "retrieve_memories",
+    "retrieve_memories_async",
 ]

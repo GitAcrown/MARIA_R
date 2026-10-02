@@ -31,6 +31,7 @@ from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
 from common.emojis import TRAIN
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
+from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Transport")
@@ -357,6 +358,9 @@ class Transport(commands.Cog):
             auth="basic",
         )
         self._place_cache: dict[str, tuple[float, dict]] = {}
+        # Passages temps réel : courts (les attentes sont en minutes). Trafic : un peu plus long.
+        self._live_cache = TTLCache(45, maxsize=128)
+        self._traffic_cache = TTLCache(180, maxsize=64)
 
     def _get(self, backend: _Backend, path: str, params: Optional[dict] = None) -> dict:
         if not backend.key:
@@ -555,6 +559,16 @@ class Transport(commands.Cog):
         }
 
     def _departures_payload(self, stop: str, line_filter: str = "") -> dict:
+        key = ("dep", stop.strip().lower(), line_filter.strip().lower())
+        cached = self._live_cache.get(key)
+        if cached is not None:
+            return cached
+        data = self._departures_payload_uncached(stop, line_filter)
+        if "error" not in data:
+            self._live_cache.set(key, data)
+        return data
+
+    def _departures_payload_uncached(self, stop: str, line_filter: str = "") -> dict:
         blob = f"{stop} {line_filter}"
         prefer_sncf = bool(_SNCF_HINT.search(blob) and not _IDF_HINT.search(blob))
         first, second = (self._sncf, self._prim) if prefer_sncf else (self._prim, self._sncf)
@@ -604,6 +618,16 @@ class Transport(commands.Cog):
         return notes[:6]
 
     def _traffic_payload(self, line: str) -> dict:
+        key = ("traffic", line.strip().lower())
+        cached = self._traffic_cache.get(key)
+        if cached is not None:
+            return cached
+        data = self._traffic_payload_uncached(line)
+        if "error" not in data:
+            self._traffic_cache.set(key, data)
+        return data
+
+    def _traffic_payload_uncached(self, line: str) -> dict:
         found = self._search_line(line)
         if "error" in found:
             return found
@@ -627,6 +651,16 @@ class Transport(commands.Cog):
         }
 
     def _global_traffic_payload(self) -> dict:
+        key = ("traffic", "*")
+        cached = self._traffic_cache.get(key)
+        if cached is not None:
+            return cached
+        data = self._global_traffic_payload_uncached()
+        if "error" not in data:
+            self._traffic_cache.set(key, data)
+        return data
+
+    def _global_traffic_payload_uncached(self) -> dict:
         raw = self._get(
             self._prim,
             f"{self._prim.coverage}/line_reports/line_reports",

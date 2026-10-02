@@ -28,8 +28,6 @@ STATUS_PENDING = "pending"
 STATUS_ARCHIVED = "archived"
 
 CONFIDENCE_PENDING = 0.2
-# Collectif (server) : plus d'actif dès la 1re capture — passe en pending comme le perso passif.
-CONFIDENCE_COLLECTIVE = 0.5
 # Fait perso dit directement à MARIA (mention / reply) — confiance élevée, actif tout de suite.
 CONFIDENCE_DIRECT = 0.75
 # Faits immuables affirmés clairement (anniv…) — actifs tout de suite, hors decay.
@@ -173,6 +171,8 @@ def _infer_related_user_id(content: str, user_id: Optional[int]) -> Optional[int
 def _db() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # Worker, RAG et outils écrivent en parallèle (threads) : on attend le verrou WAL.
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
         conn.commit()
@@ -808,6 +808,7 @@ class MemoryStore:
                     "UPDATE memories SET status = ? WHERE id = ?",
                     (STATUS_ARCHIVED, r["id"]),
                 )
+                _fts_delete(conn, r["id"])
         return chroma_ids
 
     def clear_server(self, guild_id: int) -> list[str]:
@@ -831,6 +832,7 @@ class MemoryStore:
                     "UPDATE memories SET status = ? WHERE id = ?",
                     (STATUS_ARCHIVED, r["id"]),
                 )
+                _fts_delete(conn, r["id"])
         return chroma_ids
 
     def count_below_confidence(self, threshold: float) -> dict[str, int]:
@@ -879,6 +881,7 @@ class MemoryStore:
                     "UPDATE memories SET status = ? WHERE id = ?",
                     (STATUS_ARCHIVED, r["id"]),
                 )
+                _fts_delete(conn, r["id"])
         return chroma_ids
 
     def apply_decay(self) -> list[str]:

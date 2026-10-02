@@ -25,6 +25,7 @@ from discord.ext import commands
 from common.discord_ui import layout_with_commentary
 from common.emojis import DIRECT, FOOTBALL, FOOTBALL_PLAYER
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Football")
@@ -436,6 +437,9 @@ class Football(commands.Cog):
         # quand THESPORTSDB_KEY n'est pas défini dans .env) — voir thesportsdb.com/api.php.
         self._tsdb_key: str = cfg.get("THESPORTSDB_KEY", "") or "123"
         self._id_cache: dict[str, Optional[int]] = {}
+        # Liste « en direct » : une seule requête partagée toutes les 45 s
+        # (tier gratuit = 100 requêtes/jour).
+        self._live_list_cache = TTLCache(45, maxsize=1)
 
     # -- Requêtes API (synchrones, exécutées dans un thread) ----------------
 
@@ -727,10 +731,15 @@ class Football(commands.Cog):
     def _fetch_live_list(self) -> dict:
         if not self._api_key:
             return {"error": "Clé API-Football manquante (API_FOOTBALL_KEY dans .env)"}
+        cached = self._live_list_cache.get("live")
+        if cached is not None:
+            return cached
         payload = self._get("fixtures", {"live": "all"})
         if _af_down(payload):
             return {"error": "API-Football indisponible (clé invalide ou quota dépassé)"}
-        return {"mode": "live_list", "results": payload.get("response", [])}
+        data = {"mode": "live_list", "results": payload.get("response", [])}
+        self._live_list_cache.set("live", data)
+        return data
 
     # -- Outil ---------------------------------------------------------------
 

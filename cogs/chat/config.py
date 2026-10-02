@@ -31,7 +31,6 @@ DEBOUNCE_SECONDS: float = 0.33
 # Fenêtre unique pour les éditions (ping corrigé « marie » → « maria », ou
 # mise à jour in-place d'une réponse déjà postée). Au-delà : on ignore —
 # trop long = risque de relancer un message déjà modéré.
-EDIT_TRIGGER_SECONDS: float = 15
 EDIT_UPDATE_WINDOW_SECONDS: float = 15
 
 # Mémoire long terme — carte d'identité, pas le journal du salon.
@@ -59,3 +58,24 @@ MEMORY_RAG_MAX_DISTANCE = 0.42
 MEMORY_PENDING_PROFILE_MIN = 0.5
 # Archives SQLite purgées après ce délai.
 MEMORY_ARCHIVE_PURGE_DAYS = 90
+
+# Exemples de registre injectés dans le prompt (STYLE_EXAMPLES_SAMPLE tirés au hasard à
+# chaque réponse : varie le ton, évite que le modèle se fige sur un seul gabarit, et
+# coûte ~100 tokens). REMPLACE-LES par de vrais échanges du serveur : c'est ce qui
+# donne le meilleur résultat. Format : (message du membre, réponse de MARIA).
+STYLE_EXAMPLES: list[tuple[str, str]] = [
+    ("t'as vu le match hier ?", "ouais, 3-0 c'était violent"),
+    ("tu penses quoi de ce film ?", "overrated, la fin sauve rien"),
+    ("on mange où ce soir ?", "kebab, pas de débat"),
+    ("c'est quoi la capitale de l'Australie ?", "Canberra, pas Sydney comme tout le monde croit"),
+    ("j'ai raté mon exam", "aïe. t'as bossé au moins ou c'était cramé d'avance ?"),
+    ("tu dors jamais toi", "j'ai pas le choix, je suis un serveur"),
+    ("explique-moi comment marche le TCP", "en gros : poignée de main en 3 temps, puis les paquets partent numérotés et ce qui se perd est renvoyé. tu veux le détail ?"),
+    ("bonjour", "yo"),
+]
+STYLE_EXAMPLES_SAMPLE = 3
+
+# Pieds de page `-# …` : seuls les outils à effet visible ou à sources restent affichés.
+# Ces outils-là sont jugés « mécanique interne » et ne sont plus signalés.
+QUIET_FOOTER_TOOLS = frozenset({"search_memory", "search_images"})
+SHOW_MEMORY_CALLBACK_TAG = False

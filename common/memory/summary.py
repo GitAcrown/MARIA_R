@@ -115,20 +115,3 @@ async def summarize_memories(
 
     bullets = "\n".join(f"› {m.content}" for m in memories[:8])
     return bullets or (empty_user if scope == "user" else empty_server)
-
-
-# Rétrocompat
-async def summarize_memories_for_user(
-    llm_client: Any,
-    *,
-    model: str,
-    display_name: str,
-    memories: list[Memory],
-) -> str:
-    return await summarize_memories(
-        llm_client,
-        model=model,
-        memories=memories,
-        scope="user",
-        display_name=display_name,
-    )

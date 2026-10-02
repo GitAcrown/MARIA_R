@@ -19,8 +19,22 @@ Personnalité directe et Gen Z, Maria s'adapte au ton de chaque salon, et cherch
 
 - [discord.py](https://discordpy.readthedocs.io/) — interface Discord
 - [OpenAI](https://platform.openai.com/) — `gpt-6-luna` · `gpt-4o-transcribe`
+- [TypeSafe JEV](https://docs.typesafe.ai/api) — décisions structurées (optionnel)
 - [Brave Search API](https://brave.com/search/api/) — recherche web (optionnel)
 - SQLite + [Chroma](https://www.trychroma.com/) — persistance locale et recherche sémantique
+
+## TypeSafe / JEV (optionnel)
+
+Avec `TYPESAFE_API_KEY` dans `.env`, MARIA utilise [JEV](https://docs.typesafe.ai/api) pour :
+
+| Usage | Question | Seuil | Sans clé / erreur API |
+|-------|----------|-------|------------------------|
+| Mode **greedy** (nom cité) | Noul « s’adresse au bot ? » | `≥ 0.65` | Répond comme avant (regex) |
+| Routage d’outils | Choice `force_level` + catégorie | confidence `≥ 0.5` | Regex `capabilities.py` |
+| RAG mémoire | Score pertinence souvenir↔query | score `≥ 1.0` et conf `≥ 0.4` | Ranking embedding actuel |
+| Extraction mémoire | Noul « fait durable ? » | `≥ 0.6` | Toutes les actions LLM |
+
+Sans clé, le comportement legacy est inchangé. Mentions Discord et replies au bot restent déterministes (pas de JEV).
 
 ## Licence
 

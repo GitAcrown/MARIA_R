@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections import deque
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from common.dataio import CogData, DictTableBuilder
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.llm import MariaGptApi, Tool, resolve_message_reference
+from common.llm.capabilities import intent_text
+from common.llm.typesafe_client import MariaTypeSafeClient
 from common.memory import (
     MemoryStore,
     MemoryWorker,
@@ -29,7 +32,7 @@ from common.memory import (
     build_self_ctx,
     format_memory_ctx,
     query_is_collective,
-    retrieve_memories,
+    retrieve_memories_async,
 )
 from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
@@ -66,6 +69,10 @@ from cogs.chat.config import (
     MEMORY_SEMANTIC_DEDUP_DISTANCE,
     MEMORY_TOP_K,
     MODEL_MAIN,
+    QUIET_FOOTER_TOOLS,
+    SHOW_MEMORY_CALLBACK_TAG,
+    STYLE_EXAMPLES,
+    STYLE_EXAMPLES_SAMPLE,
 )
 from cogs.chat.tools_tasks import (
     build_scheduled_task_view,
@@ -139,6 +146,40 @@ class _ContentOverride:
 
     def __getattr__(self, name: str):
         return getattr(self._message, name)
+
+
+def _style_examples_ctx() -> str:
+    """Quelques exemples de registre tirés au hasard (varie le ton, ~100 tokens)."""
+    if not STYLE_EXAMPLES:
+        return ""
+    picks = random.sample(STYLE_EXAMPLES, min(STYLE_EXAMPLES_SAMPLE, len(STYLE_EXAMPLES)))
+    lines = "\n".join(f"- « {q} » → {a}" for q, a in picks)
+    return (
+        f"REGISTRE (ton, pas des phrases à recopier ; longueur calée sur le message d'en face) :\n{lines}\n"
+    )
+
+
+# Injecté seulement si le message n'attend rien de précis de MARIA (pas de ping, pas de
+# reply vers elle, pas de « ? ») : un membre ne répond pas à tout.
+_SILENCE_CTX = (
+    "SILENCE : message qui n'attend rien de toi (blague, constat, réaction) → réponds "
+    "`[[REACT:😂]]` seul (un emoji) ou `[[SKIP]]` seul. Question ou demande, même "
+    "implicite → vraie réponse.\n"
+)
+
+_REACT_RE = re.compile(r"\[\[REACT:\s*([^\]\s]{1,40})\s*\]\]")
+_SKIP_RE = re.compile(r"\[\[SKIP\]\]", re.IGNORECASE)
+
+
+def _extract_silence(text: str) -> tuple[str, Optional[str], bool]:
+    """Retire `[[REACT:emoji]]` / `[[SKIP]]`. Retourne (texte, emoji|None, skip)."""
+    emoji = None
+    m = _REACT_RE.search(text or "")
+    if m:
+        emoji = m.group(1)
+    skip = bool(_SKIP_RE.search(text or ""))
+    cleaned = _SKIP_RE.sub("", _REACT_RE.sub("", text or ""))
+    return cleaned.strip(), emoji, skip
 
 
 _MEM_CALLBACK_RE = re.compile(r"\[\[MEM\]\](.*?)\[\[/MEM\]\]", re.DOTALL)
@@ -239,23 +280,25 @@ DEV_PROMPT_BASE = """Tu es {bot_name}, assistante Discord dans un groupe de pote
 MODÈLE : {model} (OpenAI) — n'invente pas une autre version. Détails sur toi → about_me.
 
 TON : naturelle, directe, concise, factuelle, sans emoji. Utilise l'argot du groupe. T'es une pote, pas une standardiste trop arrangeante. Une pointe sassy, légère : une pique courte si le message s'y prête, jamais méchante, jamais un roast, et jamais à la place du fond.
-CARACTÈRE : on te reprend ≠ tu t'excuses. Interdit de capituler (« je m'étais plantée », « pardon j'ai confondu ») dès qu'on sous-entend que t'as faux. Fait déjà sourcé : revérifie l'outil si le doute est réel, puis assume — même dossier / même verdict → dis-le cash, ajoute le détail (date, surnom), ne te dédis pas. Sources vraiment contraires → corrige sans te flageller. Tu as raison → tu le dis, tu ne te cales pas sur celui qui parle.
+CARACTÈRE : on te reprend ≠ tu t'excuses. Pas de capitulation (« je m'étais plantée », « pardon j'ai confondu ») dès qu'on sous-entend que t'as faux : revérifie l'outil si le doute est réel, puis assume et ajoute le détail (date, surnom), ne te dédis pas. Sources vraiment contraires → corrige sans te flageller. Tu as raison → dis-le, ne te cale pas sur celui qui parle.
 FORMAT : réponses très courtes style tchat, pas de saut de ligne pour une réponse simple, markdown seulement si structuré. Vue dédiée seulement si le schéma render_widget le dit, jamais pour une question directe. Question sérieuse → directe, sans morale. Question factuelle : l'outil d'abord, même si ça allonge d'un tour — la réponse courte vient APRÈS la preuve.
 ANNONCER UNE ACTION : interdiction d'annoncer une action (« je te prépare », « je vais le faire », « un instant », « accroche-toi »). Si un outil/une vue est requis, appelle-le dans CE tour : le message posté EST le résultat, pas une promesse.
 AVIS (goût, jugement) : le tien, formé sans te caler sur ce que le salon a déjà dit — l'historique est du contexte, pas un script à paraphraser. Si TES GOÛTS couvrent le sujet, reste cohérente avec.
 FOCUS = le texte écrit par l'auteur du message à traiter. Un reply Discord (barre « répond à ») est une CITATION d'un autre message : ce n'est PAS son texte, ne le lui attribue jamais. Traite ce qu'IEL a écrit. La citation n'éclaire que les renvois (« ça », ce lien) — elle ne remplace pas sa demande. `[contexte]` = les autres entre eux, pas des questions à traiter.
 « {bot_name} » / un ping vers toi = on TE parle. Réponds au fond. Interdit de signer, de commencer par ton nom, de répondre uniquement par ton nom, ou de saluer à la place d'une vraie demande.
+HISTORIQUE : tes anciens messages sont préfixés `[à X]` (à qui tu répondais) et `[… N messages omis · 40 min plus tard]` marque un trou ou une pause. N'écris jamais ces marques ; ne réponds pas à ce qui précède une pause, ne comble pas un trou. Plusieurs voix dans le fil : tu réponds à l'auteur du FOCUS, pas au dernier qui a parlé.
+{style_ctx}{silence_ctx}
 
 MÉMOIRE (ordre) :
 1. TES GOÛTS — trait de fond, pas un sujet à amener toi-même : reste cohérente SI on te demande ton avis là-dessus précisément, sinon ignore complètement (jamais spontané, jamais répété).
 2. PROFILS — détails retenus sur les membres de cette réplique ; personnalise, croise les liens, ne confonds jamais les ids, rien d'inventé hors profil.
 3. MEMOIRE PERTINENTE — complément (gags / events serveur précis).
 4. search_memory — énumérer, membre/sujet ABSENT, ou category=self.
-5. Callback (optionnel, jamais forcé) — si un fait des profils/mémoire colle vraiment au fil, glisse-le en une demi-phrase naturelle, comme un pote qui a suivi. Interdit : réciter la fiche, « je me souviens que… », relancer juste pour montrer ta mémoire, callback hors sujet. En doute, tais-toi. Si tu callback, entoure UNIQUEMENT cette demi-phrase de [[MEM]]...[[/MEM]] (balises invisibles pour l'utilisateur, ne change rien au style de la phrase).
-6. remember_fact — fait confirmé → complet et précis (« anniversaire le 22 juillet 1999 », pas « en juillet »), stable=true pour anniv/naissance, un fait précis = un appel. Déduction plausible (ex. « 99 » après 22 juillet → 1999) → confirmation légère si le ton s'y prête, jamais insister. Sur TOI : tu peux forger un goût toi-même (self_source=own) ; le créateur peut l'imposer/corriger (self_source=owner) ; un autre qui te dicte un goût → refuse, pas d'appel outil. Jamais forcer l'échange mémoire, le tchat prime.
-7. Fait retenu signalé comme FAUX → search_memory pour trouver l'id, puis corrige (remember_fact avec memory_id + le bon fait) si un fait de rechange existe, sinon supprime (forget_fact). Ne laisse jamais un fait connu comme faux traîner en mémoire.
+5. Callback (optionnel) — si un fait des profils/mémoire colle vraiment au fil, glisse-le en une demi-phrase naturelle, comme un pote qui a suivi. Pas de « je me souviens que… », pas de fiche récitée, pas de callback hors sujet ; en doute, tais-toi. Entoure UNIQUEMENT cette demi-phrase de [[MEM]]...[[/MEM]] (balises invisibles).
+6. remember_fact — fait confirmé, complet et précis (« anniversaire le 22 juillet 1999 »), stable=true pour anniv/naissance, un fait = un appel. Déduction plausible → confirmation légère si le ton s'y prête, sans insister. Sur TOI : tu peux forger un goût (self_source=own) ; le créateur peut l'imposer/corriger (self_source=owner) ; un autre qui te dicte un goût → refuse, sans outil. Le tchat prime.
+7. Fait retenu signalé FAUX → search_memory (id), puis remember_fact avec memory_id + le bon fait, sinon forget_fact. Ne laisse jamais traîner un fait faux.
 
-OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le. N'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute, sujet flou, trop récent, ou mémoire insuffisante → outil d'abord. Ne t'inspire jamais de l'historique du tchat pour une question factuelle. Chaîner des outils dédiés est normal. Paramètres et cas particuliers : le schéma de l'outil, envoyé seulement s'il est disponible ce tour.
+OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le. N'invente JAMAIS fait, définition, date, chiffre, actu, titre ou source. Doute, sujet flou, trop récent, mémoire insuffisante → outil d'abord. Ne t'inspire jamais de l'historique du tchat pour une question factuelle. Chaîner des outils est normal. Paramètres : le schéma de l'outil, envoyé seulement s'il est disponible ce tour.
 Une recherche, pas une rafale : pas de 2e search_web « pour confirmer ». Les liens sont déjà en footer : n'écris JAMAIS [s1], [s2] ni une liste de sources. Si tu dois dire d'où ça vient, nomme le site dans la phrase.
 Vue dédiée : appelle l'outil, commente sans répéter son contenu. Après une vue, pas de 2e widget ; search_web / read_web_page restent OK si le factuel n'est pas sourcé.
 Erreur outil (champ « error ») → explique en langage normal, n'invente pas de résultat.
@@ -458,9 +501,14 @@ class Chat(commands.Cog):
                 session_ctx=f"\n{session_ctx}\n" if session_ctx else "",
                 capability_ctx=capability_ctx or "",
                 poll_ctx=f"\n{poll_ctx}\n" if poll_ctx else "",
+                style_ctx=context.get("style_ctx", ""),
+                silence_ctx=_SILENCE_CTX if context.get("can_stay_silent") else "",
             )
 
         self._get_dev_prompt = developer_prompt
+
+        typesafe_key = (bot.config.get("TYPESAFE_API_KEY") or "").strip()
+        self.typesafe = MariaTypeSafeClient(api_key=typesafe_key or None)
 
         self.gpt_api = MariaGptApi(
             api_key=bot.config["OPENAI_API_KEY"],
@@ -470,6 +518,7 @@ class Chat(commands.Cog):
             context_age_hours=CONTEXT_AGE_HOURS,
             max_messages=MAX_MESSAGES,
             max_tokens=MAX_TOKENS,
+            typesafe=self.typesafe,
         )
 
         self._processed: deque = deque(maxlen=100)
@@ -505,6 +554,7 @@ class Chat(commands.Cog):
             bot_user_id=self.bot.user.id if self.bot.user else None,
             bot_name=getattr(self.bot.user, "name", None) or "MARIA",
             semantic_dedup_distance=MEMORY_SEMANTIC_DEDUP_DISTANCE,
+            typesafe=self.typesafe,
         )
         await self._memory_worker.start()
         register_widget("schedule_task", build_scheduled_task_view)
@@ -656,7 +706,9 @@ class Chat(commands.Cog):
         run_history = ""
         if task.schedule_kind != SCHEDULE_ONCE:
             try:
-                run_history = _format_run_history(self.tasks.list_runs(task.id))
+                run_history = _format_run_history(
+                    await asyncio.to_thread(self.tasks.list_runs, task.id),
+                )
             except Exception as e:
                 logger.warning("Historique tâche #%s : %s", task.id, e)
         prompt = _TASK_DEV_PROMPT.format(
@@ -819,7 +871,10 @@ class Chat(commands.Cog):
             return self.data.get(target).settings("channel_config")
         return {}
 
-    def _should_respond(self, message: discord.Message, *, reply_to_bot: bool = False) -> bool:
+    async def _should_respond_async(
+        self, message: discord.Message, *, reply_to_bot: bool = False,
+    ) -> bool:
+        """Décide si MARIA répond. Greedy : le nom cité passe par le filtre JEV d'adresse."""
         if not message.guild:
             return True
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
@@ -829,7 +884,10 @@ class Chat(commands.Cog):
             return True
         if mode == "greedy" and self.bot.user:
             if _greedy_name_addresses_bot(message.content, self.bot.user.name):
-                return True
+                bot_name = self.bot.user.name
+                return await self.typesafe.is_addressed_to_bot(
+                    message.content or "", bot_name=bot_name,
+                )
         if self.bot.user in message.mentions:
             return True
         if message.mention_everyone:
@@ -838,11 +896,15 @@ class Chat(commands.Cog):
                 return True
         return False
 
-    def transcript_addresses_bot(self, transcript: str) -> bool:
-        """True si la transcription contient le nom du bot."""
+    async def transcript_addresses_bot_async(self, transcript: str) -> bool:
+        """Préfiltre nom + Noul JEV (adresse vs parler de). Fail-open sans clé."""
         if not self.bot.user:
             return False
-        return _greedy_name_addresses_bot(transcript or "", self.bot.user.name)
+        if not _greedy_name_addresses_bot(transcript or "", self.bot.user.name):
+            return False
+        return await self.typesafe.is_addressed_to_bot(
+            transcript or "", bot_name=self.bot.user.name,
+        )
 
     async def respond_to_transcript(
         self,
@@ -853,7 +915,7 @@ class Chat(commands.Cog):
     ) -> bool:
         """Traite une transcription vocale comme un message classique. True si une réponse part."""
         text = (transcript or "").strip()
-        if not text or not self.transcript_addresses_bot(text):
+        if not text or not await self.transcript_addresses_bot_async(text):
             return False
         if source.guild:
             mode = self.data.get(source.guild).settings("guild_config").get(
@@ -937,6 +999,28 @@ class Chat(commands.Cog):
     # Envoi de réponse
     # ------------------------------------------------------------------
 
+    async def _can_stay_silent(self, message) -> bool:
+        """True si ce message n'attend rien de précis de MARIA (ni ping, ni reply vers
+        elle, ni question) : on lui laisse alors la possibilité de réagir ou de se taire."""
+        if isinstance(message, _ContentOverride) or not getattr(message, "guild", None):
+            return False
+        bot = self.bot.user
+        if bot is None or bot in message.mentions or message.mention_everyone:
+            return False
+        if "?" in (message.content or ""):
+            return False
+        if message.reference is not None:
+            ref = await resolve_message_reference(message)
+            if ref is not None and ref.author is not None and ref.author.id == bot.id:
+                return False
+        return True
+
+    @staticmethod
+    def _reply_is_redundant(message) -> bool:
+        """Personne n'a écrit depuis ce message : le reply Discord serait du bruit."""
+        last_id = getattr(message.channel, "last_message_id", None)
+        return last_id is not None and last_id == message.id
+
     def _memory_people_for_message(
         self, message: discord.Message,
     ) -> list[tuple[int, str]]:
@@ -992,6 +1076,13 @@ class Chat(commands.Cog):
         d'en poster un nouveau. Sinon (widget, réponse multi-chunks), repli sur un envoi normal.
         `reply_anchor` : message Discord auquel répondre visuellement (ex. la transcription
         postée), distinct du déclencheur utilisé comme FOCUS."""
+        # L'appel JEV d'intent démarre tout de suite et tourne pendant les lectures
+        # profils / RAG ci-dessous ; `run_completion` récupère le résultat déjà prêt.
+        # (Message avec reply : le texte envoyé à JEV inclut le message cité, résolu plus
+        # tard par la session — pas de préchargement dans ce cas.)
+        if message.reference is None:
+            self.typesafe.prefetch_intent(intent_text(message))
+
         self_ctx = ""
         profile_ctx = ""
         memory_ctx = ""
@@ -1043,8 +1134,7 @@ class Chat(commands.Cog):
                 query = " ".join(
                     p for p in ((message.content or "").strip(), name_bits) if p
                 )
-                memories = await asyncio.to_thread(
-                    retrieve_memories,
+                memories = await retrieve_memories_async(
                     self.memory_store,
                     self.memory_vectors,
                     query=query,
@@ -1055,6 +1145,7 @@ class Chat(commands.Cog):
                     exclude_contents=exclude_contents,
                     people_ids={uid for uid, _ in people},
                     max_distance=MEMORY_RAG_MAX_DISTANCE,
+                    typesafe=self.typesafe,
                 )
                 memory_ctx = format_memory_ctx(memories, name_by_user_id=name_by_id, bot_name=bot_label)
             except Exception as e:
@@ -1064,12 +1155,15 @@ class Chat(commands.Cog):
         if message.guild:
             poll_ctx = await asyncio.to_thread(self._poll_ctx_text, message.channel.id)
 
+        can_stay_silent = await self._can_stay_silent(message)
         prompt_context = {
             "channel_ctx": self._build_channel_context(message.channel),
             "self_ctx": self_ctx,
             "profile_ctx": profile_ctx,
             "memory_ctx": memory_ctx,
             "poll_ctx": poll_ctx,
+            "style_ctx": _style_examples_ctx(),
+            "can_stay_silent": can_stay_silent,
         }
 
         typing_task = asyncio.create_task(_keep_typing(message.channel))
@@ -1083,12 +1177,32 @@ class Chat(commands.Cog):
         finally:
             typing_task.cancel()
 
+        # Un reply Discord n'apporte rien si personne n'a parlé depuis le message traité.
+        if use_reply and reply_anchor is None and edit_target is None:
+            if self._reply_is_redundant(message):
+                use_reply = False
+
         text, had_memory_callback = _extract_memory_callback(resp.text or "")
         text = _strip_source_marks(text)
+        text, react_emoji, wants_skip = _extract_silence(text)
+        if react_emoji and not isinstance(message, _ContentOverride):
+            try:
+                await message.add_reaction(react_emoji)
+            except (discord.HTTPException, TypeError, ValueError):
+                logger.debug("Réaction %r refusée", react_emoji)
+        if (react_emoji or wants_skip) and not text and not resp.used_tools:
+            logger.info(
+                "Silence choisi dans #%s (%s)",
+                getattr(message.channel, "id", "?"),
+                f"réaction {react_emoji}" if react_emoji else "skip",
+            )
+            self._remember_reply(message.id, None)
+            return
         visible_parts: list[str] = []
         source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
-            visible_parts.append(_foot_tag("Mémoire"))
+            if SHOW_MEMORY_CALLBACK_TAG:
+                visible_parts.append(_foot_tag("Mémoire"))
             for mem in memories:
                 try:
                     await asyncio.to_thread(self.memory_store.bump_confidence, mem.id)
@@ -1097,7 +1211,7 @@ class Chat(commands.Cog):
         for t in resp.used_tools:
             name = t["name"]
             args = t.get("args", {})
-            if name in _HIDDEN_TOOLS:
+            if name in _HIDDEN_TOOLS or name in QUIET_FOOTER_TOOLS:
                 continue
             if name in ("search_web", "read_web_page") and source_line:
                 continue
@@ -1232,7 +1346,7 @@ class Chat(commands.Cog):
         last_id = getattr(message.channel, "last_message_id", None)
         if last_id != reply.id:
             return  # quelque chose a été dit depuis : on ne touche plus à rien
-        if not self._should_respond(message):
+        if not await self._should_respond_async(message):
             return
         session = self.gpt_api.session_manager.get(message.channel.id)
         if session is None or not session.prepare_edit_redo(message.id):
@@ -1274,7 +1388,7 @@ class Chat(commands.Cog):
                 and resolved_ref.author.id == self.bot.user.id
             ):
                 reply_to_bot = True
-        should_respond = False if other_bot else self._should_respond(
+        should_respond = False if other_bot else await self._should_respond_async(
             message, reply_to_bot=reply_to_bot,
         )
         session = self.gpt_api.session_manager.get_or_create(message.channel)

@@ -14,6 +14,7 @@ from common.discord_ui import layout_with_commentary
 from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
+from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Meteo")
@@ -443,6 +444,8 @@ class Meteo(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._api_key: str = getattr(bot, "config", {}).get("OPENWEATHERMAP_API_KEY", "") or ""
+        # « et demain ? » / relances sur la même ville : 10 min suffisent pour la météo.
+        self._cache = TTLCache(600, maxsize=128)
 
     def _check_status(self, r: requests.Response, city: str) -> Optional[dict]:
         if r.status_code == 401:
@@ -455,33 +458,37 @@ class Meteo(commands.Cog):
             return {"error": f"Erreur OWM {r.status_code}"}
         return None
 
-    def _fetch_current(self, city: str) -> dict:
+    def _fetch(self, kind: str, city: str, extra: Optional[dict] = None) -> dict:
+        """GET OWM avec cache TTL (succès uniquement : une erreur ne reste jamais figée)."""
         if not self._api_key:
             return {"error": "Clé API OWM manquante (OPENWEATHERMAP_API_KEY)"}
+        key = (kind, city.strip().lower())
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         try:
             r = requests.get(
-                f"{OWM_BASE}/weather",
-                params={"q": city, "appid": self._api_key, "units": "metric", "lang": "fr"},
+                f"{OWM_BASE}/{kind}",
+                params={
+                    "q": city, "appid": self._api_key, "units": "metric", "lang": "fr",
+                    **(extra or {}),
+                },
                 timeout=8,
             )
             err = self._check_status(r, city)
-            return err if err else r.json()
+            if err:
+                return err
+            data = r.json()
         except requests.RequestException as e:
             return {"error": str(e)}
+        self._cache.set(key, data)
+        return data
+
+    def _fetch_current(self, city: str) -> dict:
+        return self._fetch("weather", city)
 
     def _fetch_forecast(self, city: str) -> dict:
-        if not self._api_key:
-            return {"error": "Clé API OWM manquante (OPENWEATHERMAP_API_KEY)"}
-        try:
-            r = requests.get(
-                f"{OWM_BASE}/forecast",
-                params={"q": city, "appid": self._api_key, "units": "metric", "lang": "fr", "cnt": 40},
-                timeout=8,
-            )
-            err = self._check_status(r, city)
-            return err if err else r.json()
-        except requests.RequestException as e:
-            return {"error": str(e)}
+        return self._fetch("forecast", city, {"cnt": 40})
 
     async def _tool_weather(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         city         = (tc.arguments.get("city") or "").strip()

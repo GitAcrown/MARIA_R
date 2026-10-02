@@ -14,6 +14,7 @@ from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.media_hub import build_media_layout
+from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.TMDB")
@@ -209,6 +210,8 @@ class TMDB(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot     = bot
         self._api_key: str = getattr(bot, "config", {}).get("TMDB_API_KEY", "") or ""
+        # Fiches détail : stables, et jusqu'à 5 appels par recherche → cache 6 h.
+        self._details_cache = TTLCache(6 * 3600, maxsize=256)
 
     def _search_multi(self, query: str) -> dict:
         if not self._api_key:
@@ -243,6 +246,10 @@ class TMDB(commands.Cog):
     def _get_details(self, media_id: int, media_type: str) -> dict:
         # Échec non bloquant : on retourne {} et le résultat reste affichable
         # avec les seules données de recherche (fiche partielle).
+        key = (media_type, media_id)
+        cached = self._details_cache.get(key)
+        if cached is not None:
+            return cached
         try:
             r = requests.get(
                 f"{TMDB_BASE}/{media_type}/{media_id}",
@@ -252,7 +259,10 @@ class TMDB(commands.Cog):
             if not r.ok:
                 logger.warning("Détails TMDB indisponibles (%s/%s): HTTP %s", media_type, media_id, r.status_code)
                 return {}
-            return r.json()
+            data = r.json()
+            if data:
+                self._details_cache.set(key, data)
+            return data
         except requests.RequestException as e:
             logger.warning("Détails TMDB indisponibles (%s/%s): %s", media_type, media_id, e)
             return {}

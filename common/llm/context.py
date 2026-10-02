@@ -21,6 +21,10 @@ CONTEXT_KEEP_RECENT = 8
 # En dessous, une ligne [contexte] évincée (ok, mdr) ne revient pas dans le résumé.
 CONTEXT_CHATTER_MAX_WORDS = 3
 CONTEXT_CHATTER_MAX_CHARS = 20
+# Pause à partir de laquelle on signale « X min plus tard » entre deux messages.
+TIME_GAP_MARKER = timedelta(minutes=20)
+# « pseudo (id Discord) » : l'id n'est utile qu'à sa 1re apparition dans le payload.
+_NAME_ID_RE = re.compile(r"(?<![\w])([^\s()\[\]:|]{1,40}) \((\d{15,20})\)")
 
 
 @dataclass
@@ -210,6 +214,56 @@ def _is_context_chatter(message: "MessageRecord") -> bool:
     return len(words) <= CONTEXT_CHATTER_MAX_WORDS and len(speech) <= CONTEXT_CHATTER_MAX_CHARS
 
 
+def _counts_as_gap(message: "MessageRecord") -> bool:
+    """True si l'éviction de ce message laisse un vrai trou dans le fil visible."""
+    if message.role == "tool" or getattr(message, "tool_calls", None):
+        return False
+    if message.role == "user" and getattr(message, "name", None) == "system":
+        return False
+    if message.role not in ("user", "assistant"):
+        return False
+    return not _is_context_chatter(message)
+
+
+def _is_conversational(message: "MessageRecord") -> bool:
+    """Message de dialogue (membre ou réponse texte de MARIA), hors notes / outils."""
+    if message.role == "assistant":
+        return not getattr(message, "tool_calls", None)
+    return message.role == "user" and getattr(message, "name", None) != "system"
+
+
+def _format_pause(delta: timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} min plus tard"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} h {rest:02d} plus tard" if rest else f"{hours} h plus tard"
+
+
+def _gap_marker(omitted: int, pause: Optional[timedelta]) -> str:
+    bits: list[str] = []
+    if omitted > 0:
+        bits.append(f"{omitted} message{'s' if omitted > 1 else ''} omis")
+    if pause is not None and pause >= TIME_GAP_MARKER:
+        bits.append(_format_pause(pause))
+    return f"[… {' · '.join(bits)}]" if bits else ""
+
+
+def _rewrite_text_parts(content, fn) -> list:
+    """Applique `fn(texte) -> texte` à chaque partie texte, en copiant les dicts modifiés
+    (les `data` des composants sont partagés avec le contexte : on ne les mute jamais)."""
+    if not isinstance(content, list):
+        return content
+    out: list = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            new = fn(part.get("text", ""))
+            if new != part.get("text"):
+                part = {**part, "text": new}
+        out.append(part)
+    return out
+
+
 class ConversationContext:
     """Contexte restreint — trim par tokens, âge et nombre de messages."""
 
@@ -345,11 +399,32 @@ class ConversationContext:
         selected_ids = {id(m) for m in selected}
         kept = [m for m in self._messages if id(m) in selected_ids]
         kept = self._cap_messages(kept, old_ctx)
+        self._record_gaps(self._messages, kept)
         kept_ids = {id(m) for m in kept}
         evicted = aged_out + [m for m in self._messages if id(m) not in kept_ids]
         self._fold_evicted(evicted)
         self._messages = self._sanitize_tool_pairs(kept)
         self._needs_trim = False
+
+    @staticmethod
+    def _record_gaps(before: list["MessageRecord"], kept: list["MessageRecord"]) -> None:
+        """Note, sur le message gardé qui suit un trou, combien de messages ont été
+        évincés juste avant (`gap_before`, cumulatif d'un trim à l'autre). Le trou
+        devient visible dans le payload au lieu de faire passer le fil pour continu.
+        Les trous en tête de fenêtre sont couverts par le résumé de session."""
+        kept_ids = {id(m) for m in kept}
+        missing = 0
+        seen_kept = False
+        for m in before:
+            if id(m) in kept_ids:
+                if missing and seen_kept:
+                    m.metadata["gap_before"] = m.metadata.get("gap_before", 0) + missing
+                missing = 0
+                seen_kept = True
+            else:
+                missing += m.metadata.get("gap_before", 0)
+                if _counts_as_gap(m):
+                    missing += 1
 
     @staticmethod
     def _is_context_only(message: "MessageRecord") -> bool:
@@ -502,7 +577,55 @@ class ConversationContext:
             components=[TextComponent(self.developer_prompt)],
             created_at=datetime.now(timezone.utc),
         )
-        return [dev.to_payload()] + [m.to_payload() for m in self._messages]
+        payload = [dev.to_payload()]
+        seen_ids: set[str] = set()
+        prev_t: Optional[datetime] = None
+        carried_gap = 0
+        for m in self._messages:
+            p = m.to_payload()
+            carried_gap += m.metadata.get("gap_before", 0)
+
+            if m.role == "user" and getattr(m, "name", None) != "system":
+                # Trou dans le fil / pause longue : signalé au 1er message de membre qui suit.
+                pause = (m.created_at - prev_t) if prev_t is not None else None
+                marker = _gap_marker(carried_gap, pause)
+                carried_gap = 0
+
+                def _dedupe(text: str) -> str:
+                    # L'id Discord n'est répété qu'à la 1re mention (économie de tokens).
+                    def _sub(mo: re.Match) -> str:
+                        if mo.group(2) in seen_ids:
+                            return mo.group(1)
+                        seen_ids.add(mo.group(2))
+                        return mo.group(0)
+                    return _NAME_ID_RE.sub(_sub, text)
+
+                p["content"] = _rewrite_text_parts(p["content"], _dedupe)
+                if marker and isinstance(p["content"], list):
+                    p["content"] = [{"type": "text", "text": marker}] + p["content"]
+            elif (
+                m.role == "assistant"
+                and not getattr(m, "tool_calls", None)
+                and m.metadata.get("reply_to")
+                and isinstance(p.get("content"), list)
+            ):
+                # À qui elle répondait : sans ça, un fil à plusieurs voix devient illisible.
+                tag = f"[à {m.metadata['reply_to']}] "
+                done = False
+
+                def _prefix(text: str) -> str:
+                    nonlocal done
+                    if done or text.startswith("<EMPTY"):
+                        return text
+                    done = True
+                    return tag + text
+
+                p["content"] = _rewrite_text_parts(p["content"], _prefix)
+
+            if _is_conversational(m):
+                prev_t = m.created_at
+            payload.append(p)
+        return payload
 
     def get_stats(self) -> dict:
         total = sum(m.token_count for m in self._messages)

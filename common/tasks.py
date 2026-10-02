@@ -850,12 +850,20 @@ class TaskWorker:
 
     async def _loop(self) -> None:
         while self._running:
-            claimed = self.store.claim_due()
-            if claimed is not None:
-                async with self._lock:
-                    await self._run_one(claimed)
+            try:
+                claimed = await asyncio.to_thread(self.store.claim_due)
+                if claimed is not None:
+                    async with self._lock:
+                        await self._run_one(claimed)
+                    continue
+                next_at = await asyncio.to_thread(self.store.get_next_due_at)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Une erreur ponctuelle (SQLite verrouillée…) ne doit pas tuer le worker.
+                logger.error("TaskWorker : itération échouée, nouvel essai dans 30 s", exc_info=True)
+                await asyncio.sleep(30)
                 continue
-            next_at = self.store.get_next_due_at()
             if next_at:
                 delay = (next_at - datetime.now(timezone.utc)).total_seconds()
                 delay = min(max(delay, 5), 300)
@@ -864,21 +872,21 @@ class TaskWorker:
             await asyncio.sleep(delay)
 
     async def _run_one(self, task: ScheduledTask) -> None:
-        if not self.store.still_running(task.id):
+        if not await asyncio.to_thread(self.store.still_running, task.id):
             return
         try:
             await self.executor(task)
         except Exception as e:
-            attempts = self.store.retry_later(task.id, str(e))
+            attempts = await asyncio.to_thread(self.store.retry_later, task.id, str(e))
             if attempts >= MAX_SEND_RETRIES:
                 logger.error("Tâche #%s abandonnée après %s tentatives: %s", task.id, attempts, e)
-                self.store.mark_failed(task.id, str(e))
+                await asyncio.to_thread(self.store.mark_failed, task.id, str(e))
             else:
                 logger.warning(
                     "Tâche #%s échec (tentative %s/%s): %s",
                     task.id, attempts, MAX_SEND_RETRIES, e,
                 )
             return
-        if not self.store.still_running(task.id):
+        if not await asyncio.to_thread(self.store.still_running, task.id):
             return
-        self.store.reschedule_after_run(task)
+        await asyncio.to_thread(self.store.reschedule_after_run, task)

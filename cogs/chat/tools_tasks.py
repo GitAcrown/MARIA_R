@@ -1,5 +1,6 @@
 """Outils LLM liés aux tâches planifiées."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -308,13 +309,15 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         err = _validate_horizon(execute_at, require_min=(kind == SCHEDULE_ONCE))
         if err:
             return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
-        if store.count_active(ctx.trigger_message.author.id) >= TASK_MAX_PENDING:
+        if await asyncio.to_thread(store.count_active, ctx.trigger_message.author.id) >= TASK_MAX_PENDING:
             return ToolResponseRecord(
                 tc.id, {"error": f"Limite atteinte ({TASK_MAX_PENDING} tâches). Annule-en une d'abord."},
                 datetime.now(timezone.utc),
             )
         if kind != SCHEDULE_ONCE:
-            n_rep = store.count_active_recurring(ctx.trigger_message.author.id)
+            n_rep = await asyncio.to_thread(
+                store.count_active_recurring, ctx.trigger_message.author.id,
+            )
             if n_rep >= TASK_MAX_RECURRING:
                 return ToolResponseRecord(
                     tc.id,
@@ -332,7 +335,8 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
 
         title = (args.get("title") or "").strip()
         guild = ctx.trigger_message.guild
-        tid = store.add(
+        tid = await asyncio.to_thread(
+            store.add,
             channel_id=ctx.trigger_message.channel.id,
             user_id=ctx.trigger_message.author.id,
             guild_id=guild.id if guild else 0,
@@ -346,7 +350,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             message_id=ctx.trigger_message.id,
             deliver_dm=deliver_dm,
         )
-        created = store.get(tid)
+        created = await asyncio.to_thread(store.get, tid)
         label = format_schedule(created) if created else kind
         dest = "MP" if deliver_dm else "salon"
         if deliver_dm:
@@ -357,7 +361,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 execute_at=execute_at,
             )
             if dm_err:
-                store.cancel(tid, ctx.trigger_message.author.id)
+                await asyncio.to_thread(store.cancel, tid, ctx.trigger_message.author.id)
                 return ToolResponseRecord(
                     tc.id, {"error": dm_err}, datetime.now(timezone.utc),
                 )
@@ -394,7 +398,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         user_id = ctx.trigger_message.author.id
 
         if action == "list":
-            tasks = store.get_user_tasks(user_id)
+            tasks = await asyncio.to_thread(store.get_user_tasks, user_id)
             items = [_serialize_task(t) for t in tasks]
             return ToolResponseRecord(tc.id, {
                 "tasks": items,
@@ -411,7 +415,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         tid = int(tid)
 
         if action == "cancel":
-            ok = store.cancel(tid, user_id)
+            ok = await asyncio.to_thread(store.cancel, tid, user_id)
             if not ok:
                 return ToolResponseRecord(
                     tc.id, {"error": "Tâche introuvable ou pas la tienne."},
@@ -423,7 +427,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             }, datetime.now(timezone.utc))
 
         if action == "pause":
-            ok = store.pause(tid, user_id)
+            ok = await asyncio.to_thread(store.pause, tid, user_id)
             if not ok:
                 return ToolResponseRecord(
                     tc.id, {"error": "Impossible de mettre en pause (introuvable, déjà en pause, ou pas la tienne)."},
@@ -435,7 +439,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             }, datetime.now(timezone.utc))
 
         if action == "resume":
-            ok = store.resume(tid, user_id)
+            ok = await asyncio.to_thread(store.resume, tid, user_id)
             if not ok:
                 return ToolResponseRecord(
                     tc.id, {"error": "Impossible de reprendre (pas en pause, ou pas la tienne)."},
@@ -447,7 +451,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             }, datetime.now(timezone.utc))
 
         if action == "skip":
-            nxt = store.skip_next(tid, user_id)
+            nxt = await asyncio.to_thread(store.skip_next, tid, user_id)
             if nxt is None:
                 return ToolResponseRecord(
                     tc.id, {"error": "Pas de prochaine occurrence (tâche unique, ou introuvable)."},
@@ -481,7 +485,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     kind = None
             else:
                 kind = None
-            current = store.get(tid)
+            current = await asyncio.to_thread(store.get, tid)
             rec_kind = kind or (current.schedule_kind if current else SCHEDULE_ONCE)
             if execute_at is not None and rec_kind == SCHEDULE_ONCE:
                 err = _validate_horizon(execute_at)
@@ -489,7 +493,9 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     return ToolResponseRecord(tc.id, {"error": err}, datetime.now(timezone.utc))
             if kind in (SCHEDULE_DAILY, SCHEDULE_WEEKLY):
                 already = bool(current and current.schedule_kind != SCHEDULE_ONCE)
-                n_rep = store.count_active_recurring(user_id, exclude_id=tid)
+                n_rep = await asyncio.to_thread(
+                    store.count_active_recurring, user_id, exclude_id=tid,
+                )
                 if not already and n_rep >= TASK_MAX_RECURRING:
                     return ToolResponseRecord(
                         tc.id,
@@ -538,7 +544,8 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                         {"error": dm_err.replace("Tâche annulée.", "Passage en MP annulé.")},
                         datetime.now(timezone.utc),
                     )
-            ok = store.edit(
+            ok = await asyncio.to_thread(
+                store.edit,
                 tid, user_id,
                 instruction=new_instr,
                 execute_at=execute_at,
@@ -568,7 +575,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         member, err = await _resolve_member(ctx, tc.arguments or {})
         if err or member is None:
             return ToolResponseRecord(tc.id, {"error": err or "Membre introuvable"}, datetime.now(timezone.utc))
-        pending = store.get_user_tasks(member.id)
+        pending = await asyncio.to_thread(store.get_user_tasks, member.id)
         items = [_serialize_task(t) for t in pending]
         name = getattr(member, "display_name", None) or member.name
         return ToolResponseRecord(tc.id, {

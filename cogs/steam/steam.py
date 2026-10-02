@@ -13,6 +13,7 @@ from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import GAMES
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.media_hub import build_media_layout
+from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Steam")
@@ -174,6 +175,7 @@ class Steam(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._details_cache = TTLCache(6 * 3600, maxsize=256)
 
     def _search(self, query: str) -> dict:
         try:
@@ -194,6 +196,9 @@ class Steam(commands.Cog):
     def _get_details(self, appid: int) -> dict:
         # Échec non bloquant : on retourne {} et le jeu reste affichable
         # avec les seules données de recherche (fiche partielle).
+        cached = self._details_cache.get(appid)
+        if cached is not None:
+            return cached
         try:
             r = requests.get(
                 STEAM_DETAILS,
@@ -207,7 +212,10 @@ class Steam(commands.Cog):
             if not payload.get("success"):
                 logger.warning("Détails Steam indisponibles (appid %s): réponse non valide", appid)
                 return {}
-            return payload.get("data", {})
+            data = payload.get("data", {})
+            if data:
+                self._details_cache.set(appid, data)
+            return data
         except requests.RequestException as e:
             logger.warning("Détails Steam indisponibles (appid %s): %s", appid, e)
             return {}

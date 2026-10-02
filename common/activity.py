@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from collections import Counter
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -73,10 +74,13 @@ class ActivityTracker:
     def __init__(self):
         _init_db()
         self._buffer: Counter[_BufferKey] = Counter()
+        # bump() tourne sur la boucle asyncio, flush() dans un thread (to_thread).
+        self._lock = threading.Lock()
 
     def bump(self, guild_id: int, channel_id: int, user_id: int, kind: str = KIND_MESSAGE) -> None:
         today = date.today().isoformat()
-        self._buffer[(today, guild_id, channel_id, user_id, kind)] += 1
+        with self._lock:
+            self._buffer[(today, guild_id, channel_id, user_id, kind)] += 1
 
     def bump_message(self, guild_id: int, channel_id: int, user_id: int) -> None:
         self.bump(guild_id, channel_id, user_id, KIND_MESSAGE)
@@ -88,10 +92,11 @@ class ActivityTracker:
         """Écrit le buffer en base (upsert additif) et le vide, puis purge les jours
         trop vieux. En cas d'échec d'écriture, les compteurs sont remis dans le buffer
         pour ne rien perdre au prochain passage."""
-        if not self._buffer:
-            return
-        items = list(self._buffer.items())
-        self._buffer.clear()
+        with self._lock:
+            if not self._buffer:
+                return
+            items = list(self._buffer.items())
+            self._buffer.clear()
         cutoff = (date.today() - timedelta(days=RETENTION_DAYS)).isoformat()
         try:
             with _db() as conn:
@@ -108,8 +113,9 @@ class ActivityTracker:
                 conn.execute("DELETE FROM activity WHERE day < ?", (cutoff,))
         except sqlite3.Error as e:
             logger.error("Flush activité échoué : %s", e, exc_info=True)
-            for key, n in items:
-                self._buffer[key] += n
+            with self._lock:
+                for key, n in items:
+                    self._buffer[key] += n
 
     def guild_message_count(self, guild_id: int, *, days: int = 7) -> int:
         cutoff = (date.today() - timedelta(days=days - 1)).isoformat()

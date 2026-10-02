@@ -8,11 +8,14 @@ ou le message cité matche vraiment.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
 
 import discord
 
 from .attachments import _is_audio, _is_image, _is_text_file
+from .typesafe_client import CATEGORY_CONFIDENCE, FORCE_CONFIDENCE
 
 _URL_RE = re.compile(r"https?://[^\s<>\]\)]+", re.I)
 _YT_RE = re.compile(
@@ -295,7 +298,8 @@ def _is_video_att(att: discord.Attachment) -> bool:
     return ct.startswith("video/") or fn.endswith(_VID_EXT)
 
 
-def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
+def collect_structural_flags(*messages: discord.Message | None) -> set[str]:
+    """Flags déterministes : PJ, URLs, embeds média (pas le wording thématique)."""
     flags: set[str] = set()
     for msg in messages:
         if msg is None:
@@ -304,26 +308,6 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
             flags.add("youtube")
         if _has_real_image(msg):
             flags.add("image")
-        text = _message_text(msg)
-        if _LAYOUT_RE.search(text):
-            flags.add("layout")
-        if _TRANSPORT_RE.search(text):
-            flags.add("transport")
-        if _FOOTBALL_RE.search(text):
-            flags.add("football")
-        if _SUMMARY_RE.search(text):
-            flags.add("summary")
-        if _IMAGES_SEARCH_RE.search(text):
-            flags.add("images_search")
-        if _WEB_PAGE_RE.search(text):
-            flags.add("web")
-        if _WEATHER_RE.search(text):
-            flags.add("weather")
-        if _MEDIA_TOPIC_RE.search(text):
-            flags.add("media_topic")
-        if _SERVER_STATS_RE.search(text):
-            flags.add("server_stats")
-        # Le footer « Sources » d'une réponse du bot n'est pas une demande de lecture.
         author_is_bot = bool(getattr(getattr(msg, "author", None), "bot", False))
         for url in _urls_in(msg):
             host = _host(url)
@@ -350,9 +334,46 @@ def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
     return flags
 
 
+def collect_thematic_flags(*messages: discord.Message | None) -> set[str]:
+    """Flags textuels via regex — fallback quand JEV est absent / en échec."""
+    flags: set[str] = set()
+    for msg in messages:
+        if msg is None:
+            continue
+        text = _message_text(msg)
+        if _LAYOUT_RE.search(text):
+            flags.add("layout")
+        if _TRANSPORT_RE.search(text):
+            flags.add("transport")
+        if _FOOTBALL_RE.search(text):
+            flags.add("football")
+        if _SUMMARY_RE.search(text):
+            flags.add("summary")
+        if _IMAGES_SEARCH_RE.search(text):
+            flags.add("images_search")
+        if _WEB_PAGE_RE.search(text):
+            flags.add("web")
+        if _WEATHER_RE.search(text):
+            flags.add("weather")
+        if _MEDIA_TOPIC_RE.search(text):
+            flags.add("media_topic")
+        if _SERVER_STATS_RE.search(text):
+            flags.add("server_stats")
+    return flags
+
+
+def collect_capability_flags(*messages: discord.Message | None) -> set[str]:
+    return collect_structural_flags(*messages) | collect_thematic_flags(*messages)
+
+
 def _blob_text(*messages: discord.Message | None) -> str:
     parts = [_message_text(m) for m in messages if m is not None]
     return "\n".join(parts)
+
+
+def intent_text(*messages: discord.Message | None) -> str:
+    """Texte exact envoyé à JEV pour l'intent (clé de partage avec `prefetch_intent`)."""
+    return _blob_text(*messages)
 
 
 def _is_opinion(text: str) -> bool:
@@ -408,12 +429,72 @@ def should_force_tool(
 def build_capability_ctx(*messages: discord.Message | None) -> str:
     flags = collect_capability_flags(*messages)
     text = _blob_text(*messages)
-    lines = [hint for key, hint in _HINTS if key in flags]
+    force_level = "none"
     if needs_grounding(flags, text):
+        force_level = "hint"
+    if should_force_tool(flags, text):
+        force_level = "require_web"
+    return build_capability_ctx_from(flags, force_level)
+
+
+def build_capability_ctx_from(flags: set[str], force_level: str) -> str:
+    """Hints outils à partir de flags + force_level (JEV ou regex)."""
+    lines = [hint for key, hint in _HINTS if key in flags]
+    if force_level == "hint":
+        lines.append(_GROUNDING_HINT)
+    elif force_level == "require_web" and (flags & _HINT_LIVE_FLAGS):
+        # Required web : hint live seulement si une catégorie live est déjà ouverte.
         lines.append(_GROUNDING_HINT)
     if not lines:
         return ""
     return "\nDEMANDE (ce tour seulement) :\n" + "\n".join(lines) + "\n"
+
+
+@dataclass
+class CapabilityDecision:
+    flags: set[str]
+    force_level: str  # none | hint | require_web
+    from_jev: bool = False
+
+
+async def resolve_capabilities(
+    typesafe: Any | None,
+    *messages: discord.Message | None,
+    search_momentum: bool = False,
+) -> CapabilityDecision:
+    """Merge flags structurels + intent JEV (ou regex thématique en fallback)."""
+    structural = collect_structural_flags(*messages)
+    text = _blob_text(*messages)
+
+    if typesafe is not None and getattr(typesafe, "enabled", False):
+        intent = await typesafe.resolve_intent(text)
+        if intent is not None:
+            flags = set(structural)
+            if (
+                intent.category
+                and intent.category != "none"
+                and intent.category_confidence >= CATEGORY_CONFIDENCE
+            ):
+                flags.add(intent.category)
+            force_level = "none"
+            if intent.force_confidence >= FORCE_CONFIDENCE:
+                force_level = intent.force_level
+            # URL externe / follow-up search : filet de sécurité même sous JEV.
+            if should_force_tool(
+                flags, text, search_momentum=search_momentum,
+            ):
+                force_level = "require_web"
+            return CapabilityDecision(
+                flags=flags, force_level=force_level, from_jev=True,
+            )
+
+    flags = structural | collect_thematic_flags(*messages)
+    force_level = "none"
+    if should_force_tool(flags, text, search_momentum=search_momentum):
+        force_level = "require_web"
+    elif needs_grounding(flags, text):
+        force_level = "hint"
+    return CapabilityDecision(flags=flags, force_level=force_level, from_jev=False)
 
 
 def select_tool_names(all_names: list[str], flags: set[str]) -> list[str]:

@@ -348,6 +348,7 @@ class MemoryWorker:
         bot_user_id: Optional[int] = None,
         bot_name: str = "MARIA",
         semantic_dedup_distance: float = 0.1,
+        typesafe: Any = None,
     ) -> None:
         self.store = store
         self.vectors = vectors
@@ -363,6 +364,7 @@ class MemoryWorker:
         self.bot_user_id = bot_user_id
         self.bot_name = bot_name or "MARIA"
         self.semantic_dedup_distance = semantic_dedup_distance
+        self.typesafe = typesafe
         self._buffers: dict[tuple[int, int], ChannelBuffer] = {}
         self._lock = asyncio.Lock()
 
@@ -494,6 +496,22 @@ class MemoryWorker:
                 guild_id, len(batch), len(direct_user_ids),
             )
             return
+        if self.typesafe is not None and getattr(self.typesafe, "enabled", False):
+            before = len(actions)
+            actions = await self.typesafe.filter_durable_actions(
+                actions, batch_excerpt=batch_text,
+            )
+            if len(actions) < before:
+                logger.info(
+                    "JEV a filtré %d/%d action(s) non durables (guild=%s)",
+                    before - len(actions), before, guild_id,
+                )
+            if not actions:
+                logger.info(
+                    "Flush mémoire : 0 action après filtre JEV (guild=%s, msgs=%d)",
+                    guild_id, len(batch),
+                )
+                return
         existing_by_user: dict[Optional[int], list[str]] = {}
         for m in existing:
             key = m.user_id if m.category != CATEGORY_SELF else self.bot_user_id

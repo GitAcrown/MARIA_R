@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
+from common.llm.typesafe_client import RAG_CONFIDENCE_MIN, RAG_SCORE_MIN
 from common.memory.store import (
     CATEGORY_SELF,
     STATUS_ACTIVE,
@@ -180,7 +182,7 @@ def build_profile_ctx(
     return header + "\n" + "\n".join(lines), seen_contents
 
 
-def retrieve_memories(
+def retrieve_memory_candidates(
     store: MemoryStore,
     vectors: VectorStore,
     *,
@@ -193,7 +195,7 @@ def retrieve_memories(
     people_ids: Optional[set[int]] = None,
     max_distance: float = DEFAULT_MAX_DISTANCE,
 ) -> list[Memory]:
-    """Top-k : perso (auteur + mentions) + souvenirs serveur du guild."""
+    """Shortlist triée (avant top_k) : perso + souvenirs serveur du guild."""
     if not query.strip():
         return []
 
@@ -264,7 +266,66 @@ def retrieve_memories(
         return (author_boost, dist, -m.confidence, -confirmed, -m.hits)
 
     candidates.sort(key=sort_key)
-    return candidates[:top_k]
+    return candidates
+
+
+async def retrieve_memories_async(
+    store: MemoryStore,
+    vectors: VectorStore,
+    *,
+    query: str,
+    guild_id: int,
+    author_id: int,
+    top_k: int = 3,
+    prefer_collective: bool = False,
+    exclude_contents: Optional[set[str]] = None,
+    people_ids: Optional[set[int]] = None,
+    max_distance: float = DEFAULT_MAX_DISTANCE,
+    typesafe: Any = None,
+) -> list[Memory]:
+    """Top-k : perso (auteur + mentions) + souvenirs serveur du guild.
+
+    Shortlist embedding/FTS puis, si JEV est actif, filtre Score de pertinence.
+    """
+
+    candidates = await asyncio.to_thread(
+        retrieve_memory_candidates,
+        store,
+        vectors,
+        query=query,
+        guild_id=guild_id,
+        author_id=author_id,
+        top_k=top_k,
+        prefer_collective=prefer_collective,
+        exclude_contents=exclude_contents,
+        people_ids=people_ids,
+        max_distance=max_distance,
+    )
+    if not candidates:
+        return []
+
+    if typesafe is None or not getattr(typesafe, "enabled", False):
+        return candidates[:top_k]
+
+    contents = [m.content or "" for m in candidates]
+    hits = await typesafe.score_relevance(query, contents)
+    if hits is None:
+        return candidates[:top_k]
+
+    kept: list[tuple[float, Memory]] = []
+    for hit in hits:
+        if hit.index < 0 or hit.index >= len(candidates):
+            continue
+        if hit.score < RAG_SCORE_MIN or hit.confidence < RAG_CONFIDENCE_MIN:
+            continue
+        kept.append((hit.score, candidates[hit.index]))
+
+    if not kept:
+        # Tout filtré → fail-open sur le top legacy (évite un prompt vide par erreur JEV).
+        return candidates[:top_k]
+
+    kept.sort(key=lambda pair: -pair[0])
+    return [m for _, m in kept[:top_k]]
 
 
 def format_memory_ctx(

@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -284,6 +285,8 @@ class FunStatTracker:
         self._matchers: dict[int, Matcher] = {}
         self._hits: dict[int, Counter[int]] = {}
         self._buffer: Counter[tuple[int, int]] = Counter()
+        # observe() tourne sur la boucle asyncio, flush() dans un thread (to_thread).
+        self._lock = threading.Lock()
         self._load()
 
     def _load(self) -> None:
@@ -366,9 +369,10 @@ class FunStatTracker:
                 (guild_id, guild_id, HISTORY_KEEP),
             )
         # Drops les hits encore dans le buffer pour cette guild (ancienne campagne).
-        self._buffer = Counter({
-            k: n for k, n in self._buffer.items() if k[0] != guild_id
-        })
+        with self._lock:
+            self._buffer = Counter({
+                k: n for k, n in self._buffer.items() if k[0] != guild_id
+            })
         self._campaigns[guild_id] = camp
         self._matchers[guild_id] = matcher
         self._hits[guild_id] = Counter()
@@ -387,7 +391,8 @@ class FunStatTracker:
             return
         if not matcher(text):
             return
-        self._buffer[(guild_id, user_id)] += 1
+        with self._lock:
+            self._buffer[(guild_id, user_id)] += 1
         self._hits.setdefault(guild_id, Counter())[user_id] += 1
         if not camp.revealed:
             counts = self._hits[guild_id]
@@ -395,8 +400,9 @@ class FunStatTracker:
                 camp.revealed = True
 
     def flush(self) -> None:
-        items = list(self._buffer.items())
-        self._buffer.clear()
+        with self._lock:
+            items = list(self._buffer.items())
+            self._buffer.clear()
         reveal_ids = [gid for gid, c in self._campaigns.items() if c.revealed]
         if not items and not reveal_ids:
             return
@@ -419,8 +425,9 @@ class FunStatTracker:
                     )
         except sqlite3.Error as e:
             logger.error("Flush fun-stat échoué : %s", e, exc_info=True)
-            for key, n in items:
-                self._buffer[key] += n
+            with self._lock:
+                for key, n in items:
+                    self._buffer[key] += n
 
     def visible_ranking(
         self, guild_id: int, *, limit: int = 3,

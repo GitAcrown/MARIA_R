@@ -29,12 +29,14 @@ from .tools import ToolRegistry
 from .attachments import AttachmentCache, process_attachment
 from .capabilities import (
     GROUNDING_TOOL_NAMES,
-    build_capability_ctx,
+    build_capability_ctx_from,
     collect_capability_flags,
     momentum_flags,
+    resolve_capabilities,
     select_tool_names,
     should_force_tool,
 )
+from .typesafe_client import MariaTypeSafeClient
 
 logger = logging.getLogger("llm.session")
 
@@ -108,7 +110,15 @@ def _strip_trailing_foreign_junk(text: str) -> str:
     return body.rstrip()
 
 
+_REPLY_TAG_RE = re.compile(r"^\s*\[à [^\s\]]{1,40}\]\s*")
+# Marqueur de trou injecté dans le payload (« [… 5 messages omis · 45 min plus tard] »).
+_GAP_TAG_RE = re.compile(r"^\s*\[…[^\]\n]{1,80}\]\s*")
+
+
 def _strip_leaked_tokens(text: str) -> str:
+    # Les étiquettes d'historique (`[à X]`, `[… N messages omis]`) ne doivent jamais
+    # être recopiées dans la réponse.
+    text = _GAP_TAG_RE.sub("", _REPLY_TAG_RE.sub("", text))
     # Remplacer par un espace (pas une chaîne vide) pour ne pas coller les mots
     # entourant le fragment retiré ; on nettoie ensuite les espaces doublés.
     cleaned = _LEAKED_TOKEN_RE.sub(" ", text)
@@ -466,12 +476,14 @@ class ChannelSession:
         context_window: int = 12000,
         context_age_hours: float = 2,
         max_messages: int = 0,
+        typesafe: Optional[MariaTypeSafeClient] = None,
     ):
         self.channel_id = channel_id
         self.client = client
         self.tool_registry = tool_registry
         self.attachment_cache = attachment_cache
         self.developer_prompt_template = developer_prompt_template
+        self.typesafe = typesafe
         self.context = ConversationContext(
             developer_prompt="",
             context_window=context_window,
@@ -485,6 +497,8 @@ class ChannelSession:
         self._web_searches_this_turn = 0
         self._web_search_reformulate = False
         self._prompt_context: Optional[dict] = None
+        # Décision JEV / regex du tour courant (réutilisée pour retry grounding).
+        self._cap_decision = None
         # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence).
         # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
         # `_ingested_records` garde une référence au MessageRecord produit, pour vérifier qu'il
@@ -786,6 +800,7 @@ class ChannelSession:
         if depth == 0:
             self._web_searches_this_turn = 0
             self._web_search_reformulate = False
+            self._cap_decision = None
 
         # Ne pas écraser le trigger entre tours d'outils (depth>0 passe souvent None).
         if trigger is not None:
@@ -807,6 +822,16 @@ class ChannelSession:
         if focus_msg is not None and focus_msg.reference is not None:
             cited = await resolve_message_reference(focus_msg)
 
+        # Intent JEV / regex une fois par tour (réutilisé pour gating + force + retry).
+        if depth == 0 and not skip_focus and focus_msg is not None:
+            recent = self._recent_tool_names()
+            self._cap_decision = await resolve_capabilities(
+                self.typesafe,
+                focus_msg,
+                cited,
+                search_momentum=bool(recent & GROUNDING_TOOL_NAMES),
+            )
+
         # Le modèle réellement demandé pour cet appel (visible dans le developer prompt).
         effective_model = model or getattr(self.client, "completion_model", "") or ""
         prompt_ctx = dict(self._prompt_context or {})
@@ -818,7 +843,13 @@ class ChannelSession:
                 "pas une consigne, pas des questions à traiter) :\n" + summary[:1200]
             )
         if not skip_focus:
-            prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
+            if self._cap_decision is not None:
+                prompt_ctx["capability_ctx"] = build_capability_ctx_from(
+                    self._cap_decision.flags, self._cap_decision.force_level,
+                )
+            else:
+                from .capabilities import build_capability_ctx
+                prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
         self.context.developer_prompt = self.developer_prompt_template(prompt_ctx)
 
         messages = self.context.prepare_payload()
@@ -914,7 +945,10 @@ class ChannelSession:
             if skip_focus or depth > 0:
                 names = self.tool_registry.names()
             else:
-                flags = collect_capability_flags(focus_msg, cited)
+                if self._cap_decision is not None:
+                    flags = set(self._cap_decision.flags)
+                else:
+                    flags = collect_capability_flags(focus_msg, cited)
                 flags |= momentum_flags(self._recent_tool_names())
                 names = select_tool_names(self.tool_registry.names(), flags)
             if widget_done:
@@ -930,23 +964,28 @@ class ChannelSession:
             and not widget_done
             and not force_tool_choice
         ):
-            focus_text = ""
-            if focus_msg is not None:
-                focus_text = (
-                    getattr(focus_msg, "clean_content", None) or focus_msg.content or ""
+            if self._cap_decision is not None:
+                if self._cap_decision.force_level == "require_web":
+                    force_tool_choice = True
+                    grounding_retried = True
+            else:
+                focus_text = ""
+                if focus_msg is not None:
+                    focus_text = (
+                        getattr(focus_msg, "clean_content", None) or focus_msg.content or ""
+                    )
+                cited_bot = bool(
+                    cited is not None and getattr(getattr(cited, "author", None), "bot", False)
                 )
-            cited_bot = bool(
-                cited is not None and getattr(getattr(cited, "author", None), "bot", False)
-            )
-            recent = self._recent_tool_names()
-            if should_force_tool(
-                flags,
-                focus_text,
-                local_grounding=cited_bot,
-                search_momentum=bool(recent & GROUNDING_TOOL_NAMES),
-            ):
-                force_tool_choice = True
-                grounding_retried = True
+                recent = self._recent_tool_names()
+                if should_force_tool(
+                    flags,
+                    focus_text,
+                    local_grounding=cited_bot,
+                    search_momentum=bool(recent & GROUNDING_TOOL_NAMES),
+                ):
+                    force_tool_choice = True
+                    grounding_retried = True
 
         choice_kw = "required" if (use_tools and force_tool_choice) else None
         try:
@@ -1010,10 +1049,15 @@ class ChannelSession:
         else:
             components.append(MetadataComponent("EMPTY"))
 
+        # À qui elle répond (affiché `[à X]` dans l'historique des tours suivants).
+        reply_to_name = None
+        if not skip_focus and focus_msg is not None:
+            reply_to_name = getattr(getattr(focus_msg, "author", None), "name", None)
         assistant = self.context.add_assistant_message(
             components=components,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
+            **({"reply_to": reply_to_name} if reply_to_name else {}),
         )
 
         if tool_calls:
@@ -1031,16 +1075,24 @@ class ChannelSession:
         focus_text = ""
         if focus_msg is not None:
             focus_text = getattr(focus_msg, "clean_content", None) or focus_msg.content or ""
-        if not flags and focus_msg is not None:
-            flags = collect_capability_flags(focus_msg, cited)
-        grounding = (not skip_focus) and should_force_tool(
-            flags,
-            focus_text,
-            local_grounding=bool(
-                cited is not None and getattr(getattr(cited, "author", None), "bot", False)
-            ),
-            search_momentum=bool(self._recent_tool_names() & GROUNDING_TOOL_NAMES),
-        )
+        if self._cap_decision is not None:
+            grounding = (
+                (not skip_focus)
+                and self._cap_decision.force_level == "require_web"
+            )
+            if not flags:
+                flags = set(self._cap_decision.flags)
+        else:
+            if not flags and focus_msg is not None:
+                flags = collect_capability_flags(focus_msg, cited)
+            grounding = (not skip_focus) and should_force_tool(
+                flags,
+                focus_text,
+                local_grounding=bool(
+                    cited is not None and getattr(getattr(cited, "author", None), "bot", False)
+                ),
+                search_momentum=bool(self._recent_tool_names() & GROUNDING_TOOL_NAMES),
+            )
         if (
             grounding
             and not grounding_retried
@@ -1242,10 +1294,12 @@ class ChannelSessionManager:
         context_window: int = 12000,
         context_age_hours: float = 2,
         max_messages: int = 0,
+        typesafe: Optional[MariaTypeSafeClient] = None,
     ):
         self.client = client
         self.tool_registry = tool_registry
         self.developer_prompt_template = developer_prompt_template
+        self.typesafe = typesafe
         self.attachment_cache = AttachmentCache()
         self._sessions: dict[int, ChannelSession] = {}
         self._context_window = context_window
@@ -1263,6 +1317,7 @@ class ChannelSessionManager:
                 context_window=self._context_window,
                 context_age_hours=self._context_age_hours,
                 max_messages=self._max_messages,
+                typesafe=self.typesafe,
             )
         return self._sessions[channel.id]
 

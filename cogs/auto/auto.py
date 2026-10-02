@@ -113,7 +113,7 @@ class Auto(commands.Cog):
         mentioned = bool(
             requester_name is None
             and chat is not None
-            and chat.transcript_addresses_bot(transcript)
+            and await chat.transcript_addresses_bot_async(transcript)
         )
         if requester_name:
             detail = requester_name
