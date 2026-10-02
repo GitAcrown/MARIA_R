@@ -33,6 +33,7 @@ _ROW = 5
 _MAX_TABS = 25
 _MAX_BUTTON_TABS = 10
 _BTN_LABEL_MAX = 16
+_BUTTON_IF_LEQ = 3
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
 LabelsFn = Callable[[dict], list[str]]
@@ -270,11 +271,23 @@ def _tab_rows(wid: str, labels: list[str], selected: int) -> list[discord.ui.Act
     return rows
 
 
+def _short_button_labels(labels: list[str]) -> list[str]:
+    out: list[str] = []
+    for lab in labels:
+        text = " ".join(str(lab).split())
+        if len(text) > _BTN_LABEL_MAX:
+            text = text[: _BTN_LABEL_MAX - 1].rstrip() + "…"
+        out.append(text or "·")
+    return out
+
+
 def _tab_controls(
     wid: str, labels: list[str], selected: int, *, kind: str = "",
 ) -> list[discord.ui.ActionRow]:
-    if kind in _BUTTON_KINDS:
-        return _tab_rows(wid, labels, selected)
+    # ≤3 onglets : toujours de courts boutons, même pour les kinds en select.
+    if kind in _BUTTON_KINDS or len(labels) <= _BUTTON_IF_LEQ:
+        short = labels if kind in _BUTTON_KINDS else _short_button_labels(labels)
+        return _tab_rows(wid, short, selected)
     if kind in _FORCE_SELECT or _use_select(labels):
         ph = _PLACEHOLDERS.get(kind) or "Choisir…"
         return [discord.ui.ActionRow(TabSelect(wid, labels, selected, placeholder=ph))]
