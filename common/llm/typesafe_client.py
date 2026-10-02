@@ -22,6 +22,34 @@ DURABLE_THRESHOLD = 0.5
 FOLLOWUP_CONFIDENCE = 0.55
 REACTION_CONFIDENCE = 0.45
 
+
+def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
+    """Repli lexical (demain, jour de la semaine…) si JEV est off ou KO."""
+    import re
+
+    msg = (message or "").casefold()
+    if not msg or len(labels) < 2:
+        return None
+    tokens = set(re.findall(r"[a-z0-9àâäéèêëïîôùûüçœæ]{3,}", msg))
+    best_i: int | None = None
+    best = 0.0
+    for i, lab in enumerate(labels):
+        low = lab.casefold()
+        score = 0.0
+        if "demain" in msg and "demain" in low:
+            score += 5.0
+        if "aujourd" in msg and "aujourd" in low:
+            score += 5.0
+        if "semaine" in msg and "semaine" in low:
+            score += 4.0
+        lab_tok = set(re.findall(r"[a-z0-9àâäéèêëïîôùûüçœæ]{3,}", low))
+        score += 2.0 * len(tokens & lab_tok)
+        if score > best:
+            best = score
+            best_i = i
+    return best_i if best >= 2.0 else None
+
+
 GATED_CATEGORIES = (
     "none",
     "weather",
@@ -430,8 +458,8 @@ class MariaTypeSafeClient:
                     criteria={
                         "respond": (
                             "Continues the conversation with MARIA and expects words back "
-                            "(question, request, follow-up, reaction to her answer that "
-                            "invites a reply)"
+                            "(question, request, follow-up, or asks for another facet of "
+                            "the previous card — another day, another result, another tab)"
                         ),
                         "react": (
                             "Short acknowledgement or closing aimed at her (thanks, ok, "
@@ -456,6 +484,63 @@ class MariaTypeSafeClient:
         if choice not in ("respond", "react") or conf < FOLLOWUP_CONFIDENCE:
             return "ignore"
         return choice
+
+    async def pick_tab(
+        self,
+        message: str,
+        labels: Sequence[str],
+        *,
+        current: int = 0,
+    ) -> int | None:
+        """Quel onglet correspond au message. None = aucun / hors sujet."""
+        clean = [str(lab).strip() for lab in labels if str(lab).strip()]
+        if len(clean) < 2:
+            return None
+        if not self.enabled:
+            return _heuristic_tab(message, clean)
+        from typesafe_sdk import Choice
+
+        criteria: dict[str, str] = {
+            "none": "The message is not asking to show one of these tabs",
+        }
+        state: dict[str, Any] = {
+            "message": (message or "").strip()[:400],
+            "current": clean[current] if 0 <= current < len(clean) else clean[0],
+        }
+        for i, lab in enumerate(clean[:12]):
+            key = f"t{i}"
+            state[key] = lab[:80]
+            criteria[key] = f"Show tab `{lab[:80]}`"
+
+        result = await self.system_one(
+            state,
+            {
+                "tab": Choice(
+                    instructions=(
+                        "`message` follows a Discord card that already has these tabs. "
+                        "Which tab answers `message`? Prefer a different tab than "
+                        "`current` when the user asks for another day/result. "
+                        "Pick `none` if they need new data not on the card."
+                    ),
+                    criteria=criteria,
+                ),
+            },
+        )
+        if result is None:
+            return _heuristic_tab(message, clean)
+        try:
+            ans = result.choices["tab"]
+            choice = str(ans.choice or "none")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return _heuristic_tab(message, clean)
+        if choice == "none" or conf < 0.45:
+            return None
+        if choice.startswith("t") and choice[1:].isdigit():
+            idx = int(choice[1:])
+            if 0 <= idx < len(clean):
+                return idx
+        return None
 
     async def pick_reaction(
         self,

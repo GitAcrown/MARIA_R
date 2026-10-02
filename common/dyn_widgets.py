@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import discord
 
@@ -407,6 +407,58 @@ def _inject_tab_artifact(
     label = labels[idx] if 0 <= idx < len(labels) else str(idx)
     note = f"Onglet actif ({rec.kind}) : {label}"
     session.record_artifact("tab", note)
+
+
+async def try_switch_tab_for_query(
+    bot: discord.Client,
+    wid: str,
+    query: str,
+    typesafe: Any = None,
+) -> bool:
+    """Si `query` désigne un autre onglet du widget live, bascule et édite le message."""
+    if not _ID_RE.match(wid or ""):
+        return False
+    rec = _get(wid)
+    if rec is None or rec.stripped or rec.expires_at <= _now():
+        return False
+    if not rec.channel_id or not rec.message_id:
+        return False
+    # Libellés complets (sans troncature bouton) pour le matching.
+    pair = _RENDERERS.get(rec.kind)
+    if not pair:
+        return False
+    try:
+        raw_labels = [str(x).strip() for x in (pair[0](rec.payload) or []) if str(x).strip()]
+    except Exception:
+        logger.exception("labels follow-up %s", rec.kind)
+        return False
+    if len(raw_labels) < 2:
+        return False
+
+    idx: int | None = None
+    if typesafe is not None and hasattr(typesafe, "pick_tab"):
+        try:
+            idx = await typesafe.pick_tab(query, raw_labels, current=rec.selected)
+        except Exception:
+            logger.debug("pick_tab JEV échoué", exc_info=True)
+            idx = None
+    if idx is None:
+        from common.llm.typesafe_client import _heuristic_tab
+        idx = _heuristic_tab(query, raw_labels)
+    if idx is None or idx == rec.selected:
+        return False
+    if not (0 <= idx < len(raw_labels)):
+        return False
+
+    rec.selected = idx
+    _set_selected(rec.id, idx)
+    ok = await _publish(bot, rec, live=True)
+    if ok:
+        logger.info(
+            "Onglet basculé (%s) → %s [%d]",
+            rec.kind, raw_labels[idx][:40], idx,
+        )
+    return ok
 
 
 async def sweep_expired(bot: discord.Client) -> None:

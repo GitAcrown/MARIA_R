@@ -48,7 +48,7 @@ from common.tasks import (
     WEEKDAYS_FR,
 )
 from common.timezones import PARIS_TZ
-from common.dyn_widgets import bind as bind_dyn_widget
+from common.dyn_widgets import VIEW_ATTR, bind as bind_dyn_widget, try_switch_tab_for_query
 from common.bookmarks import bind as bind_bookmark
 from common.widgets import build_widget_group, register_widget, unregister_widget
 
@@ -230,6 +230,7 @@ class _Followup:
     until: float
     bot_text: str
     checks: int = 0
+    dyn_wid: str | None = None
 
 
 async def _keep_typing(channel, *, delay: float = 0.0) -> None:
@@ -1074,7 +1075,7 @@ class Chat(commands.Cog):
             return True
         return False
 
-    def _open_followup(self, message, bot_text: str) -> None:
+    def _open_followup(self, message, bot_text: str, *, dyn_wid: str | None = None) -> None:
         """MARIA vient de répondre à ce membre : son prochain message est surveillé quelques secondes."""
         if not getattr(message, "guild", None):
             return
@@ -1082,40 +1083,59 @@ class Chat(commands.Cog):
         if len(self._followups) >= _FOLLOWUP_MAX_ENTRIES:
             self._followups = {k: v for k, v in self._followups.items() if v.until > now}
         self._followups[(message.channel.id, message.author.id)] = _Followup(
-            until=now + FOLLOWUP_WINDOW_SECONDS, bot_text=bot_text,
+            until=now + FOLLOWUP_WINDOW_SECONDS,
+            bot_text=bot_text,
+            dyn_wid=dyn_wid if isinstance(dyn_wid, str) else None,
         )
 
-    async def _followup_decision(self, message: discord.Message, resolved_ref) -> str:
-        """respond / react / ignore pour un message sans mention qui suit une réponse de MARIA."""
+    async def _try_followup_tab_switch(self, message: discord.Message, follow: _Followup) -> bool:
+        """Bascule un onglet du widget live si le follow-up le désigne. True = rien d'autre à faire."""
+        wid = follow.dyn_wid
+        if not wid:
+            return False
+        text = (message.clean_content or message.content or "").strip()
+        if not text:
+            return False
+        try:
+            return await try_switch_tab_for_query(
+                self.bot, wid, text, typesafe=self.typesafe,
+            )
+        except Exception:
+            logger.debug("bascule d'onglet follow-up échouée", exc_info=True)
+            return False
+
+    async def _followup_decision(
+        self, message: discord.Message, resolved_ref,
+    ) -> tuple[str, _Followup | None]:
+        """(respond|react|ignore, follow). Le caller retire l'entrée après traitement."""
         if not message.guild or message.author.bot:
-            return "ignore"
+            return "ignore", None
         key = (message.channel.id, message.author.id)
         follow = self._followups.get(key)
         if follow is None:
-            return "ignore"
+            return "ignore", None
         if time.monotonic() > follow.until or follow.checks >= FOLLOWUP_MAX_CHECKS:
             self._followups.pop(key, None)
-            return "ignore"
+            return "ignore", None
         if self.data.get(message.guild).settings("guild_config").get("chatbot_mode") == "off":
-            return "ignore"
+            return "ignore", None
         # Adressé à quelqu'un d'autre : reply à un autre membre ou mention d'un autre membre.
         if resolved_ref is not None and getattr(resolved_ref.author, "id", None) != getattr(self.bot.user, "id", None):
-            return "ignore"
+            return "ignore", None
         if any(u.id != self.bot.user.id and not u.bot for u in message.mentions):
-            return "ignore"
+            return "ignore", None
         text = (message.clean_content or message.content or "").strip()
         if not text:
-            return "ignore"
+            return "ignore", None
         follow.checks += 1
         try:
             decision = await self.typesafe.classify_followup(text, bot_last=follow.bot_text)
         except Exception:
             logger.debug("classify_followup JEV échoué", exc_info=True)
-            return "ignore"
+            return "ignore", follow
         if decision != "ignore":
-            self._followups.pop(key, None)
             logger.info("Suite d'échange détectée dans #%s : %s", message.channel.id, decision)
-        return decision
+        return decision, follow
 
     async def _try_explicit_reaction(self, message) -> bool:
         """« réagis à mon msg » : réaction directe, sans passer par le modèle.
@@ -1326,7 +1346,6 @@ class Chat(commands.Cog):
             )
             self._remember_reply(message.id, None)
             return
-        self._open_followup(message, text or "(vue ou résultat d'outil)")
         visible_parts: list[str] = []
         source_line = _source_footer_line(resp.tool_responses)
         if had_memory_callback:
@@ -1379,6 +1398,7 @@ class Chat(commands.Cog):
             text = f"{text.rstrip()}\n{foot}" if (text or "").strip() else foot
 
         sent_tools: list[str] = []
+        last_dyn_wid: str | None = None
         for tool_name, datas in _group_tool_responses(resp):
             rd = datas[0]
             commentary = _widget_commentary(text, tool_name) if not sent_tools else ""
@@ -1414,6 +1434,9 @@ class Chat(commands.Cog):
                 continue
             await bind_dyn_widget(view, posted)
             await bind_bookmark(view, posted)
+            wid = getattr(view, VIEW_ATTR, None)
+            if isinstance(wid, str):
+                last_dyn_wid = wid
             summaries = [
                 s.strip() for s in (d.get("_llm_summary") for d in datas)
                 if isinstance(s, str) and s.strip()
@@ -1423,6 +1446,9 @@ class Chat(commands.Cog):
             sent_tools.append(tool_name)
 
         if sent_tools:
+            self._open_followup(
+                message, text or "(vue ou résultat d'outil)", dyn_wid=last_dyn_wid,
+            )
             self._remember_reply(message.id, None)
             return
 
@@ -1445,6 +1471,7 @@ class Chat(commands.Cog):
             message.channel, text,
             reply_to=(reply_anchor or message) if use_reply else None,
         )
+        self._open_followup(message, text or "(réponse)")
         self._remember_reply(message.id, posted[0] if len(posted) == 1 else None)
 
     # ------------------------------------------------------------------
@@ -1555,11 +1582,24 @@ class Chat(commands.Cog):
             message, reply_to_bot=reply_to_bot,
         )
         if not should_respond and not other_bot and not edited:
-            followup = await self._followup_decision(message, resolved_ref)
-            if followup == "respond":
+            followup, follow = await self._followup_decision(message, resolved_ref)
+            key = (message.channel.id, message.author.id)
+            if followup == "respond" and follow is not None:
+                if await self._try_followup_tab_switch(message, follow):
+                    self._followups.pop(key, None)
+                    session = self.gpt_api.session_manager.get_or_create(message.channel)
+                    await session.ingest_message(message, is_context_only=True)
+                    text = (message.clean_content or message.content or "").strip()
+                    session.record_artifact(
+                        "tab", f"Onglet basculé suite à « {text[:80]} »",
+                    )
+                    return
+                self._followups.pop(key, None)
                 should_respond = True
             elif followup == "react":
+                self._followups.pop(key, None)
                 await self._apply_learned_reaction(message)
+            # ignore : on laisse le follow-up pour une 2e chance dans la fenêtre
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
 
