@@ -235,6 +235,7 @@ def _strip_source_marks(text: str) -> str:
     return re.sub(r" {2,}", " ", cleaned).strip()
 
 
+_TAB_SWITCH_TYPING_SECONDS = 1.0
 _SILENCE_TYPING_DELAY = 2.5
 
 # Fenêtre où le message suivant du même membre (sans mention) est soumis à JEV.
@@ -1811,7 +1812,13 @@ class Chat(commands.Cog):
             followup, follow = await self._followup_decision(message, resolved_ref)
             key = (message.channel.id, message.author.id)
             if followup == "respond" and follow is not None:
-                tab_label = await self._try_followup_tab_switch(message, follow)
+                typing_task = asyncio.create_task(_keep_typing(message.channel))
+                try:
+                    tab_label = await self._try_followup_tab_switch(message, follow)
+                    if tab_label is not None:
+                        await asyncio.sleep(_TAB_SWITCH_TYPING_SECONDS)  # « écrit… » bref
+                finally:
+                    typing_task.cancel()
                 if tab_label is not None:
                     self._followups.pop(key, None)
                     session = self.gpt_api.session_manager.get_or_create(message.channel)
