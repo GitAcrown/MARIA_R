@@ -22,7 +22,7 @@ from discord.ext import commands, tasks
 from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
-from common.emoji_usage import EmojiUsageTracker, unicode_emoji_id
+from common.emoji_usage import CHROME_EMOJI_IDS, EmojiUsageTracker, unicode_emoji_id
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.llm import MariaGptApi, Tool, resolve_message_reference
@@ -223,6 +223,11 @@ _SILENCE_TYPING_DELAY = 2.5
 FOLLOWUP_WINDOW_SECONDS = 30.0
 FOLLOWUP_MAX_CHECKS = 2
 _FOLLOWUP_MAX_ENTRIES = 200
+
+# Pile-on : ≥N humains ont mis le même emoji sur un msg humain → JEV décide de rejoindre.
+BANDWAGON_MIN_HUMANS = 3
+BANDWAGON_MAX_AGE_SECONDS = 6 * 3600
+_BANDWAGON_SEEN_MAX = 400
 
 
 _TAB_SWITCH_LINES = (
@@ -591,6 +596,8 @@ class Chat(commands.Cog):
         self._pending_responses: dict[tuple[int, int], asyncio.Task] = {}
         self._first_triggers: dict[tuple[int, int], discord.Message] = {}
         self._followups: dict[tuple[int, int], _Followup] = {}
+        self._bandwagon_seen: deque[tuple[int, str]] = deque(maxlen=_BANDWAGON_SEEN_MAX)
+        self._bandwagon_seen_set: set[tuple[int, str]] = set()
 
     async def cog_load(self) -> None:
         self._tasks_worker = TaskWorker(self.tasks, self._exec_task)
@@ -1534,12 +1541,14 @@ class Chat(commands.Cog):
             if user is not None and getattr(user, "bot", False):
                 return
         channel = self.bot.get_channel(payload.channel_id)
+        full: discord.Message | None = None
         excerpt = ""
         if channel is not None and hasattr(channel, "get_partial_message"):
             try:
                 full = await channel.get_partial_message(payload.message_id).fetch()
                 excerpt = (full.clean_content or full.content or "").strip()
             except (discord.HTTPException, AttributeError):
+                full = None
                 excerpt = ""
         self.emoji_usage.observe(
             payload.guild_id,
@@ -1548,6 +1557,101 @@ class Chat(commands.Cog):
             animated=bool(emoji.animated),
             excerpt=excerpt,
         )
+        if full is not None and emoji_id not in CHROME_EMOJI_IDS:
+            await self._maybe_join_bandwagon(payload, full)
+
+    def _bandwagon_mark(self, message_id: int, emoji_key: str) -> bool:
+        """True si déjà vu (ne pas retraiter). Enregistre sinon."""
+        key = (message_id, emoji_key)
+        if key in self._bandwagon_seen_set:
+            return True
+        if len(self._bandwagon_seen) >= self._bandwagon_seen.maxlen:
+            old = self._bandwagon_seen.popleft()
+            self._bandwagon_seen_set.discard(old)
+        self._bandwagon_seen.append(key)
+        self._bandwagon_seen_set.add(key)
+        return False
+
+    @staticmethod
+    def _match_reaction(message: discord.Message, emoji: discord.PartialEmoji):
+        for reaction in message.reactions:
+            re = reaction.emoji
+            if emoji.id is not None:
+                if getattr(re, "id", None) == emoji.id:
+                    return reaction
+            elif isinstance(re, str) and re == emoji.name:
+                return reaction
+            elif getattr(re, "name", None) == emoji.name and getattr(re, "id", None) is None:
+                return reaction
+        return None
+
+    async def _maybe_join_bandwagon(
+        self,
+        payload: discord.RawReactionActionEvent,
+        message: discord.Message,
+    ) -> None:
+        """Si ≥2 humains ont mis le même emoji sur un msg humain, JEV décide de rejoindre."""
+        if not self.typesafe.enabled or not message.guild:
+            return
+        if message.author.bot or message.author.id == getattr(self.bot.user, "id", None):
+            return
+        mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
+        if mode == "off":
+            return
+        created = message.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        if age > BANDWAGON_MAX_AGE_SECONDS:
+            return
+
+        emoji = payload.emoji
+        emoji_key = f"c:{emoji.id}" if emoji.id else f"u:{emoji.name}"
+
+        reaction = self._match_reaction(message, emoji)
+        if reaction is None or reaction.me:
+            return
+        if reaction.count < BANDWAGON_MIN_HUMANS:
+            return
+        # Une seule évaluation JEV par (message, emoji), une fois le seuil atteint.
+        if self._bandwagon_mark(message.id, emoji_key):
+            return
+
+        humans = 0
+        try:
+            async for user in reaction.users(limit=25):
+                if user.bot:
+                    continue
+                humans += 1
+                if humans >= BANDWAGON_MIN_HUMANS:
+                    break
+        except discord.HTTPException:
+            return
+        if humans < BANDWAGON_MIN_HUMANS:
+            return
+
+        content = (message.clean_content or message.content or "").strip()
+        author = getattr(message.author, "display_name", None) or message.author.name
+        try:
+            join = await self.typesafe.should_join_reaction(
+                message=content,
+                emoji_name=emoji.name or "?",
+                human_count=max(humans, reaction.count),
+                author_name=author,
+            )
+        except Exception:
+            logger.debug("should_join_reaction JEV échoué", exc_info=True)
+            return
+        if not join:
+            return
+        try:
+            await message.add_reaction(emoji)
+            logger.info(
+                "Pile-on %s sur msg %s (%d humains)",
+                emoji.name, message.id, humans,
+            )
+        except discord.HTTPException:
+            logger.debug("Pile-on réaction refusée", exc_info=True)
 
     async def _maybe_redo_response(self, message: discord.Message) -> None:
         """Réédite la réponse si elle est encore le dernier message du salon."""

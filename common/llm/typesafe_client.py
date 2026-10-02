@@ -21,6 +21,7 @@ RAG_CONFIDENCE_MIN = 0.4
 DURABLE_THRESHOLD = 0.5
 FOLLOWUP_CONFIDENCE = 0.55
 REACTION_CONFIDENCE = 0.45
+BANDWAGON_CONFIDENCE = 0.55
 
 
 def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
@@ -600,3 +601,53 @@ class MariaTypeSafeClient:
         if choice == "none" or conf < REACTION_CONFIDENCE:
             return None
         return by_key.get(choice)
+
+    async def should_join_reaction(
+        self,
+        *,
+        message: str,
+        emoji_name: str,
+        human_count: int,
+        author_name: str = "",
+    ) -> bool:
+        """Pile-on : d'autres membres ont déjà mis cet emoji. True = MARIA le remet aussi."""
+        if not self.enabled or human_count < 2:
+            return False
+        from typesafe_sdk import Noul
+
+        result = await self.system_one(
+            {
+                "message": (message or "").strip()[:500],
+                "emoji": (emoji_name or "").strip()[:80],
+                "human_count": human_count,
+                "author": (author_name or "").strip()[:80],
+            },
+            {
+                "join": Noul(
+                    instructions=(
+                        "Several human members (`human_count`) already reacted with "
+                        "emoji `emoji` on `author`'s message `message`. "
+                        "Would MARIA — a friend in this Discord group chat — naturally "
+                        "add the SAME emoji too?"
+                    ),
+                    criteria={
+                        "true": (
+                            "The emoji fits the message; piling on is natural for a "
+                            "friend who is loosely concerned or agrees (funny, shared "
+                            "reaction, group vibe). Not private between two people."
+                        ),
+                        "false": (
+                            "Private/targeted, does not fit, spammy, or MARIA has no "
+                            "reason to care; staying out is better"
+                        ),
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return False
+        try:
+            noul = float(result.nouls["join"].noul)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return False
+        return noul >= BANDWAGON_CONFIDENCE
