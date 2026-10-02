@@ -20,7 +20,7 @@ from discord.ext import commands, tasks
 from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
-from common.emoji_usage import EmojiUsageTracker
+from common.emoji_usage import EmojiUsageTracker, unicode_emoji_id
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.llm import MariaGptApi, Tool, resolve_message_reference
@@ -160,9 +160,24 @@ def _style_examples_ctx() -> str:
 
 _SILENCE_CTX = (
     "SILENCE : message qui n'attend rien de toi (blague, constat, réaction) → réponds "
-    "`[[REACT]]` seul ou `[[SKIP]]` seul. L'emoji custom est choisi automatiquement. "
-    "Question ou demande, même implicite → vraie réponse.\n"
+    "`[[REACT]]` seul ou `[[SKIP]]` seul. L'emoji (custom ou classique) est choisi automatiquement. "
+    "Question ou demande, même implicite → vraie réponse (sauf « réagis à mon message » : `[[REACT]]` seul).\n"
 )
+
+_REACT_REQUEST_RE = re.compile(
+    r"\br[ée]agi[st]?\b|\br[ée]agir\b|\br[ée]agissez\b|\b(?:mets?|ajoute|fais)\s+(?:une?\s+)?r[ée]action\b|\breact\b",
+    re.IGNORECASE,
+)
+_MINE_RE = re.compile(r"\b(?:mon|ma|mes)\b", re.IGNORECASE)
+_REACT_REQUEST_MAX_LEN = 80
+_FALLBACK_REACTION = "👍"
+
+
+def _is_reaction_request(text: str) -> bool:
+    """Demande explicite et courte de réaction (pas une phrase qui parle de réactions)."""
+    text = (text or "").strip()
+    return 0 < len(text) <= _REACT_REQUEST_MAX_LEN and bool(_REACT_REQUEST_RE.search(text))
+
 
 _REACT_RE = re.compile(r"\[\[REACT(?::[^\]]*)?\]\]", re.IGNORECASE)
 _SKIP_RE = re.compile(r"\[\[SKIP\]\]", re.IGNORECASE)
@@ -1004,35 +1019,71 @@ class Chat(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _apply_learned_reaction(self, message: discord.Message) -> bool:
-        """Shortlist apprise → JEV Choice → add_reaction. True si une réaction part."""
+        """Emojis custom du serveur d'abord, classiques seulement si aucun ne colle.
+
+        Chaque étape : shortlist apprise → JEV Choice → add_reaction. True si une réaction part.
+        """
         if not message.guild:
             return False
         content = message.clean_content or message.content or ""
-        try:
-            candidates = await asyncio.to_thread(
-                self.emoji_usage.shortlist, message.guild.id, content,
-            )
-        except Exception:
-            logger.debug("shortlist emoji échoué", exc_info=True)
+        for unicode_stage in (False, True):
+            try:
+                candidates = await asyncio.to_thread(
+                    self.emoji_usage.shortlist, message.guild.id, content,
+                    unicode=unicode_stage,
+                )
+            except Exception:
+                logger.debug("shortlist emoji échoué", exc_info=True)
+                continue
+            if not candidates:
+                continue
+            try:
+                picked = await self.typesafe.pick_reaction(content, candidates)
+            except Exception:
+                logger.debug("pick_reaction JEV échoué", exc_info=True)
+                return False
+            if picked is None:
+                continue
+            if picked.is_unicode:
+                emoji = picked.name
+            else:
+                emoji = discord.PartialEmoji(
+                    name=picked.name, id=picked.emoji_id, animated=picked.animated,
+                )
+            try:
+                await message.add_reaction(emoji)
+            except (discord.HTTPException, TypeError, ValueError):
+                logger.debug("Réaction %s refusée", picked.name, exc_info=True)
+                continue
+            return True
+        return False
+
+    async def _try_explicit_reaction(self, message) -> bool:
+        """« réagis à mon msg » : réaction directe, sans passer par le modèle.
+
+        Émoji appris si JEV en trouve un, sinon `_FALLBACK_REACTION`.
+        """
+        if isinstance(message, _ContentOverride) or not getattr(message, "guild", None):
             return False
-        if not candidates:
+        content = message.content or ""
+        if not _is_reaction_request(content):
             return False
-        try:
-            picked = await self.typesafe.pick_reaction(content, candidates)
-        except Exception:
-            logger.debug("pick_reaction JEV échoué", exc_info=True)
-            return False
-        if picked is None:
-            return False
-        emoji = discord.PartialEmoji(
-            name=picked.name, id=picked.emoji_id, animated=picked.animated,
-        )
-        try:
-            await message.add_reaction(emoji)
-        except (discord.HTTPException, TypeError, ValueError):
-            logger.debug("Réaction %s refusée", picked.name, exc_info=True)
-            return False
-        return True
+        target = message
+        if message.reference is not None and not _MINE_RE.search(content):
+            ref = await resolve_message_reference(message)
+            if ref is not None and ref.author is not None and not ref.author.bot:
+                target = ref
+        reacted = await self._apply_learned_reaction(target)
+        if not reacted:
+            try:
+                await target.add_reaction(_FALLBACK_REACTION)
+                reacted = True
+            except discord.HTTPException:
+                logger.debug("Réaction de repli refusée", exc_info=True)
+        if reacted:
+            logger.info("Réaction demandée explicitement dans #%s", getattr(message.channel, "id", "?"))
+            self._remember_reply(message.id, None)
+        return reacted
 
     async def _can_stay_silent(self, message) -> bool:
         """True si silence / réaction autorisés (pas de ping, reply au bot, ni « ? »)."""
@@ -1095,6 +1146,9 @@ class Chat(commands.Cog):
         edit_target: Optional[discord.Message] = None,
         reply_anchor: Optional[discord.Message] = None,
     ) -> None:
+        if edit_target is None and await self._try_explicit_reaction(message):
+            return
+
         # Reply Discord : le message cité entre dans le blob JEV après résolution
         # session → pas de prefetch ici.
         if message.reference is None:
@@ -1363,8 +1417,9 @@ class Chat(commands.Cog):
         if payload.guild_id is None or payload.user_id == getattr(self.bot.user, "id", None):
             return
         emoji = payload.emoji
-        if emoji is None or emoji.id is None:
+        if emoji is None or not emoji.name:
             return
+        emoji_id = emoji.id if emoji.id is not None else unicode_emoji_id(emoji.name)
         member = payload.member
         if member is not None and member.bot:
             return
@@ -1383,8 +1438,8 @@ class Chat(commands.Cog):
                 excerpt = ""
         self.emoji_usage.observe(
             payload.guild_id,
-            emoji_id=emoji.id,
-            emoji_name=emoji.name or "",
+            emoji_id=emoji_id,
+            emoji_name=emoji.name,
             animated=bool(emoji.animated),
             excerpt=excerpt,
         )

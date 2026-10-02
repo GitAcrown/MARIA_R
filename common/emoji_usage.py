@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+import zlib
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ DB_PATH = DATA_DIR / "emoji_usage.db"
 SAMPLES_PER_EMOJI = 8
 EXCERPT_MAX = 120
 SHORTLIST_K = 5
+_PAD_TO = 8
 
 _TOKEN_RE = re.compile(r"[a-z0-9àâäéèêëïîôùûüçœæ_]{2,}", re.IGNORECASE)
 _CHROME_ID_RE = re.compile(r":(\d+)>")
@@ -41,6 +43,24 @@ def _chrome_emoji_ids() -> frozenset[int]:
 CHROME_EMOJI_IDS = _chrome_emoji_ids()
 
 
+def unicode_emoji_id(char: str) -> int:
+    """Id synthétique négatif et stable pour un emoji Unicode (les ids custom sont > 0)."""
+    return -(zlib.crc32(char.encode("utf8")) + 1)
+
+
+# Repli quand le serveur n'a pas encore assez d'historique : (emoji, usage).
+DEFAULT_UNICODE: tuple[tuple[str, str], ...] = (
+    ("😂", "funny joke, something amusing"),
+    ("💀", "absurd or so funny it is deadly, cringe"),
+    ("👍", "agreement, ok, acknowledgement"),
+    ("❤️", "affection, kind or wholesome message"),
+    ("😭", "dramatic sadness or laughing so hard it hurts"),
+    ("👀", "something intriguing, gossip, looking at it"),
+    ("🔥", "impressive, great news, hype"),
+    ("🤔", "doubt, odd statement, questioning"),
+)
+
+
 @dataclass(frozen=True)
 class EmojiCandidate:
     emoji_id: int
@@ -48,6 +68,11 @@ class EmojiCandidate:
     animated: bool
     count: int
     samples: tuple[str, ...]
+    hint: str = ""
+
+    @property
+    def is_unicode(self) -> bool:
+        return self.emoji_id < 0
 
 
 def _init_db() -> None:
@@ -209,22 +234,26 @@ class EmojiUsageTracker:
         message_text: str,
         *,
         k: int = SHORTLIST_K,
+        unicode: bool = False,
     ) -> list[EmojiCandidate]:
-        """Top k candidats : fréquence × overlap lexical avec les extraits."""
+        """Top k candidats : fréquence × overlap lexical avec les extraits.
+
+        `unicode=False` : emojis custom du serveur uniquement.
+        `unicode=True` : emojis classiques appris, complétés par les défauts.
+        """
         self.flush()
+        sign = "<" if unicode else ">"
         with _db() as conn:
             stats = conn.execute(
-                """
+                f"""
                 SELECT emoji_id, emoji_name, animated, count
                 FROM emoji_stats
-                WHERE guild_id = ? AND count > 0
+                WHERE guild_id = ? AND count > 0 AND emoji_id {sign} 0
                 ORDER BY count DESC
                 LIMIT 40
                 """,
                 (guild_id,),
             ).fetchall()
-            if not stats:
-                return []
             samples_by: dict[int, list[str]] = defaultdict(list)
             for row in conn.execute(
                 """
@@ -263,4 +292,16 @@ class EmojiUsageTracker:
                 )
             )
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [c for _, c in scored[: max(1, k)]]
+        picked = [c for _, c in scored[: max(1, k)]]
+        if unicode and len(picked) < k:
+            have = {c.emoji_id for c in picked}
+            for char, hint in DEFAULT_UNICODE:
+                eid = unicode_emoji_id(char)
+                if eid in have:
+                    continue
+                picked.append(EmojiCandidate(
+                    emoji_id=eid, name=char, animated=False, count=0, samples=(), hint=hint,
+                ))
+                if len(picked) >= _PAD_TO:
+                    break
+        return picked

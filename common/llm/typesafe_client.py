@@ -396,27 +396,33 @@ class MariaTypeSafeClient:
 
         # Clés stables e0..eN (noms Discord peuvent coller / se répéter).
         criteria: dict[str, str] = {
-            "none": "No custom reaction fits; stay silent",
+            "none": "No reaction fits; stay silent",
         }
         state: dict[str, Any] = {"message": (message or "").strip()[:500]}
         by_key: dict[str, Any] = {}
         for i, cand in enumerate(candidates[:8]):
             key = f"e{i}"
             by_key[key] = cand
-            samples = " | ".join((cand.samples or [])[:3]) or "(no samples yet)"
-            state[f"{key}_samples"] = samples[:400]
+            samples = " | ".join((cand.samples or [])[:3])
+            hint = getattr(cand, "hint", "")
+            if samples:
+                usage = f"members react with it on: {samples[:220]}"
+            elif hint:
+                usage = f"generally used for: {hint}"
+            else:
+                usage = "no usage samples yet"
+            state[f"{key}_usage"] = usage[:400]
             state[f"{key}_name"] = cand.name
-            criteria[key] = (
-                f"Custom emoji `{cand.name}` — members react with it on: {samples[:220]}"
-            )
+            kind = "Emoji" if getattr(cand, "is_unicode", False) else "Custom emoji"
+            criteria[key] = f"{kind} `{cand.name}` — {usage}"
 
         result = await self.system_one(
             state,
             {
                 "reaction": Choice(
                     instructions=(
-                        "Which guild custom reaction emoji fits `message`, matching how "
-                        "members actually use it (see each option's samples)? "
+                        "Which reaction emoji fits `message`, matching how members of "
+                        "this server actually use it (see each option's usage)? "
                         "Pick `none` if nothing fits."
                     ),
                     criteria=criteria,
