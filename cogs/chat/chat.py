@@ -220,7 +220,7 @@ def _strip_source_marks(text: str) -> str:
 _SILENCE_TYPING_DELAY = 2.5
 
 # Fenêtre où le message suivant du même membre (sans mention) est soumis à JEV.
-FOLLOWUP_WINDOW_SECONDS = 45.0
+FOLLOWUP_WINDOW_SECONDS = 30.0
 FOLLOWUP_MAX_CHECKS = 2
 _FOLLOWUP_MAX_ENTRIES = 200
 
