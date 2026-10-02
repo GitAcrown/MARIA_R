@@ -33,6 +33,7 @@ from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
 from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
+from common.layout_kit import sep_tight, sep_wide, title_text
 
 logger = logging.getLogger("MARIA.Transport")
 
@@ -285,9 +286,8 @@ def _departures_container(data: dict) -> discord.ui.Container:
     rows = data.get("rows") or []
     realtime = bool(data.get("realtime"))
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"## {TRAIN} {stop}"),
-        discord.ui.TextDisplay("-# Prochains passages"),
-        discord.ui.Separator(),
+        title_text(f"{TRAIN} {stop}", "Prochains passages"),
+        sep_wide(),
     ]
     if not rows:
         children.append(discord.ui.TextDisplay("-# Aucun passage proche."))
@@ -320,11 +320,11 @@ def _traffic_container(data: dict) -> discord.ui.Container:
     ]
     if status:
         children.append(discord.ui.TextDisplay(status))
-    children.append(discord.ui.Separator())
+    children.append(sep_wide())
     if notes:
         for i, n in enumerate(notes):
             if i:
-                children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                children.append(sep_tight())
             children.append(discord.ui.TextDisplay(n))
     else:
         children.append(discord.ui.TextDisplay("Trafic normal."))

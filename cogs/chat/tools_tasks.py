@@ -29,6 +29,7 @@ from common.tasks import (
     snap_execute_at,
 )
 from common.timezones import PARIS_TZ
+from common.layout_kit import sep_tight, sep_wide
 
 TASK_MAX_MINUTES = TASK_MAX_DAYS * 24 * 60
 
@@ -187,7 +188,7 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     )
     children: list[discord.ui.Item] = [
         discord.ui.TextDisplay(f"## Tâches · {name} · {quota_n}/{TASK_MAX_PENDING}"),
-        discord.ui.Separator(),
+        sep_wide(),
     ]
     if not items:
         children.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))

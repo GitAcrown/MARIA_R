@@ -7,7 +7,7 @@ import time
 import discord
 from discord.ext import commands
 
-from common.emojis import TRANSCRIPT
+from common.emojis import TRANSCRIPT, TRANSCRIPT_SUB
 from common.llm import MariaLLMClient
 
 logger = logging.getLogger("MARIA.Auto")
@@ -121,7 +121,11 @@ class Auto(commands.Cog):
             detail = "Mention détectée"
         else:
             detail = ""
-        suffix = f"\n-# **Transcription** · {detail}" if detail else "\n-# **Transcription**"
+        suffix = (
+            f"\n-# {TRANSCRIPT_SUB} **Transcription** · {detail}"
+            if detail
+            else f"\n-# {TRANSCRIPT_SUB} **Transcription**"
+        )
 
         posted = await reply_to.reply(f">>> {transcript}{suffix}", mention_author=False)
         responded = False

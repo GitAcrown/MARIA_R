@@ -69,6 +69,20 @@ def sanitize_memory_content(text: str) -> str:
     return content
 
 
+def _needs_durable_check(action: dict, direct_user_ids: set[int]) -> bool:
+    """Le filtre JEV ne juge que les créations passives : ni stable, ni dites à MARIA.
+
+    Les update/merge/contradict (contenu souvent court) et les faits d'un membre qui
+    s'adresse au bot passent directement — l'extracteur est déjà strict.
+    """
+    if (action.get("action") or "").strip() != "create":
+        return False
+    if action.get("stable"):
+        return False
+    uid = parse_user_id(action.get("user_id"))
+    return uid is None or uid not in direct_user_ids
+
+
 def _clip(content: str) -> str:
     """Identité : la troncature silencieuse est interdite (précision ou rejet)."""
     return content
@@ -498,9 +512,13 @@ class MemoryWorker:
             return
         if self.typesafe is not None and getattr(self.typesafe, "enabled", False):
             before = len(actions)
-            actions = await self.typesafe.filter_durable_actions(
-                actions, batch_excerpt=batch_text,
-            )
+            to_check = [a for a in actions if _needs_durable_check(a, direct_user_ids)]
+            if to_check:
+                checked = await self.typesafe.filter_durable_actions(
+                    to_check, batch_excerpt=batch_text,
+                )
+                dropped = {id(a) for a in to_check} - {id(a) for a in checked}
+                actions = [a for a in actions if id(a) not in dropped]
             if len(actions) < before:
                 logger.info(
                     "JEV a filtré %d/%d action(s) non durables (guild=%s)",

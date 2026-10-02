@@ -7,6 +7,8 @@ from typing import Optional
 
 import discord
 
+from common.layout_kit import sep_tight
+
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?!<)(https?://[^)\s]+)\)", re.I)
 _BARE_URL_RE = re.compile(r"(?<![<(])https?://[^\s<>]+", re.I)
 
@@ -46,7 +48,7 @@ def layout_with_commentary(
     view = discord.ui.LayoutView(timeout=None)
     if commentary:
         view.add_item(discord.ui.TextDisplay(suppress_link_embeds(commentary)))
-        view.add_item(discord.ui.Separator())
+        view.add_item(sep_tight())
     view.add_item(body)
     return view
 

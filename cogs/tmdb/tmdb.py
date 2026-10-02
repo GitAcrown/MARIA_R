@@ -13,7 +13,8 @@ from discord.ext import commands
 from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import MOVIE, TV
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import build_media_layout
+from common.layout_kit import card, sep_wide
+from common.media_hub import build_media_group, build_media_layout
 from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
@@ -141,6 +142,11 @@ def build_media_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     )
 
 
+def build_media_group_view(datas: list, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Plusieurs films/séries du même tour : un onglet par fiche."""
+    return build_media_group("tmdb", datas, commentary=commentary)
+
+
 def _media_container(r: dict) -> Optional[discord.ui.Container]:
     media_type = r.get("media_type", "movie")
     title      = r.get("title") or r.get("name", "?")
@@ -159,7 +165,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
 
     meta_parts = [_TYPE_LABEL.get(media_type, "Média")] + genres[:3]
     header = discord.ui.TextDisplay(f"{title_line}\n-# {'  ·  '.join(meta_parts)}")
-    sep1   = discord.ui.Separator()
+    sep1   = sep_wide()
 
     # Note + synopsis
     if rating and vote_count:
@@ -198,7 +204,7 @@ def _media_container(r: dict) -> Optional[discord.ui.Container]:
     else:
         children.append(discord.ui.TextDisplay("-# TMDB"))
 
-    return discord.ui.Container(*children)
+    return card(children, sticky_head=2)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +350,7 @@ class TMDB(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(TMDB(bot))
-    register_widget("search_media", build_media_view)
+    register_widget("search_media", build_media_view, group_builder=build_media_group_view)
 
 
 async def teardown(bot: commands.Bot) -> None:

@@ -14,8 +14,10 @@ from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
 logger = logging.getLogger("MARIA.MediaHub")
 
 _MAX_HITS = 5
+_MAX_GROUP = 8
 _PAYLOAD_CHARS = 12000
 _KIND = "media_hub"
+_GROUP_KIND = "media_group"
 
 
 def _shrink(obj):
@@ -145,15 +147,72 @@ def build_media_layout(
     return layout_with_commentary(container, commentary) if container else None
 
 
+def _short_title(kind: str, item: dict, index: int) -> str:
+    if kind == "tmdb":
+        return str(item.get("title") or item.get("name") or f"#{index + 1}")
+    if kind == "spotify":
+        return str(item.get("name") or f"Titre {index + 1}")
+    return str(item.get("name") or item.get("title") or f"#{index + 1}")
+
+
+def group_tab_labels(payload: dict) -> list[str]:
+    """Onglets d'un groupe de fiches : le titre seul, avec l'année si deux titres se répètent."""
+    kind = payload.get("kind") or ""
+    hits = [h for h in (payload.get("hits") or []) if isinstance(h, dict)]
+    short = [_short_title(kind, h, i) for i, h in enumerate(hits)]
+    if len({s.casefold() for s in short}) < len(short):
+        return [_hit_label(kind, h, i) for i, h in enumerate(hits)]
+    return short
+
+
+def build_media_group(
+    kind: str,
+    datas: list[dict],
+    commentary: str = "",
+) -> Optional[discord.ui.LayoutView]:
+    """Plusieurs fiches du même type (appels d'outil du même tour) : un onglet par fiche."""
+    items: list[dict] = []
+    seen: set[str] = set()
+    for data in datas:
+        if not isinstance(data, dict) or "error" in data:
+            continue
+        result = data.get("result")
+        if not isinstance(result, dict) or not result:
+            continue
+        rid = _item_id(result)
+        if rid:
+            if rid in seen:
+                continue
+            seen.add(rid)
+        items.append(result)
+    items = items[:_MAX_GROUP]
+    if not items:
+        return None
+    if len(items) == 1:
+        return build_media_layout(kind=kind, result=items[0], commentary=commentary)
+    view = make_tabbed_view(
+        _GROUP_KIND,
+        {"kind": kind, "hits": [_shrink(h) for h in items]},
+        commentary,
+        0,
+    )
+    if view is not None:
+        return view
+    container = _container_for(kind, items[0])
+    return layout_with_commentary(container, commentary) if container else None
+
+
 def register_media_tabs() -> None:
     register_tabs(
         _KIND, media_tab_labels, media_tab_body,
         force_select=True, placeholder="Choisir un résultat",
     )
+    register_tabs(_GROUP_KIND, group_tab_labels, media_tab_body, buttons=True)
 
 
 def unregister_media_tabs() -> None:
     unregister_tabs(_KIND)
+    unregister_tabs(_GROUP_KIND)
 
 
 register_media_tabs()

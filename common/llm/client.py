@@ -67,9 +67,7 @@ class MariaLLMClient:
             "model": model or self.completion_model,
             "messages": messages,
             "max_completion_tokens": max_tokens or self.max_tokens,
-            # gpt-5.x : sans ça, le raisonnement peut manger tout max_completion_tokens
-            # (sortie content vide) — notamment /moi, /global, résumés, etc.
-            # Les function tools exigent aussi reasoning_effort='none'.
+            # Sans reasoning_effort=none, le raisonnement peut manger max_completion_tokens.
             "reasoning_effort": "none",
         }
         if tools:

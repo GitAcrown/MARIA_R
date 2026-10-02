@@ -26,6 +26,8 @@ from youtube_transcript_api._errors import (
 from common.discord_ui import layout_with_commentary, md_link, section_with_thumbnail
 from common.emojis import YOUTUBE
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.dyn_widgets import make_tabbed_view, register_tabs, unregister_tabs
+from common.layout_kit import card
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.YouTube")
@@ -184,6 +186,47 @@ def build_youtube_view(data: dict, commentary: str = "") -> Optional[discord.ui.
     return layout_with_commentary(container, commentary)
 
 
+_GROUP_KIND = "youtube_group"
+_GROUP_MAX = 8
+_CARD_KEYS = (
+    "video_id", "title", "author", "thumbnail", "url", "language",
+    "generated", "duration_s", "truncated",
+)
+
+
+def youtube_tab_labels(payload: dict) -> list[str]:
+    videos = payload.get("videos") or []
+    return [str(v.get("title") or v.get("video_id") or f"Vidéo {i + 1}") for i, v in enumerate(videos)]
+
+
+def youtube_tab_body(payload: dict, index: int) -> discord.ui.Item:
+    videos = payload.get("videos") or []
+    video = videos[index] if 0 <= index < len(videos) else (videos[0] if videos else {})
+    return _youtube_container(video) or discord.ui.TextDisplay("-# Vidéo illisible.")
+
+
+def build_youtube_group(datas: list, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Plusieurs vidéos du même tour : un onglet par vidéo (le transcript reste hors du widget)."""
+    videos: list[dict] = []
+    seen: set[str] = set()
+    for data in datas:
+        if not isinstance(data, dict) or "error" in data or not data.get("video_id"):
+            continue
+        vid = str(data["video_id"])
+        if vid in seen:
+            continue
+        seen.add(vid)
+        videos.append({k: data.get(k) for k in _CARD_KEYS if data.get(k) is not None})
+    videos = videos[:_GROUP_MAX]
+    if len(videos) < 2:
+        return build_youtube_view(datas[0], commentary) if datas else None
+    view = make_tabbed_view(_GROUP_KIND, {"videos": videos}, commentary, 0)
+    if view is not None:
+        return view
+    container = _youtube_container(videos[0])
+    return layout_with_commentary(container, commentary) if container else None
+
+
 def _youtube_container(data: dict) -> Optional[discord.ui.Container]:
     video_id = data.get("video_id") or ""
     title = (data.get("title") or "").strip() or f"Vidéo {video_id}"
@@ -212,7 +255,7 @@ def _youtube_container(data: dict) -> Optional[discord.ui.Container]:
         body_lines.append(f"-# {' · '.join(meta)}")
     main = section_with_thumbnail(discord.ui.TextDisplay("\n".join(body_lines)), thumb)
 
-    return discord.ui.Container(main)
+    return card([main])
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +346,10 @@ class Youtube(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Youtube(bot))
-    register_widget("read_youtube", build_youtube_view)
+    register_widget("read_youtube", build_youtube_view, group_builder=build_youtube_group)
+    register_tabs(_GROUP_KIND, youtube_tab_labels, youtube_tab_body, buttons=True)
 
 
 async def teardown(bot: commands.Bot) -> None:
     unregister_widget("read_youtube")
+    unregister_tabs(_GROUP_KIND)

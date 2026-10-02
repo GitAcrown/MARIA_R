@@ -20,6 +20,7 @@ from typing import Callable, Iterator, Optional
 import discord
 
 from common.discord_ui import suppress_link_embeds
+from common.layout_kit import sep_tight
 
 logger = logging.getLogger("MARIA.DynWidgets")
 
@@ -30,6 +31,7 @@ PURGE_AFTER = timedelta(hours=1)
 VIEW_ATTR = "_maria_dyn_id"
 _ROW = 5
 _MAX_TABS = 25
+_MAX_BUTTON_TABS = 10
 _BTN_LABEL_MAX = 16
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -38,6 +40,7 @@ BodyFn = Callable[[dict, int], discord.ui.Item]
 
 _RENDERERS: dict[str, tuple[LabelsFn, BodyFn]] = {}
 _FORCE_SELECT: set[str] = set()
+_BUTTON_KINDS: set[str] = set()
 _PLACEHOLDERS: dict[str, str] = {}
 
 
@@ -60,13 +63,19 @@ def register_tabs(
     body: BodyFn,
     *,
     force_select: bool = False,
+    buttons: bool = False,
     placeholder: str = "",
 ) -> None:
+    """`buttons` : onglets en boutons au-dessus de la carte (libellés tronqués)."""
     _RENDERERS[kind] = (labels, body)
     if force_select:
         _FORCE_SELECT.add(kind)
     else:
         _FORCE_SELECT.discard(kind)
+    if buttons:
+        _BUTTON_KINDS.add(kind)
+    else:
+        _BUTTON_KINDS.discard(kind)
     if placeholder:
         _PLACEHOLDERS[kind] = placeholder
     else:
@@ -76,6 +85,7 @@ def register_tabs(
 def unregister_tabs(kind: str) -> None:
     _RENDERERS.pop(kind, None)
     _FORCE_SELECT.discard(kind)
+    _BUTTON_KINDS.discard(kind)
     _PLACEHOLDERS.pop(kind, None)
 
 
@@ -222,10 +232,13 @@ def _labels(kind: str, payload: dict) -> list[str]:
     except Exception:
         logger.exception("labels %s", kind)
         return []
+    button_kind = kind in _BUTTON_KINDS
     out: list[str] = []
-    for lab in labels[:_MAX_TABS]:
-        text = " ".join(str(lab).split())[:100]
-        out.append(text or "·")
+    for lab in labels[: _MAX_BUTTON_TABS if button_kind else _MAX_TABS]:
+        text = " ".join(str(lab).split())
+        if button_kind and len(text) > _BTN_LABEL_MAX:
+            text = text[: _BTN_LABEL_MAX - 1].rstrip() + "…"
+        out.append(text[:100] or "·")
     return out
 
 
@@ -260,6 +273,8 @@ def _tab_rows(wid: str, labels: list[str], selected: int) -> list[discord.ui.Act
 def _tab_controls(
     wid: str, labels: list[str], selected: int, *, kind: str = "",
 ) -> list[discord.ui.ActionRow]:
+    if kind in _BUTTON_KINDS:
+        return _tab_rows(wid, labels, selected)
     if kind in _FORCE_SELECT or _use_select(labels):
         ph = _PLACEHOLDERS.get(kind) or "Choisir…"
         return [discord.ui.ActionRow(TabSelect(wid, labels, selected, placeholder=ph))]
@@ -282,24 +297,13 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
     body = _body(rec.kind, rec.payload, index)
     if body is None:
         return None
-    tabs_in_card = False
-    if live and len(labels) >= 2 and isinstance(body, discord.ui.Container):
-        old = list(body.children)
-        body.clear_items()
-        for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
-            body.add_item(row)
-        body.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        for item in old:
-            body.add_item(item)
-        tabs_in_card = True
     view = discord.ui.LayoutView(timeout=None)
     if rec.commentary:
         view.add_item(discord.ui.TextDisplay(suppress_link_embeds(rec.commentary)))
-        view.add_item(discord.ui.Separator())
-    if live and len(labels) >= 2 and not tabs_in_card:
+        view.add_item(sep_tight())
+    if live and len(labels) >= 2:
         for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
             view.add_item(row)
-        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
     view.add_item(body)
     if live:
         setattr(view, VIEW_ATTR, rec.id)

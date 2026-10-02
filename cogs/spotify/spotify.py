@@ -14,7 +14,8 @@ from discord.ext import commands
 from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import MUSIC
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import build_media_layout
+from common.layout_kit import card
+from common.media_hub import build_media_group, build_media_layout
 from common.widgets import register_widget, unregister_widget
 
 logger = logging.getLogger("MARIA.Spotify")
@@ -135,6 +136,11 @@ def build_track_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     )
 
 
+def build_track_group_view(datas: list, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Plusieurs morceaux du même tour : un onglet par fiche."""
+    return build_media_group("spotify", datas, commentary=commentary)
+
+
 def _track_container(t: dict) -> Optional[discord.ui.Container]:
     name    = t.get("name", "?")
     artists = ", ".join(a["name"] for a in t.get("artists", []))
@@ -166,7 +172,7 @@ def _track_container(t: dict) -> Optional[discord.ui.Container]:
     body_block = discord.ui.TextDisplay("\n".join(body_lines))
     main_section = section_with_thumbnail(body_block, cover)
 
-    return discord.ui.Container(main_section)
+    return card([main_section])
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +300,7 @@ class Spotify(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Spotify(bot))
-    register_widget("search_track", build_track_view)
+    register_widget("search_track", build_track_view, group_builder=build_track_group_view)
 
 
 async def teardown(bot: commands.Bot) -> None:

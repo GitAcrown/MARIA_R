@@ -11,6 +11,7 @@ from common.discord_ui import layout_with_commentary, section_with_thumbnail
 from common.emojis import SMALL_CHART
 from common.funstat import FunStatTracker
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.layout_kit import sep_tight, sep_wide
 
 # Nombre maximum de membres renvoyés par get_server_users.
 MAX_SERVER_USERS = 60
@@ -33,7 +34,7 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
         ),
         data.get("guild_icon"),
     )
-    children: list[discord.ui.Item] = [header, discord.ui.Separator()]
+    children: list[discord.ui.Item] = [header, sep_wide()]
 
     def _ranked_block(title: str, items: list[dict], unit: str) -> Optional[discord.ui.TextDisplay]:
         if not items:
@@ -59,7 +60,7 @@ def build_server_stats_view(data: dict, commentary: str = "") -> Optional[discor
     else:
         for i, b in enumerate(blocks):
             if i:
-                children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                children.append(sep_tight())
             children.append(b)
 
     return layout_with_commentary(discord.ui.Container(*children), commentary)

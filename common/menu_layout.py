@@ -12,15 +12,12 @@ from typing import Any, Optional
 import discord
 
 from common.discord_ui import layout_with_commentary, section_with_thumbnail  # noqa: F401
+from common.layout_kit import sep_tight, sep_wide, with_control_separators  # noqa: F401
 
 logger = logging.getLogger("MARIA.Menu")
 
 NO_PINGS = discord.AllowedMentions.none()
 MENU_TIMEOUT = 840.0
-
-
-def sep_tight() -> discord.ui.Separator:
-    return discord.ui.Separator(spacing=discord.SeparatorSpacing.small)
 
 
 def _disable_interactive(item: discord.ui.Item) -> None:
@@ -192,15 +189,21 @@ class MariaLayout(discord.ui.LayoutView):
         except discord.HTTPException as exc:
             logger.warning("Impossible de rafraîchir %s : %s", type(self).__name__, exc)
 
-    def set_layout(self, body: list[discord.ui.Item], *rows: discord.ui.Item | None) -> None:
+    def set_layout(
+        self,
+        body: list[discord.ui.Item],
+        *rows: discord.ui.Item | None,
+        above: list[discord.ui.Item] | None = None,
+        sticky_head: int = 0,
+    ) -> None:
+        """`above` : onglets posés hors du Container, au-dessus de la carte."""
         self.clear_items()
+        for item in above or []:
+            self.add_item(item)
         children = list(body)
-        for row in rows:
-            if row is None:
-                continue
-            if children:
-                children.append(sep_tight())
-            children.append(row)
+        children.extend(row for row in rows if row is not None)
+        head = children[:sticky_head]
+        children = head + with_control_separators(children[sticky_head:])
         if children:
             kwargs: dict = {}
             if self.accent_colour is not None:

@@ -27,6 +27,7 @@ from common.emojis import DIRECT, FOOTBALL, FOOTBALL_PLAYER
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
+from common.layout_kit import sep_tight, sep_wide
 
 logger = logging.getLogger("MARIA.Football")
 
@@ -345,7 +346,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
 
     score_block = discord.ui.TextDisplay(score_line)
 
-    children: list = [header, discord.ui.Separator(), score_block]
+    children: list = [header, sep_wide(), score_block]
 
     # Buteurs
     scorers = _scorers_by_team(m.get("_events", []))
@@ -355,7 +356,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
             if team_name in scorers:
                 lines.append(f"**{team_name}**  ·  {', '.join(scorers[team_name])}")
         if lines:
-            children += [discord.ui.Separator(), discord.ui.TextDisplay(f"{FOOTBALL_PLAYER} " + f"\n{FOOTBALL_PLAYER} ".join(lines))]
+            children += [sep_tight(), discord.ui.TextDisplay(f"{FOOTBALL_PLAYER} " + f"\n{FOOTBALL_PLAYER} ".join(lines))]
 
     # Statistiques (uniquement en direct)
     stats = m.get("_statistics", [])
@@ -368,7 +369,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
                 continue
             stat_lines.append(f"-# {label} · {vh or '0'} — {va or '0'}")
         if stat_lines:
-            children += [discord.ui.Separator(), discord.ui.TextDisplay("\n".join(stat_lines))]
+            children += [sep_tight(), discord.ui.TextDisplay("\n".join(stat_lines))]
 
     source = "TheSportsDB" if m.get("_source") == "thesportsdb" else "API-Football"
     children += [discord.ui.TextDisplay(f"-# {source}")]
@@ -377,7 +378,7 @@ def _match_container(m: dict) -> Optional[discord.ui.Container]:
 
 def _match_list_container(matches: list, title: str) -> Optional[discord.ui.Container]:
     header = discord.ui.TextDisplay(f"## {FOOTBALL} Derniers matchs · {title}")
-    children: list = [header, discord.ui.Separator()]
+    children: list = [header, sep_wide()]
 
     if not matches:
         children.append(discord.ui.TextDisplay("-# Aucun match récent."))
@@ -403,7 +404,7 @@ def _match_list_container(matches: list, title: str) -> Optional[discord.ui.Cont
 
 def _live_list_container(matches: list) -> Optional[discord.ui.Container]:
     header = discord.ui.TextDisplay(f"## {FOOTBALL} Matchs en direct")
-    children: list = [header, discord.ui.Separator()]
+    children: list = [header, sep_wide()]
 
     if not matches:
         children.append(discord.ui.TextDisplay("-# Aucun match en direct pour le moment."))

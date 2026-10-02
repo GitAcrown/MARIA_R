@@ -1,81 +1,47 @@
-"""Constantes de configuration du cog Chat (modèles, fenêtre de contexte, debounce).
+"""Constantes du cog Chat."""
 
-Centralise les valeurs qui étaient auparavant éparpillées et incohérentes entre
-`cogs/chat/chat.py`, `common/llm/api.py` et `common/llm/context.py`.
-"""
-
-# Modèles OpenAI
 MODEL_MAIN = "gpt-6-luna"
 
-# Fenêtre de contexte / budget de la session de chat
-# CONTEXT_WINDOW est la vraie limite (en tokens) ; MAX_MESSAGES est un filet
-# de comptage — le budget tokens décide aussi, en retirant des messages ENTIERS
-# (jamais de troncature au milieu d'un message, cf. ConversationContext.trim()).
-# ATTENTION : trim() déduit le prompt développeur ENTIER (instructions + contexte
-# salon + goûts + profils + mémoire, souvent 1800-2600 tokens une fois tout injecté)
-# de ce budget avant de calculer la place pour l'historique. 6000 s'est révélé encore
-# trop juste en pratique (amnésie dès qu'un render_widget ou un salon actif traîne
-# dans l'historique récent) → 10000 pour laisser une vraie marge à la conversation,
-# tout en restant loin de la fenêtre réelle du modèle.
+# trim() déduit aussi le prompt développeur du budget tokens.
 CONTEXT_WINDOW = 10000
 CONTEXT_AGE_HOURS = 2
-# Filet conservateur : évite qu'un salon très actif garde 3 h de pavés.
 MAX_MESSAGES = 80
-# Plafond, pas un coût fixe (une réponse courte ne consomme que ce qu'elle écrit).
-# Doit couvrir le pire cas d'un tool call render_widget rempli à fond : 12 blocs
-# à ~800 caractères chacun ≈ 2500 tokens rien que pour l'argument JSON — d'où la marge.
+# Couvre un render_widget dense (~2500 tokens d'arguments JSON).
 MAX_TOKENS = 5000
 
-# Debounce des réponses (regroupe les messages rapprochés d'UNE MÊME personne en un seul appel)
 DEBOUNCE_SECONDS: float = 0.33
-# Fenêtre unique pour les éditions (ping corrigé « marie » → « maria », ou
-# mise à jour in-place d'une réponse déjà postée). Au-delà : on ignore —
-# trop long = risque de relancer un message déjà modéré.
+# Édition tardive (ping corrigé / redo in-place) — hors fenêtre : ignorée.
 EDIT_UPDATE_WINDOW_SECONDS: float = 15
 
-# Mémoire long terme — carte d'identité, pas le journal du salon.
-# Le résumé de session couvre déjà le fil récent : on flush peu, on extrait peu.
 MEMORY_FLUSH_MESSAGES = 40
 MEMORY_FLUSH_MINUTES = 30
-MEMORY_DIRECT_FLUSH_MESSAGES = 12  # dialogue → MARIA : un peu plus tôt, pas gourmand
+MEMORY_DIRECT_FLUSH_MESSAGES = 12
 MEMORY_BUFFER_CAP = 80
-# RAG complémentaire (le perso vient surtout des 3 faits de profil).
 MEMORY_TOP_K = 2
 MEMORY_EXTRACT_MAX_ACTIONS = 5
 MEMORY_EXISTING_LIMIT = 16
-# Chevauchement entre lots : contexte du lot précédent, sans re-create.
 MEMORY_BATCH_OVERLAP = 5
-# Mini-profils injectés à chaque réponse (auteur + mentions/reply).
 MEMORY_PROFILE_FACTS = 3
-# Goûts / faits sur MARIA injectés à chaque réponse (constance des avis).
 MEMORY_SELF_FACTS = 6
-# Dédup sémantique à la création (distance cosine Chroma) : en dessous de ce seuil,
-# un souvenir actif existant est considéré comme "le même fait" et bloque la création.
+# Distance cosine Chroma sous laquelle un fait actif est traité comme doublon.
 MEMORY_SEMANTIC_DEDUP_DISTANCE = 0.1
-# Retrieval : au-delà, le voisin Chroma n'est pas assez proche (sauf match FTS).
 MEMORY_RAG_MAX_DISTANCE = 0.42
-# Pending auteur injecté dans le profil au-dessus de ce seuil.
 MEMORY_PENDING_PROFILE_MIN = 0.5
-# Archives SQLite purgées après ce délai.
 MEMORY_ARCHIVE_PURGE_DAYS = 90
 
-# Exemples de registre injectés dans le prompt (STYLE_EXAMPLES_SAMPLE tirés au hasard à
-# chaque réponse : varie le ton, évite que le modèle se fige sur un seul gabarit, et
-# coûte ~100 tokens). REMPLACE-LES par de vrais échanges du serveur : c'est ce qui
-# donne le meilleur résultat. Format : (message du membre, réponse de MARIA).
+# (message membre, réponse MARIA) — STYLE_EXAMPLES_SAMPLE tirés au hasard par réponse.
 STYLE_EXAMPLES: list[tuple[str, str]] = [
-    ("t'as vu le match hier ?", "ouais, 3-0 c'était violent"),
-    ("tu penses quoi de ce film ?", "overrated, la fin sauve rien"),
-    ("on mange où ce soir ?", "kebab, pas de débat"),
-    ("c'est quoi la capitale de l'Australie ?", "Canberra, pas Sydney comme tout le monde croit"),
-    ("j'ai raté mon exam", "aïe. t'as bossé au moins ou c'était cramé d'avance ?"),
-    ("tu dors jamais toi", "j'ai pas le choix, je suis un serveur"),
-    ("explique-moi comment marche le TCP", "en gros : poignée de main en 3 temps, puis les paquets partent numérotés et ce qui se perd est renvoyé. tu veux le détail ?"),
-    ("bonjour", "yo"),
+    ("t'as vu le match hier ?", "Oui. 3-0, c'était violent"),
+    ("tu penses quoi de ce film ?", "J'ai pas d'avis moi, mais les gens pensent que c'était un flop"),
+    ("on mange où ce soir ?", "Kebab ? Hop pas de débat"),
+    ("c'est quoi la capitale de l'Australie ?", "Canberra. Pas Sydney comme tout le monde pense..."),
+    ("j'ai raté mon exam", "d'accord, mais t'avais bossé ?"),
+    ("tu dors jamais toi", "J'ai pas le choix. Je suis un bot"),
+    ("explique-moi comment marche le TCP", "Comme une poignée de main en 3 temps, paquets numérotés, ce qui se perd est renvoyé. C'est bon ou j'explique plus en détail ?"),
+    ("salut", "Salut ouais."),
 ]
 STYLE_EXAMPLES_SAMPLE = 3
 
-# Pieds de page `-# …` : seuls les outils à effet visible ou à sources restent affichés.
-# Ces outils-là sont jugés « mécanique interne » et ne sont plus signalés.
+# Outils sans pied de page `-# …`.
 QUIET_FOOTER_TOOLS = frozenset({"search_memory", "search_images"})
 SHOW_MEMORY_CALLBACK_TAG = False

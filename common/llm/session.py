@@ -111,16 +111,11 @@ def _strip_trailing_foreign_junk(text: str) -> str:
 
 
 _REPLY_TAG_RE = re.compile(r"^\s*\[à [^\s\]]{1,40}\]\s*")
-# Marqueur de trou injecté dans le payload (« [… 5 messages omis · 45 min plus tard] »).
 _GAP_TAG_RE = re.compile(r"^\s*\[…[^\]\n]{1,80}\]\s*")
 
 
 def _strip_leaked_tokens(text: str) -> str:
-    # Les étiquettes d'historique (`[à X]`, `[… N messages omis]`) ne doivent jamais
-    # être recopiées dans la réponse.
     text = _GAP_TAG_RE.sub("", _REPLY_TAG_RE.sub("", text))
-    # Remplacer par un espace (pas une chaîne vide) pour ne pas coller les mots
-    # entourant le fragment retiré ; on nettoie ensuite les espaces doublés.
     cleaned = _LEAKED_TOKEN_RE.sub(" ", text)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
     return _strip_trailing_foreign_junk(cleaned)
@@ -499,16 +494,9 @@ class ChannelSession:
         self._prompt_context: Optional[dict] = None
         # Décision JEV / regex du tour courant (réutilisée pour retry grounding).
         self._cap_decision = None
-        # IDs Discord des messages déjà ingérés dans cette session (évite doublons de référence).
-        # Borné : `_ingested_order` donne l'ordre d'éviction, `_ingested_ids` le test d'appartenance O(1).
-        # `_ingested_records` garde une référence au MessageRecord produit, pour vérifier qu'il
-        # est ENCORE dans le contexte courant (trim() peut l'avoir évincé entre-temps) avant de
-        # se contenter d'un renvoi court type « [Suite de : X] » sans contenu.
         self._ingested_ids: set[int] = set()
         self._ingested_order: deque[int] = deque(maxlen=INGESTED_IDS_MAX)
         self._ingested_records: dict[int, MessageRecord] = {}
-        # Notes système injectées récemment (résultats d'outils, widgets affichés…).
-        # Surfacées dans le [FOCUS] pour que le LLM sache immédiatement le contexte actif.
         self._recent_system_notes: deque[tuple[datetime, str]] = deque(maxlen=6)
         self.artifacts = WorkingArtifacts()
 
@@ -657,8 +645,6 @@ class ChannelSession:
             ))
 
         # --- Texte principal ---
-        # Les messages non adressés au bot sont tagués [contexte] pour que le LLM
-        # ne les traite pas comme une question qui lui est posée.
         msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
         ctx_tag = "[contexte] " if is_context_only else ""
         shown = (message.clean_content or text).strip()
@@ -822,7 +808,6 @@ class ChannelSession:
         if focus_msg is not None and focus_msg.reference is not None:
             cited = await resolve_message_reference(focus_msg)
 
-        # Intent JEV / regex une fois par tour (réutilisé pour gating + force + retry).
         if depth == 0 and not skip_focus and focus_msg is not None:
             recent = self._recent_tool_names()
             self._cap_decision = await resolve_capabilities(
@@ -914,8 +899,6 @@ class ChannelSession:
                         hint += " Traite uniquement ce qu'iel a écrit."
                     else:
                         hint += " Son message est vide : la demande porte sur le message cité."
-            # Surfacer les notes système récentes (outils/widgets affichés dans cette session)
-            # pour que le LLM ait immédiatement le contexte actif sans fouiller l'historique.
             ctx_hint = self._build_context_hint()
             if ctx_hint:
                 hint = f"{hint}\n{ctx_hint}"
@@ -1049,7 +1032,7 @@ class ChannelSession:
         else:
             components.append(MetadataComponent("EMPTY"))
 
-        # À qui elle répond (affiché `[à X]` dans l'historique des tours suivants).
+        # À qui elle répond (préfixe `[à X]` dans les tours suivants).
         reply_to_name = None
         if not skip_focus and focus_msg is not None:
             reply_to_name = getattr(getattr(focus_msg, "author", None), "name", None)

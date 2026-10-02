@@ -1,4 +1,4 @@
-"""Contexte de conversation — fenêtre restreinte, trim simple."""
+"""Contexte de conversation — fenêtre tokens / âge / compte."""
 
 import json
 import re
@@ -10,27 +10,19 @@ import tiktoken
 
 TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
-# Fenêtre restreinte par défaut
 DEFAULT_WINDOW = 8192
 DEFAULT_AGE = timedelta(hours=2)
-# Budget type Honcho : messages récents vs résumé de session (tokens).
 SESSION_MSG_SHARE = 0.60
 SESSION_SUMMARY_CHARS = 1200
-# [contexte] récent gardé avec les messages adressés, pour résoudre « ça » et une faute.
 CONTEXT_KEEP_RECENT = 8
-# En dessous, une ligne [contexte] évincée (ok, mdr) ne revient pas dans le résumé.
 CONTEXT_CHATTER_MAX_WORDS = 3
 CONTEXT_CHATTER_MAX_CHARS = 20
-# Pause à partir de laquelle on signale « X min plus tard » entre deux messages.
 TIME_GAP_MARKER = timedelta(minutes=20)
-# « pseudo (id Discord) » : l'id n'est utile qu'à sa 1re apparition dans le payload.
 _NAME_ID_RE = re.compile(r"(?<![\w])([^\s()\[\]:|]{1,40}) \((\d{15,20})\)")
 
 
 @dataclass
 class ContentComponent:
-    """Composant de contenu (texte ou image)."""
-
     type: Literal["text", "image_url"]
     data: dict
     token_count: int = 0
@@ -53,14 +45,11 @@ class ImageComponent(ContentComponent):
         super().__init__(
             type="image_url",
             data={"type": "image_url", "image_url": {"url": url, "detail": detail}},
-            # low ≈ 85 tokens côté API ; high/auto restent une estimation haute.
             token_count=85 if detail == "low" else 250,
         )
 
 
 class MetadataComponent(ContentComponent):
-    """Métadonnée affichée comme texte."""
-
     def __init__(self, title: str, **meta):
         text = f"<{title.upper()}"
         if meta:
@@ -75,8 +64,6 @@ class MetadataComponent(ContentComponent):
 
 @dataclass
 class MessageRecord:
-    """Message dans l'historique."""
-
     role: Literal["user", "assistant", "developer", "tool"]
     components: list[ContentComponent]
     created_at: datetime
@@ -127,8 +114,6 @@ class ToolCallRecord:
 
 
 class AssistantRecord(MessageRecord):
-    """Message assistant avec tool calls optionnels."""
-
     def __init__(
         self,
         components: list[ContentComponent],
@@ -157,8 +142,6 @@ class AssistantRecord(MessageRecord):
 
 
 class ToolResponseRecord(MessageRecord):
-    """Réponse d'outil."""
-
     def __init__(
         self,
         tool_call_id: str,
@@ -166,7 +149,6 @@ class ToolResponseRecord(MessageRecord):
         created_at: datetime,
         **kwargs,
     ):
-        # Utiliser _llm_summary si disponible pour le token_count (cohérent avec to_payload)
         summary = response_data.get("_llm_summary")
         content = summary if summary else json.dumps(response_data, ensure_ascii=False)
         super().__init__(
@@ -189,7 +171,7 @@ class ToolResponseRecord(MessageRecord):
 
 
 def _is_context_chatter(message: "MessageRecord") -> bool:
-    """True si un [contexte] évincé ne dit presque rien (ok, mdr) — pas de résumé."""
+    """True pour un [contexte] trop court pour le résumé de session."""
     if not (message.metadata or {}).get("context_only"):
         return False
     text = (message.full_text or "").strip()
@@ -215,7 +197,6 @@ def _is_context_chatter(message: "MessageRecord") -> bool:
 
 
 def _counts_as_gap(message: "MessageRecord") -> bool:
-    """True si l'éviction de ce message laisse un vrai trou dans le fil visible."""
     if message.role == "tool" or getattr(message, "tool_calls", None):
         return False
     if message.role == "user" and getattr(message, "name", None) == "system":
@@ -226,7 +207,6 @@ def _counts_as_gap(message: "MessageRecord") -> bool:
 
 
 def _is_conversational(message: "MessageRecord") -> bool:
-    """Message de dialogue (membre ou réponse texte de MARIA), hors notes / outils."""
     if message.role == "assistant":
         return not getattr(message, "tool_calls", None)
     return message.role == "user" and getattr(message, "name", None) != "system"
@@ -250,8 +230,7 @@ def _gap_marker(omitted: int, pause: Optional[timedelta]) -> str:
 
 
 def _rewrite_text_parts(content, fn) -> list:
-    """Applique `fn(texte) -> texte` à chaque partie texte, en copiant les dicts modifiés
-    (les `data` des composants sont partagés avec le contexte : on ne les mute jamais)."""
+    """Copie les dicts texte avant mutation (`data` est partagé avec le contexte)."""
     if not isinstance(content, list):
         return content
     out: list = []
@@ -265,8 +244,6 @@ def _rewrite_text_parts(content, fn) -> list:
 
 
 class ConversationContext:
-    """Contexte restreint — trim par tokens, âge et nombre de messages."""
-
     def __init__(
         self,
         developer_prompt: str,
@@ -278,7 +255,7 @@ class ConversationContext:
         self.developer_prompt = developer_prompt
         self.context_window = context_window
         self.context_age = context_age
-        self.max_messages = max_messages  # 0 = pas de limite
+        self.max_messages = max_messages  # 0 = illimité
         self._messages: list[MessageRecord] = []
         self._needs_trim = False
         self.session_summary: str = ""
@@ -335,9 +312,7 @@ class ConversationContext:
         self.session_summary = ""
 
     def truncate_from(self, predicate) -> list["MessageRecord"]:
-        """Retire du contexte le premier message qui matche `predicate` ET tout ce
-        qui suit (réponse assistant, tool calls/réponses…). Retourne les messages
-        retirés (liste vide si rien ne matche)."""
+        """Retire le premier message matchant `predicate` et tout ce qui suit."""
         idx = None
         for i, m in enumerate(self._messages):
             if predicate(m):
@@ -349,36 +324,24 @@ class ConversationContext:
         self._messages = self._messages[:idx]
         return removed
 
-    # Notes système (injections post-widget) protégées contre l'éviction par âge.
     _SYSTEM_NOTE_MIN_AGE = timedelta(minutes=15)
 
     def trim(self) -> None:
-        """Supprime messages trop vieux, hors fenêtre tokens, ou hors plafond de messages.
-
-        Les notes système récentes (name='system', < 15 min) sont toujours conservées
-        même si leur âge dépasse context_age : elles portent le contexte actif (widget
-        affiché, match en cours…) indispensable à la cohérence de la prochaine réponse.
-        À budget égal, le [contexte] ancien part avant les messages adressés au bot,
-        les réponses, les tool-calls et une courte queue de [contexte] récent.
-        """
+        """Évince par âge, budget tokens, puis plafond de messages."""
         now = datetime.now(timezone.utc)
 
         def _keep_by_age(m: "MessageRecord") -> bool:
             age = now - m.created_at
             if age < self.context_age:
                 return True
-            # Notes système récentes protégées
             if m.role == "user" and getattr(m, "name", None) == "system":
                 return age < self._SYSTEM_NOTE_MIN_AGE
             return False
 
         aged_out = [m for m in self._messages if not _keep_by_age(m)]
         self._messages = [m for m in self._messages if _keep_by_age(m)]
-        # Le prompt développeur (instructions + profils injectés) consomme aussi la fenêtre :
-        # on le déduit du budget pour éviter de dépasser context_window une fois assemblé.
         dev_tokens = len(TOKENIZER.encode(self.developer_prompt)) if self.developer_prompt else 0
         effective_window = max(self.context_window - dev_tokens, 0)
-        # ~60 % messages récents / ~40 % résumé de session (injecté dans le prompt).
         if self.session_summary:
             msg_window = max(int(effective_window * SESSION_MSG_SHARE), 0)
         else:
@@ -408,10 +371,7 @@ class ConversationContext:
 
     @staticmethod
     def _record_gaps(before: list["MessageRecord"], kept: list["MessageRecord"]) -> None:
-        """Note, sur le message gardé qui suit un trou, combien de messages ont été
-        évincés juste avant (`gap_before`, cumulatif d'un trim à l'autre). Le trou
-        devient visible dans le payload au lieu de faire passer le fil pour continu.
-        Les trous en tête de fenêtre sont couverts par le résumé de session."""
+        """Cumule `gap_before` sur le message gardé qui suit un trou (hors tête de fenêtre)."""
         kept_ids = {id(m) for m in kept}
         missing = 0
         seen_kept = False
@@ -434,12 +394,7 @@ class ConversationContext:
     def _split_context_priority(
         cls, messages: list["MessageRecord"]
     ) -> tuple[list["MessageRecord"], list["MessageRecord"], list["MessageRecord"]]:
-        """Signal, [contexte] récent, [contexte] ancien.
-
-        Le signal (messages adressés, réponses, outils, notes) est rempli en premier.
-        Les CONTEXT_KEEP_RECENT derniers [contexte] suivent, pour que « ça » et une
-        faute se résolvent. Le reste du [contexte] ne rentre que s'il reste du budget.
-        """
+        """(signal, [contexte] récent, [contexte] ancien)."""
         ctx = [m for m in messages if cls._is_context_only(m)]
         recent_ids = {id(m) for m in ctx[-CONTEXT_KEEP_RECENT:]}
         signal: list[MessageRecord] = []
@@ -461,11 +416,7 @@ class ConversationContext:
         *,
         keep_oversize: bool = True,
     ) -> list["MessageRecord"]:
-        """Garde les plus récents de `pool` dans `budget` tokens.
-
-        `keep_oversize` : le plus récent est gardé même s'il dépasse seul
-        (le message à traiter). Le [contexte] de remplissage ne l'est pas.
-        """
+        """Plus récents de `pool` dans `budget` tokens."""
         if not pool:
             return []
         total = 0
@@ -487,7 +438,6 @@ class ConversationContext:
         kept: list["MessageRecord"],
         expendable: list["MessageRecord"],
     ) -> list["MessageRecord"]:
-        """Plafond de comptage : le [contexte] ancien part avant le reste."""
         if self.max_messages <= 0 or len(kept) <= self.max_messages:
             return kept
         overflow = len(kept) - self.max_messages
@@ -508,7 +458,6 @@ class ConversationContext:
         return [m for m in kept if id(m) not in drop]
 
     def _fold_evicted(self, messages: list["MessageRecord"]) -> None:
-        """Compacte les messages évincés dans `session_summary` (pas d'appel LLM chaud)."""
         bits: list[str] = []
         for m in messages:
             if m.role == "tool":
@@ -535,8 +484,6 @@ class ConversationContext:
 
     @staticmethod
     def _sanitize_tool_pairs(messages: list) -> list:
-        """Retire toute paire tool_call/tool_response incomplète, où qu'elle se trouve."""
-        # Collecte les IDs attendus par les assistant tool_calls
         required_ids: set[str] = set()
         present_ids: set[str] = set()
         for m in messages:
@@ -548,8 +495,8 @@ class ConversationContext:
                 if tid:
                     present_ids.add(tid)
 
-        orphan_calls = required_ids - present_ids   # tool_call sans réponse
-        orphan_responses = present_ids - required_ids  # réponse sans tool_call
+        orphan_calls = required_ids - present_ids
+        orphan_responses = present_ids - required_ids
 
         if not orphan_calls and not orphan_responses:
             return messages
@@ -560,7 +507,6 @@ class ConversationContext:
             if m.role == "assistant" and any(
                 tc.id in orphan_calls for tc in (getattr(m, "tool_calls", []) or [])
             ):
-                # Retire aussi les tool responses déjà associées à cet assistant (si présentes)
                 for tc in getattr(m, "tool_calls", []) or []:
                     skip_tool_ids.add(tc.id)
                 continue
@@ -586,13 +532,11 @@ class ConversationContext:
             carried_gap += m.metadata.get("gap_before", 0)
 
             if m.role == "user" and getattr(m, "name", None) != "system":
-                # Trou dans le fil / pause longue : signalé au 1er message de membre qui suit.
                 pause = (m.created_at - prev_t) if prev_t is not None else None
                 marker = _gap_marker(carried_gap, pause)
                 carried_gap = 0
 
                 def _dedupe(text: str) -> str:
-                    # L'id Discord n'est répété qu'à la 1re mention (économie de tokens).
                     def _sub(mo: re.Match) -> str:
                         if mo.group(2) in seen_ids:
                             return mo.group(1)
@@ -609,7 +553,6 @@ class ConversationContext:
                 and m.metadata.get("reply_to")
                 and isinstance(p.get("content"), list)
             ):
-                # À qui elle répondait : sans ça, un fil à plusieurs voix devient illisible.
                 tag = f"[à {m.metadata['reply_to']}] "
                 done = False
 
@@ -637,6 +580,5 @@ class ConversationContext:
         }
 
     def filter_images(self) -> None:
-        """Retire les images (pour retry après invalid_image_url)."""
         for m in self._messages:
             m.components = [c for c in m.components if c.type != "image_url"]

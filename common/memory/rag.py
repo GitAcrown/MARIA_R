@@ -321,7 +321,6 @@ async def retrieve_memories_async(
         kept.append((hit.score, candidates[hit.index]))
 
     if not kept:
-        # Tout filtré → fail-open sur le top legacy (évite un prompt vide par erreur JEV).
         return candidates[:top_k]
 
     kept.sort(key=lambda pair: -pair[0])

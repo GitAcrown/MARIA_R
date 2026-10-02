@@ -13,6 +13,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import section_with_thumbnail, suppress_link_embeds
+from common.layout_kit import sep_tight, sep_wide
 
 _MAX_BLOCKS = 12
 _MAX_STAT_ITEMS = 6
@@ -79,7 +80,7 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
     if title:
         head = f"## {emoji} {title}".strip() if emoji else f"## {title}"
         children.append(_text_block(head))
-        children.append(discord.ui.Separator())
+        children.append(sep_tight())
 
     for raw in blocks[:_MAX_BLOCKS]:
         if not isinstance(raw, dict):
@@ -90,7 +91,7 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
             if content:
                 children.append(_text_block(content))
         elif btype == "separator":
-            children.append(discord.ui.Separator())
+            children.append(sep_tight())
         elif btype == "stat_row":
             block = _stat_row_block(raw.get("items"))
             if block:
@@ -131,7 +132,7 @@ def render_free_widget(spec: Optional[dict], commentary: str = "") -> Optional[d
     view = discord.ui.LayoutView(timeout=None)
     if commentary:
         view.add_item(discord.ui.TextDisplay(suppress_link_embeds(commentary)))
-        view.add_item(discord.ui.Separator())
+        view.add_item(sep_tight())
     view.add_item(discord.ui.Container(*children))
 
     return view if view.children else None

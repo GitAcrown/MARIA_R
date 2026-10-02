@@ -860,7 +860,6 @@ class TaskWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # Une erreur ponctuelle (SQLite verrouillée…) ne doit pas tuer le worker.
                 logger.error("TaskWorker : itération échouée, nouvel essai dans 30 s", exc_info=True)
                 await asyncio.sleep(30)
                 continue

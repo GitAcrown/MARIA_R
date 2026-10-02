@@ -1,9 +1,4 @@
-"""Cache TTL minimal, thread-safe et borné — pour les appels d'API externes.
-
-Les outils réseau tournent dans `asyncio.to_thread` : plusieurs threads peuvent
-lire/écrire en parallèle, d'où le verrou. Seuls les succès doivent être mis en
-cache (l'appelant décide) pour ne jamais figer une erreur transitoire.
-"""
+"""Cache TTL borné, thread-safe."""
 
 from __future__ import annotations
 
@@ -41,7 +36,6 @@ class TTLCache:
             self._data[key] = (now, value)
 
     def _evict(self, now: float) -> None:
-        """Purge les expirés ; si c'est encore plein, retire le plus ancien."""
         expired = [k for k, (ts, _) in self._data.items() if now - ts >= self.ttl]
         for k in expired:
             del self._data[k]

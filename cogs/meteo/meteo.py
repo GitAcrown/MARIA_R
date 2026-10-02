@@ -16,6 +16,7 @@ from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.timezones import PARIS_TZ
 from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
+from common.layout_kit import sep_tight, sep_wide
 
 logger = logging.getLogger("MARIA.Meteo")
 
@@ -202,13 +203,13 @@ def _current_container(city: str, d: dict) -> discord.ui.Container:
     updated   = datetime.now(timezone.utc).strftime("%H:%M")
 
     header     = discord.ui.TextDisplay(f"## {_emoji(icon_code)} {city_full}")
-    sep1       = discord.ui.Separator()
+    sep1       = sep_wide()
     temp_block = discord.ui.TextDisplay(
         f"# {temp}°C\n"
         f"-# {description}  ·  ressenti **{feels}°C**  ·  {temp_min}° / {temp_max}°"
     )
 
-    sep2    = discord.ui.Separator()
+    sep2    = sep_tight()
     details = discord.ui.TextDisplay(
         f"💨 **{wind_kmh} km/h** {wind_dir}"
         f"  ·  💧 **{humidity}%**"
@@ -236,7 +237,7 @@ def _forecast_container(city: str, d: dict) -> discord.ui.Container:
         days[day_key]["descs"].append(item["weather"][0]["description"])
 
     header   = discord.ui.TextDisplay(f"## {city_full} — Prévisions 5 jours")
-    children: list = [header, discord.ui.Separator()]
+    children: list = [header, sep_wide()]
 
     for i, (_, info) in enumerate(list(days.items())[:5]):
         dt       = info["dt"]
@@ -252,7 +253,7 @@ def _forecast_container(city: str, d: dict) -> discord.ui.Container:
             f"{date_str}  {_emoji(icon)}  **{t_max}°** / {t_min}°  ·  {desc}"
         ))
         if i < 4:
-            children.append(discord.ui.Separator())
+            children.append(sep_tight())
 
     children += [discord.ui.TextDisplay(f"-# {updated} · OWM")]
     return discord.ui.Container(*children)
@@ -297,7 +298,7 @@ def _day_container(city: str, d: dict, target: date) -> discord.ui.Container:
     header = discord.ui.TextDisplay(
         f"## {_emoji(main_icon)} {day_label} · {city_full}"
     )
-    children: list = [header, discord.ui.Separator()]
+    children: list = [header, sep_wide()]
 
     # Tranches horaires
     period_lines = []
@@ -323,7 +324,7 @@ def _day_container(city: str, d: dict, target: date) -> discord.ui.Container:
 
     if period_lines:
         children.append(discord.ui.TextDisplay("\n".join(period_lines)))
-        children.append(discord.ui.Separator())
+        children.append(sep_tight())
 
     children.append(discord.ui.TextDisplay(
         f"🌡 **{t_max}°** / {t_min}°"

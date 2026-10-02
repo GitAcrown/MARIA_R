@@ -1,4 +1,4 @@
-"""Client TypeSafe / JEV — décisions structurées (adresse, intent, RAG, mémoire)."""
+"""Client TypeSafe / JEV."""
 
 from __future__ import annotations
 
@@ -11,16 +11,15 @@ from common.ttl_cache import TTLCache
 
 logger = logging.getLogger("llm.typesafe")
 
-# JEV vise ~150 ms : au-delà de ce plafond, mieux vaut le comportement legacy.
 REQUEST_TIMEOUT = 4.0
 
-# Seuils figés (plan JEV).
 ADDRESS_THRESHOLD = 0.65
 CATEGORY_CONFIDENCE = 0.5
 FORCE_CONFIDENCE = 0.5
 RAG_SCORE_MIN = 1.0
 RAG_CONFIDENCE_MIN = 0.4
-DURABLE_THRESHOLD = 0.6
+DURABLE_THRESHOLD = 0.5
+REACTION_CONFIDENCE = 0.45
 
 GATED_CATEGORIES = (
     "none",
@@ -54,11 +53,7 @@ class RelevanceHit:
 
 
 class MariaTypeSafeClient:
-    """Wrapper optionnel autour d'AsyncTypeSafeClient.
-
-    Sans clé API : `enabled` est False et toutes les méthodes échouent en
-    fail-open (le caller garde le comportement legacy).
-    """
+    """Wrapper AsyncTypeSafeClient. Sans clé : enabled=False, méthodes en fallback."""
 
     def __init__(
         self,
@@ -69,7 +64,6 @@ class MariaTypeSafeClient:
         self._api_key = (api_key or "").strip()
         self._model = model
         self._client: Any = None
-        # blob de message → tâche d'intent (en vol ou terminée), cf. prefetch_intent.
         self._intent_tasks = TTLCache(ttl=300, maxsize=256)
 
     @property
@@ -94,8 +88,7 @@ class MariaTypeSafeClient:
             self._client = None
 
     async def system_one(self, state: Any, questions: dict) -> Any | None:
-        """Un appel JEV, borné à REQUEST_TIMEOUT s : au-delà on retombe sur le legacy
-        (fail-open) plutôt que de retarder la réponse du bot."""
+        """Appel JEV borné à REQUEST_TIMEOUT ; None = timeout / erreur."""
         client = await self._ensure()
         if client is None:
             return None
@@ -104,7 +97,7 @@ class MariaTypeSafeClient:
                 client.system_one(state, questions), timeout=REQUEST_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.warning("TypeSafe system_one : timeout (%.1fs), fallback legacy", REQUEST_TIMEOUT)
+            logger.warning("TypeSafe system_one : timeout (%.1fs)", REQUEST_TIMEOUT)
             return None
         except Exception as e:
             logger.warning("TypeSafe system_one échoué: %s", e)
@@ -116,7 +109,7 @@ class MariaTypeSafeClient:
         *,
         bot_name: str,
     ) -> bool:
-        """True si l'auteur s'adresse au bot. Fail-open (True) sans JEV / erreur."""
+        """True si l'auteur s'adresse au bot. Sans JEV / erreur → True."""
         if not self.enabled:
             return True
         from typesafe_sdk import Noul
@@ -149,22 +142,17 @@ class MariaTypeSafeClient:
         return noul >= ADDRESS_THRESHOLD
 
     def prefetch_intent(self, text: str) -> None:
-        """Lance l'appel d'intent en tâche de fond (sans l'attendre). Le `resolve_intent`
-        suivant sur le même texte réutilise cette tâche : l'appel JEV se déroule en
-        parallèle du RAG / des profils au lieu de s'enchaîner derrière eux."""
+        """Démarre resolve_intent en arrière-plan (même clé = même tâche)."""
         blob = (text or "").strip()
         if not self.enabled or not blob or self._intent_tasks.get(blob) is not None:
             return
         try:
             self._intent_tasks.set(blob, asyncio.ensure_future(self._resolve_intent_uncached(blob)))
-        except RuntimeError:  # pas de boucle active : le resolve classique prendra le relais
+        except RuntimeError:
             pass
 
     async def resolve_intent(self, text: str) -> IntentDecision | None:
-        """Choice force_level + primary_category. None = fallback regex.
-
-        Résultat partagé par texte (TTL 5 min) : tâche déjà lancée par `prefetch_intent`,
-        régénération / édition du même message, etc. Un échec n'est jamais mémorisé."""
+        """force_level + primary_category. None = fallback regex. Cache TTL 5 min."""
         if not self.enabled:
             return None
         blob = (text or "").strip()
@@ -178,7 +166,6 @@ class MariaTypeSafeClient:
         if task is None:
             task = asyncio.ensure_future(self._resolve_intent_uncached(blob))
             self._intent_tasks.set(blob, task)
-        # shield : l'annulation d'un appelant ne doit pas tuer la tâche partagée.
         result = await asyncio.shield(task)
         if result is None:
             self._intent_tasks.discard(blob)
@@ -254,7 +241,7 @@ class MariaTypeSafeClient:
         query: str,
         contents: Sequence[str],
     ) -> list[RelevanceHit] | None:
-        """Score chaque candidat. None = garder le ranking legacy."""
+        """Score chaque candidat. None = ranking legacy."""
         if not self.enabled or not contents:
             return None
         from typesafe_sdk import Score
@@ -293,7 +280,6 @@ class MariaTypeSafeClient:
                     )
                 )
             except (KeyError, AttributeError, TypeError, ValueError):
-                # Candidat illisible → on le garde (fail-open partiel).
                 hits.append(RelevanceHit(index=i, score=RAG_SCORE_MIN, confidence=1.0))
         return hits
 
@@ -303,7 +289,7 @@ class MariaTypeSafeClient:
         action_content: str,
         batch_excerpt: str = "",
     ) -> bool:
-        """True si le fait mérite d'être stocké. Fail-open (True) sans JEV / erreur."""
+        """True si le fait est durable. Sans JEV / erreur → True."""
         if not self.enabled:
             return True
         from typesafe_sdk import Noul
@@ -351,7 +337,7 @@ class MariaTypeSafeClient:
         *,
         batch_excerpt: str = "",
     ) -> list[dict]:
-        """Filtre les actions d'extraction. Fail-open = liste inchangée."""
+        """Filtre les actions d'extraction. Sans JEV → liste inchangée."""
         if not self.enabled or not actions:
             return list(actions)
 
@@ -395,3 +381,56 @@ class MariaTypeSafeClient:
                     (action.get("content") or "")[:80],
                 )
         return kept
+
+    async def pick_reaction(
+        self,
+        message: str,
+        candidates: Sequence[Any],
+    ) -> Any | None:
+        """Choice parmi des EmojiCandidate + `none`. None = pas de réaction."""
+        if not candidates:
+            return None
+        if not self.enabled:
+            return None
+        from typesafe_sdk import Choice
+
+        # Clés stables e0..eN (noms Discord peuvent coller / se répéter).
+        criteria: dict[str, str] = {
+            "none": "No custom reaction fits; stay silent",
+        }
+        state: dict[str, Any] = {"message": (message or "").strip()[:500]}
+        by_key: dict[str, Any] = {}
+        for i, cand in enumerate(candidates[:8]):
+            key = f"e{i}"
+            by_key[key] = cand
+            samples = " | ".join((cand.samples or [])[:3]) or "(no samples yet)"
+            state[f"{key}_samples"] = samples[:400]
+            state[f"{key}_name"] = cand.name
+            criteria[key] = (
+                f"Custom emoji `{cand.name}` — members react with it on: {samples[:220]}"
+            )
+
+        result = await self.system_one(
+            state,
+            {
+                "reaction": Choice(
+                    instructions=(
+                        "Which guild custom reaction emoji fits `message`, matching how "
+                        "members actually use it (see each option's samples)? "
+                        "Pick `none` if nothing fits."
+                    ),
+                    criteria=criteria,
+                ),
+            },
+        )
+        if result is None:
+            return None
+        try:
+            ans = result.choices["reaction"]
+            choice = str(ans.choice or "none")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
+        if choice == "none" or conf < REACTION_CONFIDENCE:
+            return None
+        return by_key.get(choice)

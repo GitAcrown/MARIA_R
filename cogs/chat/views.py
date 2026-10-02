@@ -24,7 +24,9 @@ from common.menu_layout import (
     apply_view,
     send_ephemeral_menu,
     sep_tight,
+    sep_wide,
 )
+from common.layout_kit import title_text
 from common.memory.store import (
     CATEGORY_EVENT,
     CATEGORY_SERVER,
@@ -62,7 +64,7 @@ _TASK_PAGE = 5
 # UI — composants réutilisables
 # ---------------------------------------------------------------------------
 
-class InfoView(discord.ui.LayoutView):
+class InfoView(MariaLayout):
     """Stats de la session en cours — lecture seule."""
 
     def __init__(
@@ -75,16 +77,13 @@ class InfoView(discord.ui.LayoutView):
         super().__init__(timeout=60)
         ch_name = getattr(channel, "name", str(getattr(channel, "id", "?")))
 
-        header = discord.ui.TextDisplay(f"## {ch_name}")
-        sep = discord.ui.Separator()
-
         mode_labels = {
             "off": "Désactivé",
             "strict": "Mention ou réponse à MARIA",
             "greedy": "Mention + nom",
         }
         mode_str = mode_labels.get(mode, mode)
-        config = discord.ui.TextDisplay(f"**Mode** · {mode_str}")
+        header = title_text(ch_name, f"Mode · {mode_str}")
 
         if stats:
             ctx = stats["context_stats"]
@@ -99,7 +98,7 @@ class InfoView(discord.ui.LayoutView):
         else:
             session = discord.ui.TextDisplay("-# Aucune session active.")
 
-        self.add_item(discord.ui.Container(header, sep, config, discord.ui.Separator(), session))
+        self.set_layout([header, sep_wide(), session])
 
 
 def _ui_note_text(note: str) -> str:
@@ -119,13 +118,10 @@ def _append_controls(
 ) -> None:
     notif = _ui_note_text(note)
     if notif:
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(notif)]
+        children += [sep_tight(), discord.ui.TextDisplay(notif)]
     if rows:
-        children.append(discord.ui.Separator())
-        for i, row in enumerate(rows):
-            if i:
-                children.append(discord.ui.Separator())
-            children.append(row)
+        children.append(sep_tight())
+        children.extend(rows)
 
 
 def _is_memory_mod(member: discord.Member | discord.User) -> bool:

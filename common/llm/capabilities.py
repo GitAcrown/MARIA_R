@@ -372,7 +372,6 @@ def _blob_text(*messages: discord.Message | None) -> str:
 
 
 def intent_text(*messages: discord.Message | None) -> str:
-    """Texte exact envoyé à JEV pour l'intent (clé de partage avec `prefetch_intent`)."""
     return _blob_text(*messages)
 
 
@@ -462,7 +461,7 @@ async def resolve_capabilities(
     *messages: discord.Message | None,
     search_momentum: bool = False,
 ) -> CapabilityDecision:
-    """Merge flags structurels + intent JEV (ou regex thématique en fallback)."""
+    """Flags structurels + intent JEV (sinon regex)."""
     structural = collect_structural_flags(*messages)
     text = _blob_text(*messages)
 

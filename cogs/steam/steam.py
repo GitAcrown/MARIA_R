@@ -12,7 +12,8 @@ from discord.ext import commands
 from common.discord_ui import md_link, section_with_thumbnail
 from common.emojis import GAMES
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
-from common.media_hub import build_media_layout
+from common.layout_kit import card, sep_wide, title_text
+from common.media_hub import build_media_group, build_media_layout
 from common.ttl_cache import TTLCache
 from common.widgets import register_widget, unregister_widget
 
@@ -103,6 +104,11 @@ def build_game_view(data: dict, commentary: str = "") -> Optional[discord.ui.Lay
     )
 
 
+def build_game_group_view(datas: list, commentary: str = "") -> Optional[discord.ui.LayoutView]:
+    """Plusieurs jeux du même tour : un onglet par fiche."""
+    return build_media_group("steam", datas, commentary=commentary)
+
+
 def _game_container(r: dict) -> Optional[discord.ui.Container]:
     appid      = r.get("steam_appid") or r.get("id")
     name       = r.get("name", "?")
@@ -147,24 +153,21 @@ def _game_container(r: dict) -> Optional[discord.ui.Container]:
     # Thumbnail header Steam
     main_section = section_with_thumbnail(body_block, STEAM_HEADER.format(appid) if appid else None)
 
-    # Header + séparateur
-    header = discord.ui.TextDisplay(f"## {GAMES} {name}")
-    sep1   = discord.ui.Separator()
+    header_meta = "  ·  ".join(["Jeu", *genres[:3]])
+    header = title_text(f"{GAMES} {name}", header_meta)
+    sep1   = sep_wide()
 
-    # Footer méta
-    meta_parts = []
-    if genres:
-        meta_parts.append(", ".join(genres[:3]))
+    footer_parts = []
     if devs:
-        meta_parts.append(f"par {devs[0]}")
+        footer_parts.append(f"par {devs[0]}")
     if appid:
-        meta_parts.append(md_link("Steam", STEAM_STORE.format(appid)))
+        footer_parts.append(md_link("Steam", STEAM_STORE.format(appid)))
 
     children: list = [header, sep1, main_section]
-    if meta_parts:
-        children.append(discord.ui.TextDisplay(f"-# {' · '.join(meta_parts)}"))
+    if footer_parts:
+        children.append(discord.ui.TextDisplay(f"-# {' · '.join(footer_parts)}"))
 
-    return discord.ui.Container(*children)
+    return card(children, sticky_head=2)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +291,7 @@ class Steam(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Steam(bot))
-    register_widget("search_game", build_game_view)
+    register_widget("search_game", build_game_view, group_builder=build_game_group_view)
 
 
 async def teardown(bot: commands.Bot) -> None:

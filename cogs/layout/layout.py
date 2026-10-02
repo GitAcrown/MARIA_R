@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 from discord import app_commands
@@ -36,13 +36,71 @@ def build_render_widget_view(data: dict, commentary: str = "") -> Optional[disco
     return view
 
 
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "oui" if value else "non"
+    return str(value).replace("\n", " ").strip()[:_MAX_CELL]
+
+
+def _normalize_table(
+    headers: Any, rows: Any,
+) -> tuple[list[str], list[list[str]]]:
+    """Accepte les formes bancales que le modèle envoie souvent (liste plate, dicts…)."""
+    if headers is None:
+        headers = []
+    if isinstance(headers, str):
+        headers = [headers]
+    if not isinstance(headers, (list, tuple)):
+        headers = [headers]
+    headers = [_cell(h) for h in list(headers)[:_MAX_COLS]]
+
+    if rows is None:
+        rows = []
+    if isinstance(rows, str):
+        rows = [[rows]]
+    if not isinstance(rows, (list, tuple)):
+        rows = [[rows]]
+
+    raw = list(rows)
+    # Liste plate de scalaires → une ligne (si ça matche les headers) ou une colonne.
+    if raw and not any(isinstance(r, (list, tuple, dict)) for r in raw):
+        if headers and len(raw) == len(headers):
+            raw = [raw]
+        else:
+            raw = [[c] for c in raw]
+
+    out: list[list[str]] = []
+    for row in raw[:_MAX_ROWS]:
+        if isinstance(row, dict):
+            if headers:
+                out.append([_cell(row.get(h, "")) for h in headers])
+            else:
+                # Première ligne dict : les clés deviennent les headers.
+                if not headers:
+                    headers = [_cell(k) for k in list(row.keys())[:_MAX_COLS]]
+                out.append([_cell(row.get(h, "")) for h in headers])
+        elif isinstance(row, (list, tuple)):
+            out.append([_cell(c) for c in list(row)[:_MAX_COLS]])
+        else:
+            out.append([_cell(row)])
+
+    ncols = max(len(headers), max((len(r) for r in out), default=0))
+    if ncols == 0:
+        return [], []
+    if not headers:
+        headers = [f"Col{i + 1}" for i in range(ncols)]
+    headers = (headers + [""] * ncols)[:ncols]
+    out = [(r + [""] * ncols)[:ncols] for r in out]
+    return headers, out
+
+
 def _render_table(headers: list, rows: list) -> str:
     """Génère un tableau ASCII dans un codeblock Discord."""
-    if not rows and not headers:
+    headers, rows = _normalize_table(headers, rows)
+    if not rows:
         return ""
-
-    headers = [str(h)[:_MAX_CELL] for h in (headers or [])[:_MAX_COLS]]
-    rows    = [[str(c)[:_MAX_CELL] for c in row[:_MAX_COLS]] for row in rows[:_MAX_ROWS]]
 
     if _HAS_TABULATE:
         table = _tabulate(rows, headers=headers, tablefmt="simple")
@@ -50,16 +108,18 @@ def _render_table(headers: list, rows: list) -> str:
         col_widths = [len(h) for h in headers]
         for row in rows:
             for i, cell in enumerate(row):
-                if i < len(col_widths):
-                    col_widths[i] = max(col_widths[i], len(cell))
-        sep  = "  ".join("-" * w for w in col_widths)
+                col_widths[i] = max(col_widths[i], len(cell))
+        sep = "  ".join("-" * w for w in col_widths)
         head = "  ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
         body = "\n".join(
-            "  ".join((cell if i < len(row) else "").ljust(col_widths[i]) for i, cell in enumerate(row))
+            "  ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
             for row in rows
         )
-        table = f"{head}\n{sep}\n{body}" if headers else body
+        table = f"{head}\n{sep}\n{body}"
 
+    # Discord : rester sous 1900 pour laisser de la marge au commentaire.
+    if len(table) > 1900:
+        table = table[:1897].rstrip() + "…"
     return f"```\n{table}\n```"
 
 
@@ -90,15 +150,19 @@ class Layout(commands.Cog):
 
     def _tool_render_table(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
         headers = tc.arguments.get("headers") or []
-        rows    = tc.arguments.get("rows") or []
-        if not rows:
-            return ToolResponseRecord(tc.id, {"error": "Aucune ligne fournie."}, datetime.now(timezone.utc))
+        rows = tc.arguments.get("rows") or []
         table = _render_table(headers, rows)
         if not table:
-            return ToolResponseRecord(tc.id, {"error": "Tableau vide."}, datetime.now(timezone.utc))
+            return ToolResponseRecord(
+                tc.id, {"error": "Aucune ligne utilisable."}, datetime.now(timezone.utc),
+            )
         return ToolResponseRecord(tc.id, {
+            "_tool": "render_table",
+            "_llm_summary": (
+                "Tableau affiché dans le salon. "
+                "Commente en une phrase max, ou ne dis rien. Ne recolle pas le tableau."
+            ),
             "table": table,
-            "note":  "Colle ce bloc tel quel dans ta réponse, sans le modifier.",
         }, datetime.now(timezone.utc))
 
     def _tool_render_widget(self, tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -117,9 +181,10 @@ class Layout(commands.Cog):
             Tool(
                 name="render_table",
                 description=(
-                    "Met en forme un tableau aligné (tabulate) renvoyé dans un codeblock prêt à coller. "
-                    "À utiliser dès qu'une réponse contient un tableau, pour un rendu propre et lisible. "
-                    "Fournir headers (colonnes) et rows (liste de lignes, chaque ligne = liste de cellules)."
+                    "Affiche un tableau aligné (codeblock) directement dans le salon. "
+                    "À utiliser dès qu'une réponse mérite un tableau lisible. "
+                    "Fournir headers (colonnes) et rows (liste de lignes = listes de cellules). "
+                    "Ne pas recopier le tableau dans le message : il est posté automatiquement."
                 ),
                 properties={
                     "headers": {
@@ -136,6 +201,7 @@ class Layout(commands.Cog):
                         },
                     },
                 },
+                optional_props=["headers"],
                 function=self._tool_render_table,
             ),
             Tool(
