@@ -22,7 +22,8 @@ from discord.ext import commands, tasks
 from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
-from common.emoji_usage import CHROME_EMOJI_IDS, EmojiUsageTracker, unicode_emoji_id
+from common.temperature import ChannelTemperature
+from common.emoji_usage import CHROME_EMOJI_IDS, EmojiUsageTracker, strip_emojis, unicode_emoji_id
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.llm import MariaGptApi, Tool, resolve_message_reference
@@ -117,6 +118,37 @@ _TASK_TOOL_DENY: frozenset[str] = frozenset({
     "get_server_users", "get_member_info", "get_channel_info",
     "about_me", "summarize_channel",
 })
+
+_CUSTOM_EMOJI_MARKUP_RE = re.compile(r"<a?:\w+:\d+>")
+_GREETING_PREFIX = r"(?:(?:hey|hé|he|ey|yo|salut|coucou|bonjour|bonsoir|hello|hi|dis|oh|ohé|eh|ok|okay)[\s,!]+)?"
+_SUMMON_NOT_FOLLOWED = r"(?!\s+(?:et|ou|&|\+|avec)\b)"
+
+
+def _name_is_direct_summon(content: str, bot_name: str) -> bool:
+    """Nom en tête de message (ou seul) : on s'adresse à elle, sans arbitrage JEV.
+
+    Exclut les listes (« Maria et Paul… », « Maria, Paul, Jean… »).
+    """
+    name = (bot_name or "").strip().lower()
+    if not name:
+        return False
+    text = _CUSTOM_EMOJI_MARKUP_RE.sub(" ", content or "")
+    text = strip_emojis(text).lower().strip()
+    if not text:
+        return False
+    esc = re.escape(name)
+    if re.fullmatch(rf"@?{esc}[\s!?.…]*", text):
+        return True
+    head = re.match(rf"{_GREETING_PREFIX}@?{esc}(?![a-z0-9_])", text)
+    if head is None:
+        return False
+    rest = text[head.end():]
+    if re.match(r"\s+(?:et|ou|&|\+|avec)\b", rest):
+        return False
+    if re.match(r"\s*,\s*[^,\n]{1,25},", rest):
+        return False
+    return True
+
 
 def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
     """True si le nom du bot apparaît comme mot (pas un fragment d'un autre mot)."""
@@ -616,6 +648,8 @@ class Chat(commands.Cog):
         self._followups: dict[tuple[int, int], _Followup] = {}
         self._pending_name_ack: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
+        # Chaleur du salon : nom cité souvent -> un « ignorer » JEV devient réaction / réponse.
+        self.temperature = ChannelTemperature()
         # Messages que JEV a jugé « à répondre » : pas de silence possible, typing immédiat.
         self._confirmed_reply: deque[int] = deque(maxlen=200)
         # (auteur_id, auteur_bot, extrait) des messages récents : évite un fetch API par réaction.
@@ -950,14 +984,26 @@ class Chat(commands.Cog):
             return self.data.get(target).settings("channel_config")
         return {}
 
+    def _bot_names(self, guild: discord.Guild | None) -> list[str]:
+        """Nom du compte + pseudo sur le serveur (ex. compte « Koala », pseudo « Maria »)."""
+        names: list[str] = []
+        if self.bot.user:
+            names.append(self.bot.user.name)
+        me = getattr(guild, "me", None)
+        nick = getattr(me, "display_name", None)
+        if nick and nick.casefold() not in {n.casefold() for n in names}:
+            names.append(nick)
+        return names
+
     def _name_hit_for_memory(self, message: discord.Message) -> bool:
         """Nom de MARIA cité en mode greedy : le message compte comme adressé pour la mémoire,
         même si le filtre JEV d'adresse décide de ne pas répondre."""
         if not message.guild or not self.bot.user:
             return False
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
-        return mode == "greedy" and _greedy_name_addresses_bot(
-            message.content or "", self.bot.user.name,
+        return mode == "greedy" and any(
+            _greedy_name_addresses_bot(message.content or "", n)
+            for n in self._bot_names(message.guild)
         )
 
     async def _should_respond_async(
@@ -971,9 +1017,29 @@ class Chat(commands.Cog):
         if reply_to_bot:
             return True
         if mode == "greedy" and self.bot.user:
-            if _greedy_name_addresses_bot(message.content, self.bot.user.name):
+            names = [
+                n for n in self._bot_names(message.guild)
+                if _greedy_name_addresses_bot(message.content, n)
+            ]
+            if names:
+                channel_id = message.channel.id
+                heat = self.temperature.value(channel_id)
+                self.temperature.bump(channel_id)
+                if any(_name_is_direct_summon(message.content, n) for n in names):
+                    self._confirmed_reply.append(message.id)
+                    return True
                 decision = await self.typesafe.classify_bot_mention(
-                    message.content or "", bot_name=self.bot.user.name,
+                    _CUSTOM_EMOJI_MARKUP_RE.sub(
+                        lambda m: ":" + m.group(0).split(":")[1] + ":", message.content or "",
+                    ),
+                    bot_name=names[0],
+                )
+                verdict = decision
+                decision = self.temperature.soften(decision, heat)
+                logger.info(
+                    "Nom cité dans #%s → JEV : %s%s (chaleur %.1f)",
+                    channel_id, verdict,
+                    f" → {decision}" if decision != verdict else "", heat,
                 )
                 if decision == "respond":
                     self._confirmed_reply.append(message.id)

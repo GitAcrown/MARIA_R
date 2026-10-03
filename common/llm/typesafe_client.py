@@ -221,11 +221,11 @@ class MariaTypeSafeClient:
         if choice not in ("respond", "react", "ignore"):
             return "respond"
         if conf < CATEGORY_CONFIDENCE:
-            # Réaction à faible confiance → ignore (évite le spam).
-            # Réponse : fail-open léger si le modèle penche quand même respond.
+            # Incertain : jamais « ignorer » (réservé aux mentions clairement passives).
+            # Le modèle penche respond (≥ 0.35) → respond, sinon au minimum une réaction.
             if choice == "respond" and conf >= 0.35:
                 return "respond"
-            return "ignore"
+            return "react"
         return choice
 
     def prefetch_intent(self, text: str) -> None:
