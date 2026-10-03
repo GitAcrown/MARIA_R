@@ -15,6 +15,7 @@ from common.tasks import (
     SCHEDULE_WEEKLY,
     STATUS_PAUSED,
     STATUS_PENDING,
+    STATUS_RUNNING,
     TASK_INSTRUCTION_MAX,
     TASK_MAX_DAYS,
     TASK_MAX_PENDING,
@@ -94,6 +95,40 @@ def _format_widget_line(item: dict) -> str:
         )
     dest = " · MP" if item.get("deliver_dm") else ""
     return f"-# <t:{ts}:f> (<t:{ts}:R>){dest}{status_bit}\n› {desc}"
+
+
+def _clip_text(text: str, n: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _llm_task_line(item: dict) -> str:
+    """Ligne vue par le modèle : l'ID est indispensable pour annuler / modifier."""
+    when = datetime.fromtimestamp(item["execute_at_ts"], PARIS_TZ).strftime("%d/%m %H:%M")
+    kind = item.get("schedule_kind") or SCHEDULE_ONCE
+    sched = "une fois" if kind == SCHEDULE_ONCE else item.get("schedule_label", kind)
+    label = _clip_text(item.get("title") or item.get("instruction") or "", 70)
+    flags = ""
+    if item.get("status") == STATUS_PAUSED:
+        flags += " [en pause]"
+    if item.get("deliver_dm"):
+        flags += " [MP]"
+    return f"#{item['id']} « {label} » · {sched} · prochaine {when}{flags}"
+
+
+def _llm_tasks_summary(items: list[dict], header: str) -> str:
+    if not items:
+        return "Aucune tâche en attente."
+    return header + "\n" + "\n".join(_llm_task_line(it) for it in items)
+
+
+def _coerce_task_id(raw) -> Optional[int]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return int(raw) or None
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    return int(digits) if digits else None
 
 
 def _accent_kwargs(accent) -> dict:
@@ -238,6 +273,38 @@ async def _resolve_member(ctx, args: dict) -> tuple[Optional[discord.abc.User], 
     if not member:
         return None, "Membre introuvable"
     return member, None
+
+
+async def _resolve_task(store: TaskStore, user_id: int, args: dict) -> tuple[Optional[ScheduledTask], str]:
+    """Cible d'un manage_task : task_id (« 12 », « #12 »), sinon `query`, sinon l'unique tâche."""
+    tasks = await asyncio.to_thread(store.get_user_tasks, user_id)
+    items = [_serialize_task(t) for t in tasks]
+    listing = "\n".join(_llm_task_line(it) for it in items)
+    tid = _coerce_task_id(args.get("task_id"))
+    if tid is not None:
+        for t in tasks:
+            if t.id == tid:
+                return t, ""
+        running = await asyncio.to_thread(store.get, tid)
+        if running is not None and running.user_id == user_id and running.status == STATUS_RUNNING:
+            return running, ""
+        hint = f" Tes tâches :\n{listing}" if listing else " Tu n'as aucune tâche active."
+        return None, f"Tâche #{tid} introuvable parmi tes tâches actives.{hint}"
+    query = " ".join(str(args.get("query") or "").split()).casefold()
+    if query:
+        hits = [t for t in tasks if query in f"{t.title} {t.instruction}".casefold()]
+        if len(hits) == 1:
+            return hits[0], ""
+        if not hits:
+            hint = f" Tes tâches :\n{listing}" if listing else ""
+            return None, f"Aucune tâche ne correspond à « {query} ».{hint}"
+        lines = "\n".join(_llm_task_line(_serialize_task(t)) for t in hits)
+        return None, f"Plusieurs tâches correspondent, précise l'ID :\n{lines}"
+    if len(tasks) == 1:
+        return tasks[0], ""
+    if not tasks:
+        return None, "Tu n'as aucune tâche active."
+    return None, f"Précise laquelle (task_id) :\n{listing}"
 
 
 def build_task_tools(store: TaskStore) -> list[Tool]:
@@ -388,7 +455,10 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "via": dest,
             **payload,
             "accent_colour": accent,
-            "_llm_summary": f"Tâche programmée ({label}, {dest}).",
+            "_llm_summary": (
+                f"Tâche #{tid} programmée ({label}, {dest}) : "
+                f"{_llm_task_line(payload)}."
+            ),
         }, datetime.now(timezone.utc))
 
     async def _tool_manage(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -403,17 +473,22 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             items = [_serialize_task(t) for t in tasks]
             return ToolResponseRecord(tc.id, {
                 "tasks": items,
-                "_llm_summary": f"{len(items)} tâche(s) active(s)." if items else "Aucune tâche en attente.",
+                "_llm_summary": _llm_tasks_summary(
+                    items, f"{len(items)} tâche(s) active(s) (utilise l'ID #n pour agir) :",
+                ),
             }, datetime.now(timezone.utc))
 
-        tid = args.get("task_id")
-        if not tid:
-            return ToolResponseRecord(
-                tc.id,
-                {"error": "task_id manquant. Appelle manage_task action=list pour les IDs."},
-                datetime.now(timezone.utc),
-            )
-        tid = int(tid)
+        if action == "cancel_all":
+            n = await asyncio.to_thread(store.cancel_all, user_id)
+            return ToolResponseRecord(tc.id, {
+                "success": True, "cancelled": n,
+                "_llm_summary": f"{n} tâche(s) annulée(s)." if n else "Aucune tâche à annuler.",
+            }, datetime.now(timezone.utc))
+
+        target, why = await _resolve_task(store, user_id, args)
+        if target is None:
+            return ToolResponseRecord(tc.id, {"error": why}, datetime.now(timezone.utc))
+        tid = target.id
 
         if action == "cancel":
             ok = await asyncio.to_thread(store.cancel, tid, user_id)
@@ -422,9 +497,13 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     tc.id, {"error": "Tâche introuvable ou pas la tienne."},
                     datetime.now(timezone.utc),
                 )
+            left = await asyncio.to_thread(store.count_active, user_id)
             return ToolResponseRecord(tc.id, {
                 "success": True, "task_id": tid,
-                "_llm_summary": "Tâche annulée.",
+                "_llm_summary": (
+                    f"Tâche #{tid} « {_clip_text(target.title or target.instruction, 60)} » annulée. "
+                    f"Il te reste {left} tâche(s) active(s)."
+                ),
             }, datetime.now(timezone.utc))
 
         if action == "pause":
@@ -568,7 +647,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
 
         return ToolResponseRecord(
             tc.id,
-            {"error": "action inconnue (list|edit|pause|resume|skip|cancel)"},
+            {"error": "action inconnue (list|edit|pause|resume|skip|cancel|cancel_all)"},
             datetime.now(timezone.utc),
         )
 
@@ -587,7 +666,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
             "tasks": items,
             "accent_colour": member_accent_value(ctx.trigger_message.author),
             "_llm_summary": (
-                f"Widget tâches de {name} affiché ({len(items)})."
+                _llm_tasks_summary(items, f"Widget tâches de {name} affiché ({len(items)}) :")
                 if items else f"Aucune tâche en attente pour {name}."
             ),
         }, datetime.now(timezone.utc))
@@ -599,6 +678,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                 "Programme une tâche que tu exécuteras à l'heure H "
                 "(rappel, météo, recherche…). "
                 f"Max {TASK_MAX_PENDING} tâches par personne, dont {TASK_MAX_RECURRING} répétitives (daily/weekly). "
+                "Une tâche répétitive ne s'exécute jamais plus d'une fois par jour. "
                 f"execute_at ISO 8601 (Paris si naïf) prioritaire, sinon delay_minutes/hours. "
                 f"Minimum ~{TASK_MIN_MINUTES} min. Max {TASK_MAX_DAYS}j. recurrence once|daily|weekly ; "
                 "weekly : weekdays=mon,tue,wed,thu,fri et time=HH:MM. until optionnel. "
@@ -643,16 +723,19 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
         Tool(
             name="manage_task",
             description=(
-                "Gère tes tâches : list (IDs), edit, pause, resume, skip (saute la prochaine), cancel. "
-                "list si l'ID est inconnu."
+                "Gère tes tâches : list (IDs), edit, pause, resume, skip (saute la prochaine), "
+                "cancel (une tâche), cancel_all (toutes). Cible : task_id (#n de list) OU query "
+                "(mots de la consigne) ; sans cible s'il n'y a qu'une tâche. "
+                "Annuler = appelle cancel directement avec la query si l'ID est inconnu."
             ),
             properties={
                 "action": {
                     "type": "string",
-                    "enum": ["list", "edit", "pause", "resume", "skip", "cancel"],
+                    "enum": ["list", "edit", "pause", "resume", "skip", "cancel", "cancel_all"],
                     "description": "Action à faire",
                 },
-                "task_id": {"type": "integer", "description": "ID (sauf list)"},
+                "task_id": {"type": "integer", "description": "ID #n (sauf list / cancel_all)"},
+                "query": {"type": "string", "description": "Mots de la consigne/titre pour viser la tâche si l'ID est inconnu"},
                 "instruction": {"type": "string", "description": "Nouvelle consigne (edit)"},
                 "execute_at": {"type": "string", "description": "Nouvelle date ISO 8601 (edit)"},
                 "recurrence": {
@@ -669,7 +752,7 @@ def build_task_tools(store: TaskStore) -> list[Tool]:
                     "description": "dm seulement si demandé explicitement (MP/DM/message privé)",
                 },
             },
-            optional_props=["task_id", "instruction", "execute_at", "recurrence", "weekdays", "time", "until", "via"],
+            optional_props=["task_id", "query", "instruction", "execute_at", "recurrence", "weekdays", "time", "until", "via"],
             function=_tool_manage,
         ),
         Tool(

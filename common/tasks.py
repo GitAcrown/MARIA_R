@@ -226,6 +226,24 @@ def snap_execute_at(
     return next_occurrence(dummy, after=min_at - timedelta(seconds=1))
 
 
+def _paris_date(dt: datetime):
+    return _as_utc(dt).astimezone(PARIS_TZ).date()
+
+
+def _end_of_paris_day(now: datetime) -> datetime:
+    """Dernier instant (UTC) de la journée calendaire Paris de `now`."""
+    local = _as_utc(now).astimezone(PARIS_TZ)
+    start = datetime(local.year, local.month, local.day, tzinfo=PARIS_TZ)
+    return (start + timedelta(days=1)).astimezone(timezone.utc) - timedelta(microseconds=1)
+
+
+def already_ran_today(task: ScheduledTask, now: Optional[datetime] = None) -> bool:
+    """Série (daily/weekly) déjà exécutée aujourd'hui (jour Paris) : pas de 2e passage."""
+    if task.schedule_kind == SCHEDULE_ONCE or task.last_run_at is None:
+        return False
+    return _paris_date(task.last_run_at) == _paris_date(now or datetime.now(timezone.utc))
+
+
 def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
     keys = r.keys()
     return ScheduledTask(
@@ -561,24 +579,52 @@ class TaskStore:
                 )
 
     def claim_due(self) -> Optional[ScheduledTask]:
-        """Passe la plus ancienne tâche due en running. None si rien."""
-        now = datetime.now(timezone.utc).isoformat()
+        """Passe la plus ancienne tâche due en running. None si rien.
+
+        Garde-fou : une tâche répétitive déjà exécutée aujourd'hui (jour Paris) n'est jamais
+        relancée dans la même journée (édition d'heure, reprise, rattrapage…) : elle est
+        repoussée à sa prochaine occurrence des jours suivants.
+        """
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
         with _db() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM tasks
-                WHERE status=? AND execute_at <= ?
-                ORDER BY execute_at LIMIT 1
-                """,
-                (STATUS_PENDING, now),
-            ).fetchone()
-            if not row:
-                return None
-            cur = conn.execute(
-                "UPDATE tasks SET status=? WHERE id=? AND status=?",
-                (STATUS_RUNNING, row["id"], STATUS_PENDING),
-            )
-            if cur.rowcount == 0:
+            for _ in range(50):
+                row = conn.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE status=? AND execute_at <= ?
+                    ORDER BY execute_at LIMIT 1
+                    """,
+                    (STATUS_PENDING, now),
+                ).fetchone()
+                if not row:
+                    return None
+                task = _row_to_task(row)
+                if task.retries == 0 and already_ran_today(task, now_dt):
+                    nxt = next_occurrence(task, after=_end_of_paris_day(now_dt))
+                    if nxt is None:
+                        conn.execute(
+                            "UPDATE tasks SET status=? WHERE id=?",
+                            (STATUS_COMPLETED, task.id),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE tasks SET execute_at=? WHERE id=?",
+                            (nxt.isoformat(), task.id),
+                        )
+                    logger.info(
+                        "Tâche #%s déjà exécutée aujourd'hui : reportée au %s",
+                        task.id, nxt.isoformat() if nxt else "— (terminée)",
+                    )
+                    continue
+                cur = conn.execute(
+                    "UPDATE tasks SET status=? WHERE id=? AND status=?",
+                    (STATUS_RUNNING, row["id"], STATUS_PENDING),
+                )
+                if cur.rowcount == 0:
+                    return None
+                break
+            else:
                 return None
         return self.get(row["id"])
 
@@ -600,17 +646,17 @@ class TaskStore:
             )
 
     def mark_failed(self, task_id: int, error: str = "") -> None:
-        now = datetime.now(timezone.utc).isoformat()
         with _db() as conn:
             conn.execute(
-                "UPDATE tasks SET status=?, last_run_at=?, last_error=? WHERE id=?",
-                (STATUS_FAILED, now, (error or "")[:300], task_id),
+                "UPDATE tasks SET status=?, last_error=? WHERE id=?",
+                (STATUS_FAILED, (error or "")[:300], task_id),
             )
 
     def reschedule_after_run(self, task: ScheduledTask) -> Optional[datetime]:
         """Après un fire réussi : prochaine occ. ou completed. Retourne la date ou None."""
         now = datetime.now(timezone.utc)
-        nxt = next_occurrence(task, after=now)
+        # Série : la prochaine occurrence est toujours un jour (Paris) ultérieur.
+        nxt = next_occurrence(task, after=_end_of_paris_day(now))
         now_iso = now.isoformat()
         with _db() as conn:
             if nxt is None:

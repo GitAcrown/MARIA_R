@@ -15,7 +15,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import member_accent_colour
-from common.emojis import PENCIL, REPEAT_REMINDER, SMALL_TASK
+from common.emojis import REPEAT_REMINDER
 from common.menu_layout import (
     HubPageButton,
     HubTabButton,
@@ -1085,11 +1085,6 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     return [ordered[i:i + _TASK_PAGE] for i in range(0, len(ordered), _TASK_PAGE)]
 
 
-def _task_heading(t: ScheduledTask) -> str:
-    raw = (t.title or "").strip() or (t.instruction or "").strip() or "Sans consigne"
-    return f"**{' '.join(raw.split())}**"
-
-
 def _task_meta(t: ScheduledTask) -> str:
     ts = int(t.execute_at.timestamp())
     bits: list[str] = [_task_status_label(t)]
@@ -1101,17 +1096,32 @@ def _task_meta(t: ScheduledTask) -> str:
     return " · ".join(bits)
 
 
-def _task_catalog_items(hub: "TasksView", t: ScheduledTask) -> list[discord.ui.Item]:
-    """Consigne en pleine largeur (elle wrappe) ; le crayon reste sur la ligne méta."""
-    meta: list[discord.ui.TextDisplay] = [
-        discord.ui.TextDisplay(f"-# {_task_meta(t)}"),
-    ]
+def _task_meta_plain(t: ScheduledTask) -> str:
+    local = t.execute_at.astimezone(PARIS_TZ)
+    bits = [_task_status_label(t)]
+    if t.schedule_kind != SCHEDULE_ONCE:
+        bits.append(format_schedule(t))
+    bits.append(local.strftime("%d/%m %H:%M"))
+    if t.deliver_dm:
+        bits.append("MP")
+    return " · ".join(bits)
+
+
+def _task_label(t: ScheduledTask, default: str = "Sans consigne") -> str:
+    return " ".join(((t.title or "").strip() or (t.instruction or "").strip() or default).split())
+
+
+def _task_catalog_text(t: ScheduledTask) -> discord.ui.TextDisplay:
+    """Bloc CRIT : `###` titre, consigne si elle diffère, ligne méta `-#`."""
+    heading = _task_label(t)
+    lines = [f"### {_clip(heading, 90)}"]
+    instr = " ".join((t.instruction or "").split())
+    if instr and instr != heading:
+        lines.append(_clip(instr, 160))
+    lines.append(f"-# #{t.id} · {_task_meta(t)}")
     if t.last_error:
-        meta.append(discord.ui.TextDisplay(f"-# {_clip(t.last_error, 80)}"))
-    return [
-        discord.ui.TextDisplay(_task_heading(t)),
-        discord.ui.Section(*meta, accessory=_OpenTaskButton(hub, t)),
-    ]
+        lines.append(f"-# {_clip(t.last_error, 80)}")
+    return discord.ui.TextDisplay("\n".join(lines))
 
 
 def _format_task_body(t: ScheduledTask) -> str:
@@ -1308,20 +1318,30 @@ class _ConfirmCancelAllTasksButton(discord.ui.Button):
         await self._hub.reload(interaction, note=f"{n} tâche(s) annulée(s).")
 
 
-class _OpenTaskButton(discord.ui.Button):
-    def __init__(self, hub: "TasksView", task: ScheduledTask):
-        super().__init__(
-            style=discord.ButtonStyle.secondary,
-            emoji=discord.PartialEmoji.from_str(PENCIL),
-        )
+class _OpenTaskSelect(discord.ui.Select):
+    """Ouvre le détail d'une tâche de la page (comme `ListsHubOpenSelect` de CRIT)."""
+
+    def __init__(self, hub: "TasksView", tasks: list[ScheduledTask]):
+        options = [
+            discord.SelectOption(
+                label=_clip(f"#{t.id} · {_task_label(t)}", 100),
+                value=str(t.id),
+                description=_clip(_task_meta_plain(t), 100),
+            )
+            for t in tasks
+        ]
+        super().__init__(placeholder="Ouvrir une tâche…", options=options, min_values=1, max_values=1)
         self._hub = hub
-        self.task = task
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _task_deny(interaction, self._hub.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
-        self._hub.selected = self.task
+        tid = int(self.values[0])
+        task = next((t for t in self._hub.tasks if t.id == tid), None)
+        if task is None:
+            return await self._hub.reload(interaction, note="Tâche introuvable.")
+        self._hub.selected = task
         self._hub.screen = "detail"
         self._hub._build()
         await apply_view(interaction, self._hub)
@@ -1367,28 +1387,37 @@ class TasksView(MariaLayout):
             self.screen = "catalog"
             self._build()
             return
+        heading = _task_label(task, "Tâche")
         body: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâche"),
-            sep_tight(),
-            discord.ui.TextDisplay((task.instruction or "").strip() or "-# Sans consigne."),
-            discord.ui.TextDisplay(_format_task_body(task)),
+            title_text(_clip(heading, 90), f"#{task.id}"),
+            sep_wide(),
         ]
+        instr = (task.instruction or "").strip()
+        if instr and " ".join(instr.split()) != heading:
+            body.append(discord.ui.TextDisplay(instr))
+        body.append(discord.ui.TextDisplay(_format_task_body(task)))
+        if self.note:
+            body += [sep_tight(), discord.ui.TextDisplay(f"-# {self.note}")]
         actions: list[discord.ui.Button] = [_EditTaskButton(self, task)]
         if task.schedule_kind != SCHEDULE_ONCE or task.status == STATUS_PAUSED:
             actions.append(_PauseTaskButton(self, task))
         if task.schedule_kind != SCHEDULE_ONCE:
             actions.append(_SkipTaskButton(self, task))
-        actions += [_CancelTaskButton(self, task), _TaskBackButton(self)]
-        if self.note:
-            body += [sep_tight(), discord.ui.TextDisplay(f"-# {self.note}")]
-        self.set_layout(body, discord.ui.ActionRow(*actions[:5]))
+        actions.append(_CancelTaskButton(self, task))
+        self.set_layout(
+            body,
+            discord.ui.ActionRow(*actions[:5]),
+            discord.ui.ActionRow(_TaskBackButton(self)),
+        )
 
     def _build_confirm(self) -> None:
+        n = len(self.tasks)
         self.set_layout(
             [
-                discord.ui.TextDisplay("## Tâches"),
+                title_text("Tâches", f"{n} tâche{'s' if n != 1 else ''}"),
+                sep_wide(),
                 discord.ui.TextDisplay(
-                    "Annuler **toutes** tes tâches (séries incluses) ? Irréversible."
+                    "**Annuler toutes tes tâches ?**\n-# Séries incluses. Irréversible."
                 ),
             ],
             discord.ui.ActionRow(
@@ -1403,33 +1432,32 @@ class TasksView(MariaLayout):
         shown = pages[self.page]
         quota_n = sum(1 for t in self.tasks if t.status in (TASK_PENDING, STATUS_PAUSED))
         paused_n = sum(1 for t in self.tasks if t.status == STATUS_PAUSED)
-        subtitle = "-# Classé par prochaine exécution"
+        meta = f"{quota_n}/{TASK_MAX_PENDING} · classé par prochaine exécution"
         if paused_n:
-            subtitle += f" · {paused_n} en pause"
+            meta += f" · {paused_n} en pause"
         if len(pages) > 1:
-            subtitle += f" · page {self.page + 1}/{len(pages)}"
-        body: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"## {SMALL_TASK} Tâches · {quota_n}/{TASK_MAX_PENDING}"),
-            discord.ui.TextDisplay(subtitle),
-        ]
-        if not self.tasks:
-            body.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))
-        else:
-            for t in shown:
-                body.append(sep_tight())
-                body.extend(_task_catalog_items(self, t))
-        extra: list[discord.ui.Button] = []
-        if self.tasks:
-            extra.append(_CancelAllTasksButton(self))
-        max_page = max(0, len(pages) - 1)
-        if max_page > 0:
-            if self.page > 0:
-                extra.append(HubPageButton(self, "page", -1, "Precedent", max_page))
-            if self.page < max_page:
-                extra.append(HubPageButton(self, "page", 1, "Suivant", max_page))
+            meta += f" · page {self.page + 1}/{len(pages)}"
+        body: list[discord.ui.Item] = [title_text("Tâches", meta), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
-        if extra:
-            rows.append(discord.ui.ActionRow(*extra[:5]))
+        if not self.tasks:
+            body.append(discord.ui.TextDisplay(
+                "*Aucune tâche en attente. Demande-moi un rappel dans le tchat.*"
+            ))
+        else:
+            for index, t in enumerate(shown):
+                if index:
+                    body.append(sep_tight())
+                body.append(_task_catalog_text(t))
+            rows.append(discord.ui.ActionRow(_OpenTaskSelect(self, shown)))
+            controls: list[discord.ui.Item] = [_CancelAllTasksButton(self)]
+            max_page = len(pages) - 1
+            if max_page > 0:
+                prev_btn = HubPageButton(self, "page", -1, "←", max_page)
+                next_btn = HubPageButton(self, "page", 1, "→", max_page)
+                prev_btn.disabled = self.page <= 0
+                next_btn.disabled = self.page >= max_page
+                controls.extend([prev_btn, next_btn])
+            rows.append(discord.ui.ActionRow(*controls))
         if self.note:
             body += [sep_tight(), discord.ui.TextDisplay(f"-# {self.note}")]
         self.set_layout(body, *rows)
