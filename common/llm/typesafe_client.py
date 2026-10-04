@@ -724,11 +724,19 @@ class MariaTypeSafeClient:
         human_react_count: int,
         *,
         fatigue: float = 0.0,
+        attention: float = 0.0,
         cold: float = 0.70,
     ) -> float:
-        """Seuil Noul/Choice : baisse avec les emojis humains déjà présents."""
+        """Seuil Noul : ↓ avec emojis humains, ↑ si fatigue ou peu d'attention sur l'auteur."""
         n = max(0, min(int(human_react_count), 4))
-        return min(0.95, max(0.35, cold - 0.08 * n + 0.10 * max(0.0, min(1.0, fatigue))))
+        fat = max(0.0, min(1.0, fatigue))
+        att = max(0.0, min(1.0, attention))
+        # À froid, l'attention pèse fort ; en pile-on, un peu moins.
+        cold_att_penalty = (1.0 - att) * (0.30 if n == 0 else 0.14)
+        return min(
+            0.95,
+            max(0.35, cold - 0.08 * n + 0.10 * fat + cold_att_penalty),
+        )
 
     async def should_ambient_react(
         self,
@@ -747,13 +755,14 @@ class MariaTypeSafeClient:
             {
                 "ambient": Noul(
                     instructions=(
-                        "In a casual Discord group chat, would a friend naturally add "
-                        "ONE emoji reaction to `message` without writing anything? "
-                        "Be selective: only clear jokes, hype, or vibe — not every message."
+                        "In a casual Discord group chat, would a friend who was JUST "
+                        "talking with this person naturally add ONE emoji reaction to "
+                        "`message` without writing anything? Be selective: only clear "
+                        "jokes, hype, or vibe — not every message, not strangers."
                     ),
                     criteria={
-                        "true": "Clear joke, hype, wholesome beat, or vibe worth a silent emoji",
-                        "false": "Ordinary chat, question, request, or nothing special to ack",
+                        "true": "Clear joke, hype, wholesome beat, or vibe worth a silent emoji from someone already in the vibe",
+                        "false": "Ordinary chat, question, request, stranger energy, or nothing special to ack",
                     },
                 ),
             },

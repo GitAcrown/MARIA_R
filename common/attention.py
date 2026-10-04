@@ -174,3 +174,16 @@ class SocialFocus:
 
     def allow_typing_extend(self, channel_id: int) -> bool:
         return not self.fatigue.is_tired(channel_id)
+
+    def allow_ambient_react(
+        self, guild_id: int, user_id: int, *, human_reacts: int = 0,
+    ) -> bool:
+        """Réaction « random » : seulement si l'auteur a (encore) un peu d'attention.
+
+        À froid (0 emoji humain) → membre au moins warm (interaction récente).
+        Pile-on → barre plus basse, mais pas un inconnu totalement froid.
+        """
+        att = self.attention.value(guild_id, user_id)
+        if human_reacts <= 0:
+            return att >= ATTENTION_WARM
+        return att >= ATTENTION_WARM * 0.4

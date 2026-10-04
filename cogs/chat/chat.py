@@ -1860,8 +1860,15 @@ class Chat(commands.Cog):
         # Compte déjà fait dans on_raw_reaction_add ; recompte léger si besoin.
         if humans < 1:
             return
+        if not self.focus.allow_ambient_react(
+            message.guild.id, message.author.id, human_reacts=humans,
+        ):
+            return
         fat_n = self.focus.fatigue.normalized(message.channel.id)
-        threshold = self.typesafe.reaction_social_threshold(humans, fatigue=fat_n)
+        att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
+        threshold = self.typesafe.reaction_social_threshold(
+            humans, fatigue=fat_n, attention=att_n,
+        )
         content = (message.clean_content or message.content or "").strip()
         author = getattr(message.author, "display_name", None) or message.author.name
         try:
@@ -1975,8 +1982,15 @@ class Chat(commands.Cog):
         if age > BANDWAGON_MAX_AGE_SECONDS:
             return
         humans = self._human_react_count(message)
+        if not self.focus.allow_ambient_react(
+            message.guild.id, message.author.id, human_reacts=humans,
+        ):
+            return
         fat_n = self.focus.fatigue.normalized(message.channel.id)
-        threshold = self.typesafe.reaction_social_threshold(humans, fatigue=fat_n)
+        att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
+        threshold = self.typesafe.reaction_social_threshold(
+            humans, fatigue=fat_n, attention=att_n,
+        )
         try:
             if humans <= 0:
                 ok = await self.typesafe.should_ambient_react(text, threshold=threshold)
