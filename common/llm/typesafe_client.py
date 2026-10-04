@@ -19,12 +19,12 @@ FORCE_CONFIDENCE = 0.5
 RAG_SCORE_MIN = 1.0
 RAG_CONFIDENCE_MIN = 0.4
 DURABLE_THRESHOLD = 0.5
-FOLLOWUP_CONFIDENCE = 0.55
+FOLLOWUP_CONFIDENCE = 0.48
 # React « à froid » : plus strict que la mention — évite le spam d'emojis.
 REACTION_CONFIDENCE = 0.68
 BANDWAGON_CONFIDENCE = 0.55
 # React JEV (mention / follow-up) sous ce seuil → traité comme ignore.
-REACT_VERDICT_CONFIDENCE = 0.65
+REACT_VERDICT_CONFIDENCE = 0.62
 
 
 def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
@@ -541,9 +541,18 @@ class MariaTypeSafeClient:
             return "ignore"
         from typesafe_sdk import Choice
 
-        lazy = min(1.0, max(0.0, 0.25 * max(0, chain_depth) + 0.55 * fatigue + 0.35 * (1.0 - attention)))
-        min_conf = FOLLOWUP_CONFIDENCE + 0.2 * lazy
-        react_min = REACT_VERDICT_CONFIDENCE + 0.15 * lazy
+        # Paresse douce : la fatigue / la chaîne comptent, pas un premier follow-up à froid.
+        lazy = min(
+            1.0,
+            max(
+                0.0,
+                0.18 * max(0, chain_depth)
+                + 0.45 * fatigue
+                + 0.20 * (1.0 - attention),
+            ),
+        )
+        min_conf = FOLLOWUP_CONFIDENCE + 0.12 * lazy
+        react_min = REACT_VERDICT_CONFIDENCE + 0.10 * lazy
 
         result = await self.system_one(
             {
@@ -559,19 +568,22 @@ class MariaTypeSafeClient:
                         "`message` is a member follow-up without naming her. "
                         "`laziness` (0–1) and `chain_depth` say how much she should stay out: "
                         "high laziness → prefer ignore, then react, rarely respond. "
+                        "On the FIRST follow-up (chain_depth 0), be responsive: "
+                        "pushback, insistence, or disagreement with her answer needs words. "
                         "How would a chill friend handle it?"
                     ),
                     criteria={
                         "respond": (
-                            "Clearly continues with MARIA and needs words "
-                            "(question, request, another tab/facet) — only if laziness is low"
+                            "Continues with MARIA and needs words: question, request, "
+                            "another tab/facet, OR short insistence / contradiction "
+                            "(« si », « non », « fais-le », « allez », disagreeing with her refusal)"
                         ),
                         "react": (
-                            "Short ack aimed at her (thanks, ok, lol) — emoji enough; "
-                            "only when clearly for her and confidence is high"
+                            "Closing ack only (thanks, ok, lol, nice) — emoji enough, "
+                            "no argument and no ask"
                         ),
                         "ignore": (
-                            "Unrelated, aimed at someone else, weak ack, or laziness says stay out"
+                            "Unrelated to her answer, aimed at someone else, or nothing to answer"
                         ),
                     },
                 ),

@@ -1232,7 +1232,8 @@ class Chat(commands.Cog):
         return False
 
     def _followup_base_seconds(self, bot_text: str, channel_id: int) -> float:
-        base = max(6.0, min(22.0, 6.0 + len(bot_text or "") / 40.0))
+        # Entre-deux : ~12–30 s (assez pour un « si », pas une fenêtre trop longue).
+        base = max(12.0, min(30.0, 10.0 + len(bot_text or "") / 35.0))
         return base * self.focus.followup_deadline_factor(channel_id)
 
     def _open_followup(
@@ -1296,6 +1297,9 @@ class Chat(commands.Cog):
             return "ignore", None
         follow.checks += 1
         att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
+        # Destinataire de la dernière réponse : un cran plus « chaud » pour JEV.
+        if message.author.id == follow.addressee_id:
+            att_n = min(1.0, att_n + 0.35)
         fat_n = self.focus.fatigue.normalized(channel_id)
         try:
             decision = await self.typesafe.classify_followup(

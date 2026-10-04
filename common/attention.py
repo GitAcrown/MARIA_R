@@ -143,9 +143,12 @@ class SocialFocus:
         confidence: float = 1.0,
         react_min_conf: float = 0.65,
     ) -> str:
-        """Follow-up : jamais upgrade ignore→respond ; react seulement conf haute."""
+        """Follow-up : 1er tour plutôt conservé ; paresse surtout sur chaîne / fatigue."""
         if verdict == "respond":
-            if fatigue >= FATIGUE_TIRED or chain_depth >= 2 or attention < ATTENTION_WARM:
+            # Premier follow-up : on garde respond sauf fatigue réelle.
+            if chain_depth == 0 and fatigue < FATIGUE_TIRED:
+                return "respond"
+            if fatigue >= FATIGUE_TIRED or chain_depth >= 2:
                 if confidence >= react_min_conf + (0.1 if fatigue >= FATIGUE_TIRED else 0.0):
                     return "react"
                 return "ignore"
@@ -153,7 +156,7 @@ class SocialFocus:
         if verdict == "react":
             need = react_min_conf + (0.1 if fatigue >= FATIGUE_TIRED else 0.0)
             return "react" if confidence >= need else "ignore"
-        # ignore : soften léger seulement si attention haute et pas fatiguée
+        # ignore → react seulement membre hot, 1er tour, pas fatiguée
         if (
             fatigue < FATIGUE_TIRED
             and attention >= ATTENTION_HOT
