@@ -248,6 +248,18 @@ def _extract_silence(text: str) -> tuple[str, bool, bool]:
     return cleaned.strip(), wants_react, skip
 
 
+def _emoji_label(emoji) -> str:
+    """Libellé stable pour une note d'historique (unicode ou custom Discord)."""
+    if isinstance(emoji, str):
+        return emoji
+    name = getattr(emoji, "name", None) or "?"
+    eid = getattr(emoji, "id", None)
+    if eid is None:
+        return str(name)
+    prefix = "a" if getattr(emoji, "animated", False) else ""
+    return f"<{prefix}:{name}:{eid}>"
+
+
 _MEM_CALLBACK_RE = re.compile(r"\[\[MEM\]\](.*?)\[\[/MEM\]\]", re.DOTALL)
 _SOURCE_MARK_RE = re.compile(r"\s*[\[(]s\d+[)\]]", re.IGNORECASE)
 
@@ -1190,13 +1202,28 @@ class Chat(commands.Cog):
 
         task.add_done_callback(_done)
 
-    async def _apply_learned_reaction(self, message: discord.Message) -> bool:
+    async def _record_reaction_note(
+        self, message: discord.Message, emoji_label: str, *, joined: bool = False,
+    ) -> None:
+        """Note système : elle a réagi (pour le prochain tour GPT)."""
+        author = getattr(message.author, "display_name", None) or getattr(
+            message.author, "name", "?",
+        )
+        kind = "Réaction (rejoint)" if joined else "Réaction"
+        note = f"{kind} {emoji_label} sur le message de {author}."
+        try:
+            await self.gpt_api.inject_context_note_async(message.channel, note)
+        except Exception:
+            logger.debug("Note réaction non enregistrée", exc_info=True)
+
+    async def _apply_learned_reaction(self, message: discord.Message) -> Optional[str]:
         """Emojis custom du serveur d'abord, classiques seulement si aucun ne colle.
 
-        Chaque étape : shortlist apprise → JEV Choice → add_reaction. True si une réaction part.
+        Chaque étape : shortlist apprise → JEV Choice → add_reaction.
+        Retourne le libellé emoji si une réaction part (et l'inscrit en historique).
         """
         if not message.guild:
-            return False
+            return None
         content = message.clean_content or message.content or ""
         for unicode_stage in (False, True):
             try:
@@ -1214,7 +1241,7 @@ class Chat(commands.Cog):
                 picked = await self.typesafe.pick_reaction(content, candidates)
             except Exception:
                 logger.debug("pick_reaction JEV échoué", exc_info=True)
-                return False
+                return None
             if picked is None:
                 continue
             if picked.is_unicode:
@@ -1228,8 +1255,10 @@ class Chat(commands.Cog):
             except (discord.HTTPException, TypeError, ValueError):
                 logger.debug("Réaction %s refusée", picked.name, exc_info=True)
                 continue
-            return True
-        return False
+            label = _emoji_label(emoji)
+            await self._record_reaction_note(message, label)
+            return label
+        return None
 
     def _followup_base_seconds(self, bot_text: str, channel_id: int) -> float:
         # Entre-deux : ~12–30 s (assez pour un « si », pas une fenêtre trop longue).
@@ -1342,17 +1371,18 @@ class Chat(commands.Cog):
             ref = await resolve_message_reference(message)
             if ref is not None and ref.author is not None and not ref.author.bot:
                 target = ref
-        reacted = await self._apply_learned_reaction(target)
-        if not reacted:
+        label = await self._apply_learned_reaction(target)
+        if label is None:
             try:
                 await target.add_reaction(_FALLBACK_REACTION)
-                reacted = True
+                label = _FALLBACK_REACTION
+                await self._record_reaction_note(target, label)
             except discord.HTTPException:
                 logger.debug("Réaction de repli refusée", exc_info=True)
-        if reacted:
+        if label is not None:
             logger.info("Réaction demandée explicitement dans #%s", getattr(message.channel, "id", "?"))
             self._remember_reply(message.id, None)
-        return reacted
+        return label is not None
 
     async def _can_stay_silent(self, message) -> bool:
         """True si silence / réaction autorisés (pas de ping, reply au bot, ni « ? »)."""
@@ -1548,14 +1578,14 @@ class Chat(commands.Cog):
         text, had_memory_callback = _extract_memory_callback(resp.text or "")
         text = _strip_source_marks(text)
         text, wants_react, wants_skip = _extract_silence(text)
-        reacted = False
+        react_label: Optional[str] = None
         if wants_react and not isinstance(message, _ContentOverride) and message.guild:
-            reacted = await self._apply_learned_reaction(message)
+            react_label = await self._apply_learned_reaction(message)
         if (wants_react or wants_skip) and not text and not resp.used_tools:
             logger.info(
                 "Silence choisi dans #%s (%s)",
                 getattr(message.channel, "id", "?"),
-                "réaction" if reacted or wants_react else "skip",
+                "réaction" if react_label or wants_react else "skip",
             )
             self._remember_reply(message.id, None)
             return
@@ -1850,6 +1880,7 @@ class Chat(commands.Cog):
         try:
             await message.add_reaction(emoji)
             self._mark_ambient(message.channel.id)
+            await self._record_reaction_note(message, _emoji_label(emoji), joined=True)
             logger.info("Pile-on %s sur msg %s (%d humains)", emoji.name, message.id, humans)
         except discord.HTTPException:
             logger.debug("Pile-on réaction refusée", exc_info=True)
@@ -1985,6 +2016,7 @@ class Chat(commands.Cog):
                 return
             self._mark_ambient(message.channel.id)
             await message.add_reaction(emoji)
+            await self._record_reaction_note(message, _emoji_label(emoji), joined=True)
         except Exception:
             logger.debug("ambient reaction échouée", exc_info=True)
 
