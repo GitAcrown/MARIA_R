@@ -22,13 +22,17 @@ from discord.ext import commands, tasks
 from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
-from common.temperature import ChannelTemperature
+from common.attention import ATTENTION_WARM, FATIGUE_TIRED, SocialFocus
 from common.emoji_usage import CHROME_EMOJI_IDS, EmojiUsageTracker, strip_emojis, unicode_emoji_id
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
 from common.llm import MariaGptApi, Tool, resolve_message_reference
 from common.llm.capabilities import intent_text
-from common.llm.typesafe_client import MariaTypeSafeClient
+from common.llm.typesafe_client import (
+    CATEGORY_CONFIDENCE,
+    MariaTypeSafeClient,
+    REACT_VERDICT_CONFIDENCE,
+)
 from common.memory import (
     MemoryStore,
     MemoryWorker,
@@ -270,13 +274,12 @@ def _strip_source_marks(text: str) -> str:
 _TAB_SWITCH_TYPING_SECONDS = 1.0
 _SILENCE_TYPING_DELAY = 2.5
 
-# Fenêtre où le message suivant du même membre (sans mention) est soumis à JEV.
-FOLLOWUP_WINDOW_SECONDS = 30.0
+# Follow-up salon : deadline de lecture (+ extension typing), pas une fenêtre fixe.
 FOLLOWUP_MAX_CHECKS = 2
-_FOLLOWUP_MAX_ENTRIES = 200
+_FOLLOWUP_MAX_ENTRIES = 80
+_AMBIENT_COOLDOWN = 45.0
 
-# Pile-on : ≥N humains ont mis le même emoji sur un msg humain → JEV décide de rejoindre.
-BANDWAGON_MIN_HUMANS = 3
+# Pile-on / ambient : âge max du message pour joindre une réaction.
 BANDWAGON_MAX_AGE_SECONDS = 6 * 3600
 _BANDWAGON_SEEN_MAX = 400
 
@@ -299,10 +302,18 @@ def _tab_switch_line(label: str) -> str:
 
 @dataclass
 class _Followup:
-    until: float
+    """Fenêtre par salon après une réponse de MARIA."""
+    deadline: float
     bot_text: str
+    addressee_id: int
     checks: int = 0
+    chain_depth: int = 0
     dyn_wid: str | None = None
+    extended: bool = False
+
+    @property
+    def until(self) -> float:
+        return self.deadline
 
 
 async def _keep_typing(channel, *, delay: float = 0.0) -> None:
@@ -645,11 +656,11 @@ class Chat(commands.Cog):
         # Debounce par (channel_id, author_id).
         self._pending_responses: dict[tuple[int, int], asyncio.Task] = {}
         self._first_triggers: dict[tuple[int, int], discord.Message] = {}
-        self._followups: dict[tuple[int, int], _Followup] = {}
+        self._followups: dict[int, _Followup] = {}  # channel_id → fenêtre
         self._pending_name_ack: set[int] = set()
         self._bg_tasks: set[asyncio.Task] = set()
-        # Chaleur du salon : nom cité souvent -> un « ignorer » JEV devient réaction / réponse.
-        self.temperature = ChannelTemperature()
+        self.focus = SocialFocus()
+        self._ambient_last: OrderedDict[int, float] = OrderedDict()
         # Messages que JEV a jugé « à répondre » : pas de silence possible, typing immédiat.
         self._confirmed_reply: deque[int] = deque(maxlen=200)
         # (auteur_id, auteur_bot, extrait) des messages récents : évite un fetch API par réaction.
@@ -1015,6 +1026,7 @@ class Chat(commands.Cog):
         if mode == "off":
             return False
         if reply_to_bot:
+            self.focus.attention.bump(message.guild.id, message.author.id)
             return True
         if mode == "greedy" and self.bot.user:
             names = [
@@ -1022,10 +1034,10 @@ class Chat(commands.Cog):
                 if _greedy_name_addresses_bot(message.content, n)
             ]
             if names:
-                channel_id = message.channel.id
-                heat = self.temperature.value(channel_id)
-                self.temperature.bump(channel_id)
+                att = self.focus.attention.value(message.guild.id, message.author.id)
+                fat = self.focus.fatigue.value(message.channel.id)
                 if any(_name_is_direct_summon(message.content, n) for n in names):
+                    self.focus.attention.bump(message.guild.id, message.author.id)
                     self._confirmed_reply.append(message.id)
                     return True
                 decision = await self.typesafe.classify_bot_mention(
@@ -1035,19 +1047,31 @@ class Chat(commands.Cog):
                     bot_name=names[0],
                 )
                 verdict = decision
-                decision = self.temperature.soften(decision, heat)
+                # Soften n'upgradera un ignore que si conf déjà haute (jamais un ignore « inventé »).
+                conf = 1.0 if decision in ("respond", "react") else 0.0
+                decision = self.focus.soften_mention(
+                    decision, attention=att, fatigue=fat,
+                    confidence=conf, react_min_conf=REACT_VERDICT_CONFIDENCE,
+                )
                 logger.info(
-                    "Nom cité dans #%s → JEV : %s%s (chaleur %.1f)",
-                    channel_id, verdict,
-                    f" → {decision}" if decision != verdict else "", heat,
+                    "Nom cité dans #%s → JEV : %s%s (att %.1f, fat %.1f)",
+                    message.channel.id, verdict,
+                    f" → {decision}" if decision != verdict else "", att, fat,
                 )
                 if decision == "respond":
+                    if (fat >= FATIGUE_TIRED or att < ATTENTION_WARM) and not self.focus.attention.is_hot(
+                        message.guild.id, message.author.id,
+                    ):
+                        self._pending_name_ack.add(message.id)
+                        return False
+                    self.focus.attention.bump(message.guild.id, message.author.id)
                     self._confirmed_reply.append(message.id)
                     return True
                 if decision == "react":
                     self._pending_name_ack.add(message.id)
                 return False
         if self.bot.user in message.mentions:
+            self.focus.attention.bump(message.guild.id, message.author.id)
             return True
         if message.mention_everyone:
             cfg = self._channel_config(message.channel)
@@ -1207,16 +1231,25 @@ class Chat(commands.Cog):
             return True
         return False
 
-    def _open_followup(self, message, bot_text: str, *, dyn_wid: str | None = None) -> None:
-        """MARIA vient de répondre à ce membre : son prochain message est surveillé quelques secondes."""
+    def _followup_base_seconds(self, bot_text: str, channel_id: int) -> float:
+        base = max(6.0, min(22.0, 6.0 + len(bot_text or "") / 40.0))
+        return base * self.focus.followup_deadline_factor(channel_id)
+
+    def _open_followup(
+        self, message, bot_text: str, *, dyn_wid: str | None = None, chain_depth: int = 0,
+    ) -> None:
+        """Ouvre une fenêtre follow-up sur le salon (tous les membres éligibles)."""
         if not getattr(message, "guild", None):
             return
         now = time.monotonic()
         if len(self._followups) >= _FOLLOWUP_MAX_ENTRIES:
-            self._followups = {k: v for k, v in self._followups.items() if v.until > now}
-        self._followups[(message.channel.id, message.author.id)] = _Followup(
-            until=now + FOLLOWUP_WINDOW_SECONDS,
+            self._followups = {k: v for k, v in self._followups.items() if v.deadline > now}
+        channel_id = message.channel.id
+        self._followups[channel_id] = _Followup(
+            deadline=now + self._followup_base_seconds(bot_text, channel_id),
             bot_text=bot_text,
+            addressee_id=message.author.id,
+            chain_depth=chain_depth,
             dyn_wid=dyn_wid if isinstance(dyn_wid, str) else None,
         )
 
@@ -1241,19 +1274,19 @@ class Chat(commands.Cog):
     async def _followup_decision(
         self, message: discord.Message, resolved_ref,
     ) -> tuple[str, _Followup | None]:
-        """(respond|react|ignore, follow). Le caller retire l'entrée après traitement."""
+        """(respond|react|ignore, follow). Fenêtre par salon, tous membres."""
         if not message.guild or message.author.bot:
             return "ignore", None
-        key = (message.channel.id, message.author.id)
-        follow = self._followups.get(key)
+        channel_id = message.channel.id
+        follow = self._followups.get(channel_id)
         if follow is None:
             return "ignore", None
-        if time.monotonic() > follow.until or follow.checks >= FOLLOWUP_MAX_CHECKS:
-            self._followups.pop(key, None)
+        max_checks = self.focus.followup_max_checks(channel_id, FOLLOWUP_MAX_CHECKS)
+        if time.monotonic() > follow.deadline or follow.checks >= max_checks:
+            self._followups.pop(channel_id, None)
             return "ignore", None
         if self.data.get(message.guild).settings("guild_config").get("chatbot_mode") == "off":
             return "ignore", None
-        # Adressé à quelqu'un d'autre : reply à un autre membre ou mention d'un autre membre.
         if resolved_ref is not None and getattr(resolved_ref.author, "id", None) != getattr(self.bot.user, "id", None):
             return "ignore", None
         if any(u.id != self.bot.user.id and not u.bot for u in message.mentions):
@@ -1262,13 +1295,32 @@ class Chat(commands.Cog):
         if not text:
             return "ignore", None
         follow.checks += 1
+        att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
+        fat_n = self.focus.fatigue.normalized(channel_id)
         try:
-            decision = await self.typesafe.classify_followup(text, bot_last=follow.bot_text)
+            decision = await self.typesafe.classify_followup(
+                text,
+                bot_last=follow.bot_text,
+                chain_depth=follow.chain_depth,
+                attention=att_n,
+                fatigue=fat_n,
+            )
         except Exception:
             logger.debug("classify_followup JEV échoué", exc_info=True)
             return "ignore", follow
+        decision = self.focus.soften_followup(
+            decision,
+            attention=self.focus.attention.value(message.guild.id, message.author.id),
+            chain_depth=follow.chain_depth,
+            fatigue=self.focus.fatigue.value(channel_id),
+            confidence=1.0 if decision != "ignore" else 0.0,
+            react_min_conf=REACT_VERDICT_CONFIDENCE,
+        )
         if decision != "ignore":
-            logger.info("Suite d'échange détectée dans #%s : %s", message.channel.id, decision)
+            logger.info(
+                "Suite d'échange #%s : %s (depth=%d att=%.2f fat=%.2f)",
+                channel_id, decision, follow.chain_depth, att_n, fat_n,
+            )
         return decision, follow
 
     async def _try_explicit_reaction(self, message) -> bool:
@@ -1357,7 +1409,7 @@ class Chat(commands.Cog):
         self._reply_map[trigger_id] = reply
 
     async def _gather_prompt_context(
-        self, message: discord.Message,
+        self, message: discord.Message, *, skip_rag: bool = False,
     ) -> tuple[dict, list]:
         """Mémoire (self / profils / RAG) + sondages. Retourne (contexte prompt, souvenirs)."""
         self_ctx = ""
@@ -1405,27 +1457,28 @@ class Chat(commands.Cog):
                 profile_ctx, profile_seen = profile_result
                 exclude_contents |= profile_seen
 
-            try:
-                name_bits = " ".join(n for _, n in people if n)
-                query = " ".join(
-                    p for p in ((message.content or "").strip(), name_bits) if p
-                )
-                memories = await retrieve_memories_async(
-                    self.memory_store,
-                    self.memory_vectors,
-                    query=query,
-                    guild_id=message.guild.id,
-                    author_id=message.author.id,
-                    top_k=MEMORY_TOP_K,
-                    prefer_collective=query_is_collective(query),
-                    exclude_contents=exclude_contents,
-                    people_ids={uid for uid, _ in people},
-                    max_distance=MEMORY_RAG_MAX_DISTANCE,
-                    typesafe=self.typesafe,
-                )
-                memory_ctx = format_memory_ctx(memories, name_by_user_id=name_by_id, bot_name=bot_label)
-            except Exception as e:
-                logger.warning("RAG mémoire échoué: %s", e)
+            if not skip_rag:
+                try:
+                    name_bits = " ".join(n for _, n in people if n)
+                    query = " ".join(
+                        p for p in ((message.content or "").strip(), name_bits) if p
+                    )
+                    memories = await retrieve_memories_async(
+                        self.memory_store,
+                        self.memory_vectors,
+                        query=query,
+                        guild_id=message.guild.id,
+                        author_id=message.author.id,
+                        top_k=MEMORY_TOP_K,
+                        prefer_collective=query_is_collective(query),
+                        exclude_contents=exclude_contents,
+                        people_ids={uid for uid, _ in people},
+                        max_distance=MEMORY_RAG_MAX_DISTANCE,
+                        typesafe=self.typesafe,
+                    )
+                    memory_ctx = format_memory_ctx(memories, name_by_user_id=name_by_id, bot_name=bot_label)
+                except Exception as e:
+                    logger.warning("RAG mémoire échoué: %s", e)
 
         poll_ctx = ""
         if message.guild:
@@ -1446,18 +1499,30 @@ class Chat(commands.Cog):
         if edit_target is None and await self._try_explicit_reaction(message):
             return
 
-        # Reply Discord : le message cité entre dans le blob JEV après résolution
-        # session → pas de prefetch ici.
+        # Intent avant RAG : coupe-circuit casual (force_level/category none).
+        blob = intent_text(message)
         if message.reference is None:
-            self.typesafe.prefetch_intent(intent_text(message))
+            self.typesafe.prefetch_intent(blob)
+        intent = None
+        try:
+            intent = await self.typesafe.resolve_intent(blob)
+        except Exception:
+            logger.debug("resolve_intent avant RAG échoué", exc_info=True)
+        skip_rag = bool(
+            intent is not None
+            and intent.force_level == "none"
+            and (
+                intent.category == "none"
+                or intent.category_confidence < CATEGORY_CONFIDENCE
+            )
+        )
 
         can_stay_silent = await self._can_stay_silent(message)
-        # Typing dès le début (RAG compris) ; différé si le silence est possible.
         typing_task = asyncio.create_task(
             _keep_typing(message.channel, delay=_SILENCE_TYPING_DELAY if can_stay_silent else 0.0)
         )
         try:
-            gathered, memories = await self._gather_prompt_context(message)
+            gathered, memories = await self._gather_prompt_context(message, skip_rag=skip_rag)
             prompt_context = {
                 **gathered,
                 "style_ctx": _style_examples_ctx(),
@@ -1590,8 +1655,13 @@ class Chat(commands.Cog):
             sent_tools.append(tool_name)
 
         if sent_tools:
+            self.focus.fatigue.bump(message.channel.id)
+            if message.guild:
+                self.focus.attention.bump(message.guild.id, message.author.id)
+            depth = int(getattr(message, "_maria_follow_depth", 0) or 0)
             self._open_followup(
-                message, text or "(vue ou résultat d'outil)", dyn_wid=last_dyn_wid,
+                message, text or "(vue ou résultat d'outil)",
+                dyn_wid=last_dyn_wid, chain_depth=depth,
             )
             self._remember_reply(message.id, None)
             return
@@ -1615,7 +1685,11 @@ class Chat(commands.Cog):
             message.channel, text,
             reply_to=(reply_anchor or message) if use_reply else None,
         )
-        self._open_followup(message, text or "(réponse)")
+        self.focus.fatigue.bump(message.channel.id)
+        if message.guild:
+            self.focus.attention.bump(message.guild.id, message.author.id)
+        depth = int(getattr(message, "_maria_follow_depth", 0) or 0)
+        self._open_followup(message, text or "(réponse)", chain_depth=depth)
         self._remember_reply(message.id, posted[0] if len(posted) == 1 else None)
 
     # ------------------------------------------------------------------
@@ -1668,7 +1742,7 @@ class Chat(commands.Cog):
         want_bandwagon = (
             self.typesafe.enabled
             and emoji_id not in CHROME_EMOJI_IDS
-            and humans >= BANDWAGON_MIN_HUMANS
+            and humans >= 1
             and author_ok
             and (payload.message_id, emoji_key) not in self._bandwagon_seen_set
         )
@@ -1723,13 +1797,15 @@ class Chat(commands.Cog):
         payload: discord.RawReactionActionEvent,
         message: discord.Message,
     ) -> None:
-        """Si ≥2 humains ont mis le même emoji sur un msg humain, JEV décide de rejoindre."""
+        """Joindre un emoji déjà posé — seuil JEV baisse avec le nombre d'humains."""
         if not self.typesafe.enabled or not message.guild:
             return
         if message.author.bot or message.author.id == getattr(self.bot.user, "id", None):
             return
         mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
         if mode == "off":
+            return
+        if not self._ambient_allowed(message.channel.id):
             return
         created = message.created_at
         if created.tzinfo is None:
@@ -1740,37 +1816,27 @@ class Chat(commands.Cog):
 
         emoji = payload.emoji
         emoji_key = f"c:{emoji.id}" if emoji.id else f"u:{emoji.name}"
-
         reaction = self._match_reaction(message, emoji)
         if reaction is None or reaction.me:
             return
-        if reaction.count < BANDWAGON_MIN_HUMANS:
-            return
-        # Une seule évaluation JEV par (message, emoji), une fois le seuil atteint.
         if self._bandwagon_mark(message.id, emoji_key):
             return
 
-        humans = 0
-        try:
-            async for user in reaction.users(limit=25):
-                if user.bot:
-                    continue
-                humans += 1
-                if humans >= BANDWAGON_MIN_HUMANS:
-                    break
-        except discord.HTTPException:
+        humans = self._track_reaction_human(message.id, emoji_key, payload.user_id)
+        # Compte déjà fait dans on_raw_reaction_add ; recompte léger si besoin.
+        if humans < 1:
             return
-        if humans < BANDWAGON_MIN_HUMANS:
-            return
-
+        fat_n = self.focus.fatigue.normalized(message.channel.id)
+        threshold = self.typesafe.reaction_social_threshold(humans, fatigue=fat_n)
         content = (message.clean_content or message.content or "").strip()
         author = getattr(message.author, "display_name", None) or message.author.name
         try:
             join = await self.typesafe.should_join_reaction(
                 message=content,
                 emoji_name=emoji.name or "?",
-                human_count=max(humans, reaction.count),
+                human_count=humans,
                 author_name=author,
+                threshold=threshold,
             )
         except Exception:
             logger.debug("should_join_reaction JEV échoué", exc_info=True)
@@ -1779,10 +1845,8 @@ class Chat(commands.Cog):
             return
         try:
             await message.add_reaction(emoji)
-            logger.info(
-                "Pile-on %s sur msg %s (%d humains)",
-                emoji.name, message.id, humans,
-            )
+            self._mark_ambient(message.channel.id)
+            logger.info("Pile-on %s sur msg %s (%d humains)", emoji.name, message.id, humans)
         except discord.HTTPException:
             logger.debug("Pile-on réaction refusée", exc_info=True)
 
@@ -1826,6 +1890,126 @@ class Chat(commands.Cog):
         while len(self._reaction_humans) > 500:
             self._reaction_humans.popitem(last=False)
         return len(users)
+
+    def _ambient_allowed(self, channel_id: int) -> bool:
+        now = time.monotonic()
+        last = self._ambient_last.get(channel_id)
+        if last is not None and now - last < _AMBIENT_COOLDOWN:
+            return False
+        if self.focus.fatigue.is_exhausted(channel_id):
+            return False
+        return True
+
+    def _mark_ambient(self, channel_id: int) -> None:
+        self._ambient_last[channel_id] = time.monotonic()
+        self._ambient_last.move_to_end(channel_id)
+        while len(self._ambient_last) > 300:
+            self._ambient_last.popitem(last=False)
+
+    def _human_react_count(self, message: discord.Message) -> int:
+        """Humains distincts ayant réagi (cache + reactions Discord)."""
+        seen: set[int] = set()
+        for (mid, _ek), users in self._reaction_humans.items():
+            if mid == message.id:
+                seen |= users
+        if seen:
+            return len(seen)
+        total = 0
+        for reaction in getattr(message, "reactions", None) or []:
+            total += max(0, int(getattr(reaction, "count", 0) or 0) - (1 if reaction.me else 0))
+        return total
+
+    async def _maybe_ambient_reaction(self, message: discord.Message) -> None:
+        """Réaction naturelle : seuil haut à froid, plus bas si emojis humains déjà là."""
+        if not message.guild or message.author.bot:
+            return
+        if not self.typesafe.enabled:
+            return
+        mode = self.data.get(message.guild).settings("guild_config").get("chatbot_mode", "strict")
+        if mode == "off":
+            return
+        text = (message.clean_content or message.content or "").strip()
+        if not text or len(text) > 400:
+            return
+        if not self._ambient_allowed(message.channel.id):
+            return
+        created = message.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        if age > BANDWAGON_MAX_AGE_SECONDS:
+            return
+        humans = self._human_react_count(message)
+        fat_n = self.focus.fatigue.normalized(message.channel.id)
+        threshold = self.typesafe.reaction_social_threshold(humans, fatigue=fat_n)
+        try:
+            if humans <= 0:
+                ok = await self.typesafe.should_ambient_react(text, threshold=threshold)
+                if not ok:
+                    return
+                self._mark_ambient(message.channel.id)
+                await self._apply_learned_reaction(message)
+                return
+            # Chaud : rejoindre l'emoji le plus fréquent (hors chrome).
+            best = None
+            best_n = 0
+            for reaction in message.reactions:
+                emoji = reaction.emoji
+                name = getattr(emoji, "name", None) or str(emoji)
+                eid = getattr(emoji, "id", None)
+                if eid is not None and eid in CHROME_EMOJI_IDS:
+                    continue
+                if reaction.me:
+                    continue
+                n = max(0, int(reaction.count or 0) - (1 if reaction.me else 0))
+                if n > best_n:
+                    best_n = n
+                    best = reaction
+            if best is None or best_n < 1:
+                return
+            emoji = best.emoji
+            name = getattr(emoji, "name", None) or str(emoji)
+            author = getattr(message.author, "display_name", None) or message.author.name
+            join = await self.typesafe.should_join_reaction(
+                message=text,
+                emoji_name=name,
+                human_count=max(humans, best_n),
+                author_name=author,
+                threshold=threshold,
+            )
+            if not join:
+                return
+            self._mark_ambient(message.channel.id)
+            await message.add_reaction(emoji)
+        except Exception:
+            logger.debug("ambient reaction échouée", exc_info=True)
+
+    @commands.Cog.listener()
+    async def on_typing(
+        self, channel: discord.abc.Messageable, user: discord.User, when: datetime,
+    ) -> None:
+        """Étend la deadline follow-up si le destinataire / un membre hot commence à écrire."""
+        if getattr(user, "bot", False):
+            return
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None:
+            return
+        follow = self._followups.get(channel_id)
+        if follow is None or follow.extended:
+            return
+        if time.monotonic() > follow.deadline:
+            return
+        if not self.focus.allow_typing_extend(channel_id):
+            return
+        guild = getattr(channel, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        hot = guild_id is not None and self.focus.attention.is_hot(guild_id, user.id)
+        if user.id != follow.addressee_id and not hot:
+            return
+        remaining = follow.deadline - time.monotonic()
+        follow.deadline = time.monotonic() + remaining * 2.5
+        follow.extended = True
+        logger.debug("Follow-up #%s : typing → deadline ×2.5", channel_id)
 
     async def _handle_incoming(self, message: discord.Message, *, edited: bool) -> None:
         if message.guild:
@@ -1876,17 +2060,18 @@ class Chat(commands.Cog):
                 self._spawn(self._apply_learned_reaction(message))
         if not should_respond and not other_bot and not edited:
             followup, follow = await self._followup_decision(message, resolved_ref)
-            key = (message.channel.id, message.author.id)
+            ch_key = message.channel.id
             if followup == "respond" and follow is not None:
                 typing_task = asyncio.create_task(_keep_typing(message.channel))
                 try:
                     tab_label = await self._try_followup_tab_switch(message, follow)
                     if tab_label is not None:
-                        await asyncio.sleep(_TAB_SWITCH_TYPING_SECONDS)  # « écrit… » bref
+                        await asyncio.sleep(_TAB_SWITCH_TYPING_SECONDS)
                 finally:
                     typing_task.cancel()
                 if tab_label is not None:
-                    self._followups.pop(key, None)
+                    depth = follow.chain_depth
+                    self._followups.pop(ch_key, None)
                     session = self.gpt_api.session_manager.get_or_create(message.channel)
                     await session.ingest_message(message, is_context_only=True)
                     line = _tab_switch_line(tab_label)
@@ -1902,14 +2087,24 @@ class Chat(commands.Cog):
                     session.record_artifact(
                         "tab", f"Onglet basculé → {tab_label[:80]}",
                     )
+                    self.focus.fatigue.bump(ch_key, 0.5)
+                    self.focus.attention.bump(message.guild.id, message.author.id)
+                    self._open_followup(
+                        message, line, dyn_wid=follow.dyn_wid, chain_depth=depth + 1,
+                    )
                     return
-                self._followups.pop(key, None)
+                depth = follow.chain_depth
+                self._followups.pop(ch_key, None)
+                self.focus.attention.bump(message.guild.id, message.author.id)
                 self._confirmed_reply.append(message.id)
                 should_respond = True
+                # chain_depth sera repris à la prochaine ouverture via bump dans _send_response;
+                # on mémorise la profondeur pour la réouverture.
+                message._maria_follow_depth = depth + 1  # type: ignore[attr-defined]
             elif followup == "react":
-                self._followups.pop(key, None)
+                self._followups.pop(ch_key, None)
                 self._spawn(self._apply_learned_reaction(message))
-            # ignore : on laisse le follow-up pour une 2e chance dans la fenêtre
+            # ignore : fenêtre conservée jusqu'à deadline / max checks
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
 
@@ -1982,6 +2177,11 @@ class Chat(commands.Cog):
             )
 
         if not should_respond:
+            if (
+                not other_bot and not edited and message.guild
+                and message.channel.id not in self._followups
+            ):
+                self._spawn(self._maybe_ambient_reaction(message))
             return
         if message.id in self._answered:
             return

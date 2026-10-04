@@ -20,8 +20,11 @@ RAG_SCORE_MIN = 1.0
 RAG_CONFIDENCE_MIN = 0.4
 DURABLE_THRESHOLD = 0.5
 FOLLOWUP_CONFIDENCE = 0.55
-REACTION_CONFIDENCE = 0.45
+# React « à froid » : plus strict que la mention — évite le spam d'emojis.
+REACTION_CONFIDENCE = 0.68
 BANDWAGON_CONFIDENCE = 0.55
+# React JEV (mention / follow-up) sous ce seuil → traité comme ignore.
+REACT_VERDICT_CONFIDENCE = 0.65
 
 
 def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
@@ -63,6 +66,7 @@ GATED_CATEGORIES = (
     "server_stats",
     "youtube",
     "web",
+    "tasks",
 )
 
 
@@ -220,12 +224,15 @@ class MariaTypeSafeClient:
             return "respond"
         if choice not in ("respond", "react", "ignore"):
             return "respond"
+        if choice == "react" and conf < REACT_VERDICT_CONFIDENCE:
+            # React forcé = spam : conf basse → silence.
+            return "ignore"
         if conf < CATEGORY_CONFIDENCE:
-            # Incertain : jamais « ignorer » (réservé aux mentions clairement passives).
-            # Le modèle penche respond (≥ 0.35) → respond, sinon au minimum une réaction.
+            # Incertain : respond léger si le modèle penche vraiment, sinon silence
+            # (plus de react par défaut — trop bruyant).
             if choice == "respond" and conf >= 0.35:
                 return "respond"
-            return "react"
+            return "ignore"
         return choice
 
     def prefetch_intent(self, text: str) -> None:
@@ -294,6 +301,7 @@ class MariaTypeSafeClient:
                         "server_stats": "Discord server or channel statistics",
                         "youtube": "YouTube video content / subtitles",
                         "web": "Read a specific web page (not a vague search)",
+                        "tasks": "Schedule, list, edit, pause, or cancel a reminder/task",
                     },
                 ),
             },
@@ -418,6 +426,51 @@ class MariaTypeSafeClient:
             return True
         return noul >= DURABLE_THRESHOLD
 
+    async def batch_may_contain_durable(
+        self,
+        batch_excerpt: str,
+        *,
+        prior_excerpt: str = "",
+    ) -> bool:
+        """True si le lot mérite un extract GPT. Sans JEV / erreur → True (fail-open)."""
+        if not self.enabled:
+            return True
+        excerpt = (batch_excerpt or "").strip()
+        if not excerpt:
+            return False
+        from typesafe_sdk import Noul
+
+        result = await self.system_one(
+            {
+                "batch_excerpt": excerpt[:1200],
+                "prior_excerpt": (prior_excerpt or "")[:400],
+            },
+            {
+                "has_durable": Noul(
+                    instructions=(
+                        "Does `batch_excerpt` (optional `prior_excerpt` for context) contain "
+                        "at least one durable fact worth long-term memory "
+                        "(identity, lasting preference, relationship, dated event)?"
+                    ),
+                    criteria={
+                        "true": (
+                            "At least one stable reusable fact is stated or clearly implied"
+                        ),
+                        "false": (
+                            "Only banter, one-off requests, vibes, or noise — nothing to store"
+                        ),
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return True
+        try:
+            noul = float(result.nouls["has_durable"].noul)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return True
+        return noul >= DURABLE_THRESHOLD
+
     async def filter_durable_actions(
         self,
         actions: Sequence[dict],
@@ -469,38 +522,56 @@ class MariaTypeSafeClient:
                 )
         return kept
 
-    async def classify_followup(self, message: str, *, bot_last: str) -> str:
-        """Message du même membre juste après une réponse de MARIA : respond / react / ignore.
+    async def classify_followup(
+        self,
+        message: str,
+        *,
+        bot_last: str,
+        chain_depth: int = 0,
+        attention: float = 0.5,
+        fatigue: float = 0.0,
+    ) -> str:
+        """Suite après une réponse de MARIA : respond / react / ignore.
 
         Sans JEV, ou en cas d'erreur ou de doute : ignore.
+        `chain_depth` / `attention` / `fatigue` (0–1) renforcent la paresse.
         """
         text = (message or "").strip()
         if not self.enabled or not text:
             return "ignore"
         from typesafe_sdk import Choice
 
+        lazy = min(1.0, max(0.0, 0.25 * max(0, chain_depth) + 0.55 * fatigue + 0.35 * (1.0 - attention)))
+        min_conf = FOLLOWUP_CONFIDENCE + 0.2 * lazy
+        react_min = REACT_VERDICT_CONFIDENCE + 0.15 * lazy
+
         result = await self.system_one(
-            {"bot_last": (bot_last or "")[:400], "message": text[:400]},
+            {
+                "bot_last": (bot_last or "")[:400],
+                "message": text[:400],
+                "laziness": f"{lazy:.2f}",
+                "chain_depth": str(max(0, int(chain_depth))),
+            },
             {
                 "followup": Choice(
                     instructions=(
-                        "`bot_last` is what the bot MARIA just said to this member. "
-                        "`message` is what the same member wrote right after, without "
-                        "mentioning her. How would a friend in the group chat handle it?"
+                        "`bot_last` is what the bot MARIA just said in the channel. "
+                        "`message` is a member follow-up without naming her. "
+                        "`laziness` (0–1) and `chain_depth` say how much she should stay out: "
+                        "high laziness → prefer ignore, then react, rarely respond. "
+                        "How would a chill friend handle it?"
                     ),
                     criteria={
                         "respond": (
-                            "Continues the conversation with MARIA and expects words back "
-                            "(question, request, follow-up, or asks for another facet of "
-                            "the previous card — another day, another result, another tab)"
+                            "Clearly continues with MARIA and needs words "
+                            "(question, request, another tab/facet) — only if laziness is low"
                         ),
                         "react": (
-                            "Short acknowledgement or closing aimed at her (thanks, ok, "
-                            "lol, nice, got it) — an emoji reaction is enough, no text"
+                            "Short ack aimed at her (thanks, ok, lol) — emoji enough; "
+                            "only when clearly for her and confidence is high"
                         ),
                         "ignore": (
-                            "Unrelated to her answer, aimed at someone else, or nothing "
-                            "to answer"
+                            "Unrelated, aimed at someone else, weak ack, or laziness says stay out"
                         ),
                     },
                 ),
@@ -514,9 +585,11 @@ class MariaTypeSafeClient:
             conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         except (KeyError, AttributeError, TypeError, ValueError):
             return "ignore"
-        if choice not in ("respond", "react") or conf < FOLLOWUP_CONFIDENCE:
-            return "ignore"
-        return choice
+        if choice == "respond" and conf >= min_conf:
+            return "respond"
+        if choice == "react" and conf >= react_min:
+            return "react"
+        return "ignore"
 
     async def pick_tab(
         self,
@@ -634,6 +707,53 @@ class MariaTypeSafeClient:
             return None
         return by_key.get(choice)
 
+    @staticmethod
+    def reaction_social_threshold(
+        human_react_count: int,
+        *,
+        fatigue: float = 0.0,
+        cold: float = 0.70,
+    ) -> float:
+        """Seuil Noul/Choice : baisse avec les emojis humains déjà présents."""
+        n = max(0, min(int(human_react_count), 4))
+        return min(0.95, max(0.35, cold - 0.08 * n + 0.10 * max(0.0, min(1.0, fatigue))))
+
+    async def should_ambient_react(
+        self,
+        message: str,
+        *,
+        threshold: float = 0.70,
+    ) -> bool:
+        """React à froid (0 emoji humain). True seulement si clairement naturel."""
+        text = (message or "").strip()
+        if not self.enabled or not text:
+            return False
+        from typesafe_sdk import Noul
+
+        result = await self.system_one(
+            {"message": text[:500]},
+            {
+                "ambient": Noul(
+                    instructions=(
+                        "In a casual Discord group chat, would a friend naturally add "
+                        "ONE emoji reaction to `message` without writing anything? "
+                        "Be selective: only clear jokes, hype, or vibe — not every message."
+                    ),
+                    criteria={
+                        "true": "Clear joke, hype, wholesome beat, or vibe worth a silent emoji",
+                        "false": "Ordinary chat, question, request, or nothing special to ack",
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return False
+        try:
+            noul = float(result.nouls["ambient"].noul)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return False
+        return noul >= threshold
+
     async def should_join_reaction(
         self,
         *,
@@ -641,12 +761,14 @@ class MariaTypeSafeClient:
         emoji_name: str,
         human_count: int,
         author_name: str = "",
+        threshold: float | None = None,
     ) -> bool:
         """Pile-on : d'autres membres ont déjà mis cet emoji. True = MARIA le remet aussi."""
-        if not self.enabled or human_count < 2:
+        if not self.enabled or human_count < 1:
             return False
         from typesafe_sdk import Noul
 
+        cut = BANDWAGON_CONFIDENCE if threshold is None else float(threshold)
         result = await self.system_one(
             {
                 "message": (message or "").strip()[:500],
@@ -657,7 +779,7 @@ class MariaTypeSafeClient:
             {
                 "join": Noul(
                     instructions=(
-                        "Several human members (`human_count`) already reacted with "
+                        "Human members (`human_count`) already reacted with "
                         "emoji `emoji` on `author`'s message `message`. "
                         "Would MARIA — a friend in this Discord group chat — naturally "
                         "add the SAME emoji too?"
@@ -682,4 +804,4 @@ class MariaTypeSafeClient:
             noul = float(result.nouls["join"].noul)
         except (KeyError, AttributeError, TypeError, ValueError):
             return False
-        return noul >= BANDWAGON_CONFIDENCE
+        return noul >= cut

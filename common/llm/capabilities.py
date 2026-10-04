@@ -171,10 +171,11 @@ _HINT_LIVE_FLAGS = frozenset({
 GROUNDING_TOOL_NAMES = frozenset({"search_web", "read_web_page"})
 
 # Outils envoyés seulement si le flag correspondant est présent.
-# Tout le reste (search_web, mémoire, etc.) reste toujours exposé.
+# search_web : gated via flag "web" OU force_level != none (voir select_tool_names).
 _GATED_TOOLS: dict[str, str] = {
     "read_youtube": "youtube",
     "read_web_page": "web",
+    "search_web": "web",
     "search_images": "images_search",
     "get_transport": "transport",
     "get_football": "football",
@@ -185,6 +186,9 @@ _GATED_TOOLS: dict[str, str] = {
     "search_game": "media_topic",
     "search_track": "media_topic",
     "get_server_stats": "server_stats",
+    "schedule_task": "tasks",
+    "manage_task": "tasks",
+    "show_tasks": "tasks",
 }
 
 # Momentum de session : un outil récemment appelé garde son flag "chaud" quelques
@@ -334,31 +338,37 @@ def collect_structural_flags(*messages: discord.Message | None) -> set[str]:
     return flags
 
 
+# Un seul scan pour le fallback hors JEV (évite ~10 .search() enchaînés).
+_THEMATIC_SCAN_RE = re.compile(
+    "|".join((
+        rf"(?P<layout>{_LAYOUT_RE.pattern})",
+        rf"(?P<transport>{_TRANSPORT_RE.pattern})",
+        rf"(?P<football>{_FOOTBALL_RE.pattern})",
+        rf"(?P<summary>{_SUMMARY_RE.pattern})",
+        rf"(?P<images_search>{_IMAGES_SEARCH_RE.pattern})",
+        rf"(?P<web>{_WEB_PAGE_RE.pattern})",
+        rf"(?P<weather>{_WEATHER_RE.pattern})",
+        rf"(?P<media_topic>{_MEDIA_TOPIC_RE.pattern})",
+        rf"(?P<server_stats>{_SERVER_STATS_RE.pattern})",
+        r"(?P<tasks>\b(?:rappel(?:le|er)?|t[aâ]ches?|schedule|remind(?:er|me)?)\b)",
+    )),
+    re.I,
+)
+
+
 def collect_thematic_flags(*messages: discord.Message | None) -> set[str]:
-    """Flags textuels via regex — fallback quand JEV est absent / en échec."""
+    """Flags textuels via un scan unique — fallback quand JEV est absent / en échec."""
     flags: set[str] = set()
     for msg in messages:
         if msg is None:
             continue
         text = _message_text(msg)
-        if _LAYOUT_RE.search(text):
-            flags.add("layout")
-        if _TRANSPORT_RE.search(text):
-            flags.add("transport")
-        if _FOOTBALL_RE.search(text):
-            flags.add("football")
-        if _SUMMARY_RE.search(text):
-            flags.add("summary")
-        if _IMAGES_SEARCH_RE.search(text):
-            flags.add("images_search")
-        if _WEB_PAGE_RE.search(text):
-            flags.add("web")
-        if _WEATHER_RE.search(text):
-            flags.add("weather")
-        if _MEDIA_TOPIC_RE.search(text):
-            flags.add("media_topic")
-        if _SERVER_STATS_RE.search(text):
-            flags.add("server_stats")
+        if not text:
+            continue
+        for m in _THEMATIC_SCAN_RE.finditer(text):
+            name = m.lastgroup
+            if name:
+                flags.add(name)
     return flags
 
 
@@ -478,11 +488,11 @@ async def resolve_capabilities(
             force_level = "none"
             if intent.force_confidence >= FORCE_CONFIDENCE:
                 force_level = intent.force_level
-            # URL externe / follow-up search : filet de sécurité même sous JEV.
-            if should_force_tool(
-                flags, text, search_momentum=search_momentum,
-            ):
+            # Filet structurel seulement (pas la batterie regex should_force_tool).
+            if "web" in structural and force_level == "none":
                 force_level = "require_web"
+            if search_momentum and "web" not in flags:
+                flags.add("web")
             return CapabilityDecision(
                 flags=flags, force_level=force_level, from_jev=True,
             )
@@ -496,12 +506,28 @@ async def resolve_capabilities(
     return CapabilityDecision(flags=flags, force_level=force_level, from_jev=False)
 
 
-def select_tool_names(all_names: list[str], flags: set[str]) -> list[str]:
+def select_tool_names(
+    all_names: list[str],
+    flags: set[str],
+    *,
+    force_level: str = "none",
+) -> list[str]:
     """Garde tous les outils sauf une poignée de spécialisés hors-sujet.
 
+    `search_web` : exposé si flag `web` **ou** `force_level != none`.
     Un outil inconnu / non listé reste inclus (sûr pour les ajouts futurs).
     """
-    return [
-        name for name in all_names
-        if _GATED_TOOLS.get(name) is None or _GATED_TOOLS[name] in flags
-    ]
+    allow_web = "web" in flags or force_level in ("hint", "require_web")
+    out: list[str] = []
+    for name in all_names:
+        need = _GATED_TOOLS.get(name)
+        if need is None:
+            out.append(name)
+            continue
+        if name == "search_web":
+            if allow_web:
+                out.append(name)
+            continue
+        if need in flags:
+            out.append(name)
+    return out

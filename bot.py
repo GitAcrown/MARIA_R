@@ -50,6 +50,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.typing = True
 
 
 # ---------------------------------------------------------------------------

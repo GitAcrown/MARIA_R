@@ -933,7 +933,14 @@ class ChannelSession:
                 else:
                     flags = collect_capability_flags(focus_msg, cited)
                 flags |= momentum_flags(self._recent_tool_names())
-                names = select_tool_names(self.tool_registry.names(), flags)
+                fl = (
+                    self._cap_decision.force_level
+                    if self._cap_decision is not None
+                    else "none"
+                )
+                names = select_tool_names(
+                    self.tool_registry.names(), flags, force_level=fl,
+                )
             if widget_done:
                 names = [n for n in names if n in GROUNDING_TOOL_NAMES]
             tools = self.tool_registry.get_compiled(names) if names else []

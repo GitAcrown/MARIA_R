@@ -495,6 +495,20 @@ class MemoryWorker:
         direct_user_ids = {
             m.author_id for m in list(batch) + list(prior) if m.addressed_to_bot
         }
+        if self.typesafe is not None and getattr(self.typesafe, "enabled", False):
+            try:
+                may = await self.typesafe.batch_may_contain_durable(
+                    batch_text, prior_excerpt=prior_text,
+                )
+            except Exception:
+                logger.debug("Gate durable JEV échoué — extract GPT", exc_info=True)
+                may = True
+            if not may:
+                logger.info(
+                    "Flush mémoire : skip JEV (0 fait probable, guild=%s, msgs=%d)",
+                    guild_id, len(batch),
+                )
+                return
         actions = await extract_memories(
             self.llm_client,
             model=self.model,
