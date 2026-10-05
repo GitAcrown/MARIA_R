@@ -248,6 +248,36 @@ def _extract_silence(text: str) -> tuple[str, bool, bool]:
     return cleaned.strip(), wants_react, skip
 
 
+_URL_ONLY_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_GIF_HOST_RE = re.compile(
+    r"https?://(?:[\w.-]*\.)?(?:tenor\.com|giphy\.com|imgur\.com|media\.discordapp\.net|cdn\.discordapp\.com)\S*",
+    re.IGNORECASE,
+)
+
+
+def _is_media_only(message) -> bool:
+    """GIF / image / sticker / lien média seul (aucun texte propre) : pas de quoi répondre."""
+    text = (getattr(message, "clean_content", None) or getattr(message, "content", None) or "").strip()
+    rest = _URL_ONLY_RE.sub("", text).strip()
+    if rest:
+        return False
+    if not text:
+        return bool(
+            getattr(message, "attachments", None)
+            or getattr(message, "stickers", None)
+            or getattr(message, "embeds", None)
+        )
+    # Texte = uniquement des liens : média si hôte gif/image connu ou pièce jointe/embed média.
+    if _GIF_HOST_RE.search(text):
+        return True
+    if getattr(message, "attachments", None) or getattr(message, "stickers", None):
+        return True
+    for emb in getattr(message, "embeds", None) or []:
+        if getattr(emb, "image", None) or getattr(emb, "video", None) or getattr(emb, "thumbnail", None):
+            return True
+    return False
+
+
 def _emoji_label(emoji) -> str:
     """Libellé stable pour une note d'historique (unicode ou custom Discord)."""
     if isinstance(emoji, str):
@@ -1324,6 +1354,19 @@ class Chat(commands.Cog):
         if any(u.id != self.bot.user.id and not u.bot for u in message.mentions):
             return "ignore", None
         text = (message.clean_content or message.content or "").strip()
+        if not text and not (message.attachments or message.stickers or message.embeds):
+            return "ignore", None
+        if _is_media_only(message):
+            # GIF / image sans texte : jamais de réponse écrite, au mieux une réaction.
+            follow.checks += 1
+            warm = (
+                message.author.id == follow.addressee_id
+                or self.focus.attention.is_warm(message.guild.id, message.author.id)
+            )
+            if warm and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
+                logger.info("Suite d'échange #%s : media seul → react", channel_id)
+                return "react", follow
+            return "ignore", follow
         if not text:
             return "ignore", None
         follow.checks += 1

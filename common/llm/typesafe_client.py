@@ -579,7 +579,8 @@ class MariaTypeSafeClient:
                             "(« si », « non », « fais-le », « allez », disagreeing with her refusal)"
                         ),
                         "react": (
-                            "Closing ack only (thanks, ok, lol, nice) — emoji enough, "
+                            "Closing ack only (thanks, ok, lol, nice), a GIF/image/sticker "
+                            "or a bare media link with no text — emoji enough, "
                             "no argument and no ask"
                         ),
                         "ignore": (
