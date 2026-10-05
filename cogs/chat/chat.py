@@ -670,6 +670,8 @@ class Chat(commands.Cog):
         self._first_triggers: dict[tuple[int, int], discord.Message] = {}
         self._followups: dict[int, _Followup] = {}  # channel_id → fenêtre
         self._pending_name_ack: set[int] = set()
+        # discord.Message a des __slots__ : profondeur de chaîne follow-up par message.id.
+        self._follow_depth: OrderedDict[int, int] = OrderedDict()
         self._bg_tasks: set[asyncio.Task] = set()
         self.focus = SocialFocus()
         self._ambient_last: OrderedDict[int, float] = OrderedDict()
@@ -1692,7 +1694,7 @@ class Chat(commands.Cog):
             self.focus.fatigue.bump(message.channel.id)
             if message.guild:
                 self.focus.attention.bump(message.guild.id, message.author.id)
-            depth = int(getattr(message, "_maria_follow_depth", 0) or 0)
+            depth = self._follow_depth.get(message.id, 0)
             self._open_followup(
                 message, text or "(vue ou résultat d'outil)",
                 dyn_wid=last_dyn_wid, chain_depth=depth,
@@ -1722,7 +1724,7 @@ class Chat(commands.Cog):
         self.focus.fatigue.bump(message.channel.id)
         if message.guild:
             self.focus.attention.bump(message.guild.id, message.author.id)
-        depth = int(getattr(message, "_maria_follow_depth", 0) or 0)
+        depth = self._follow_depth.get(message.id, 0)
         self._open_followup(message, text or "(réponse)", chain_depth=depth)
         self._remember_reply(message.id, posted[0] if len(posted) == 1 else None)
 
@@ -2150,7 +2152,10 @@ class Chat(commands.Cog):
                 should_respond = True
                 # chain_depth sera repris à la prochaine ouverture via bump dans _send_response;
                 # on mémorise la profondeur pour la réouverture.
-                message._maria_follow_depth = depth + 1  # type: ignore[attr-defined]
+                self._follow_depth[message.id] = depth + 1
+                self._follow_depth.move_to_end(message.id)
+                while len(self._follow_depth) > 300:
+                    self._follow_depth.popitem(last=False)
             elif followup == "react":
                 self._followups.pop(ch_key, None)
                 self._spawn(self._apply_learned_reaction(message))
