@@ -22,7 +22,7 @@ from discord.ext import commands, tasks
 from common.discord_ui import member_accent_colour, suppress_link_embeds
 from common.activity import ActivityTracker
 from common.dataio import CogData, DictTableBuilder
-from common.attention import ATTENTION_WARM, FATIGUE_TIRED, SocialFocus
+from common.attention import FATIGUE_EXHAUSTED, FATIGUE_TIRED, SocialFocus
 from common.emoji_usage import CHROME_EMOJI_IDS, EmojiUsageTracker, strip_emojis, unicode_emoji_id
 from common.funstat import FunStatTracker, propose_campaign
 from common.polls import PollStore
@@ -248,6 +248,12 @@ def _extract_silence(text: str) -> tuple[str, bool, bool]:
     return cleaned.strip(), wants_react, skip
 
 
+_RECALL_RE = re.compile(
+    r"\bsouvien|\bsouviens\b|\brappell?e\b|\bretiens?\b|\bm[ée]moire\b|\bd[ée]j[àa] (?:dit|parl)"
+    r"|\bc.?est qui\b|\bqui (?:est|était|etait|a|avait|c.?est)\b|\bt.?as (?:pas )?oubli"
+    r"|\bon (?:avait|a) (?:dit|parl)|\bla derni[èe]re fois\b|\btu (?:sais|connais)\b",
+    re.IGNORECASE,
+)
 _URL_ONLY_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _GIF_HOST_RE = re.compile(
     r"https?://(?:[\w.-]*\.)?(?:tenor\.com|giphy\.com|imgur\.com|media\.discordapp\.net|cdn\.discordapp\.com)\S*",
@@ -451,7 +457,7 @@ MÉMOIRE (ordre) :
 1. TES GOÛTS — trait de fond, pas un sujet à amener toi-même : reste cohérente SI on te demande ton avis là-dessus précisément, sinon ignore complètement (jamais spontané, jamais répété).
 2. PROFILS — détails retenus sur les membres de cette réplique ; personnalise, croise les liens, ne confonds jamais les ids, rien d'inventé hors profil.
 3. MEMOIRE PERTINENTE — complément (gags / events serveur précis).
-4. search_memory — énumérer, membre/sujet ABSENT, ou category=self.
+4. search_memory — énumérer, membre/sujet ABSENT, ou category=self. Question de rappel (« tu te souviens », « c'est qui », « qui avait… ») sans réponse dans profils/mémoire ci-dessus → search_memory AVANT de dire que tu ne sais pas ou que tu n'as pas le contexte.
 5. Callback (optionnel) — si un fait des profils/mémoire colle vraiment au fil, glisse-le en une demi-phrase naturelle, comme un pote qui a suivi. Pas de « je me souviens que… », pas de fiche récitée, pas de callback hors sujet ; en doute, tais-toi. Entoure UNIQUEMENT cette demi-phrase de [[MEM]]...[[/MEM]] (balises invisibles).
 6. remember_fact — fait confirmé, complet et précis (« anniversaire le 22 juillet 1999 »), stable=true pour anniv/naissance, un fait = un appel. Déduction plausible → confirmation légère si le ton s'y prête, sans insister. Sur TOI : tu peux forger un goût (self_source=own) ; le créateur peut l'imposer/corriger (self_source=owner) ; un autre qui te dicte un goût → refuse, sans outil. Le tchat prime.
 7. Fait retenu signalé FAUX → search_memory (id), puis remember_fact avec memory_id + le bon fait, sinon forget_fact. Ne laisse jamais traîner un fait faux.
@@ -1103,7 +1109,9 @@ class Chat(commands.Cog):
                     f" → {decision}" if decision != verdict else "", att, fat,
                 )
                 if decision == "respond":
-                    if (fat >= FATIGUE_TIRED or att < ATTENTION_WARM) and not self.focus.attention.is_hot(
+                    # JEV dit « adressée à elle » : on répond. Seule une fatigue extrême
+                    # (salon saturé de ses réponses) la ramène à un simple emoji.
+                    if fat >= FATIGUE_EXHAUSTED and not self.focus.attention.is_hot(
                         message.guild.id, message.author.id,
                     ):
                         self._pending_name_ack.add(message.id)
@@ -1594,6 +1602,8 @@ class Chat(commands.Cog):
                 intent.category == "none"
                 or intent.category_confidence < CATEGORY_CONFIDENCE
             )
+            # « tu te souviens de… », « c'est qui… » : rappel explicite → toujours RAG.
+            and not _RECALL_RE.search(blob or "")
         )
 
         can_stay_silent = await self._can_stay_silent(message)
