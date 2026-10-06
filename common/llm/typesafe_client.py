@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -187,18 +188,37 @@ class MariaTypeSafeClient:
         from typesafe_sdk import Choice
 
         name = (bot_name or "Maria").strip() or "Maria"
+        snippet = (message or "").strip()
+        # Déjà fenêtré côté chat ; garde-fou si appelé ailleurs avec un pavé.
+        if len(snippet) > 500:
+            m = re.search(
+                rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])",
+                snippet,
+                flags=re.IGNORECASE,
+            )
+            if m is not None:
+                before = 500 // 3
+                start = max(0, m.start() - before)
+                end = min(len(snippet), start + 500)
+                start = max(0, end - 500)
+                snippet = snippet[start:end]
+            else:
+                snippet = snippet[:500]
         result = await self.system_one(
-            {"bot_name": name, "message": (message or "").strip()[:500]},
+            {"bot_name": name, "message": snippet},
             {
                 "mention": Choice(
                     instructions=(
-                        "The bot `bot_name` was named or mentioned in `message`. "
+                        "The bot `bot_name` was named or mentioned in `message` "
+                        "(may be a long preamble with her name mid/end — the `…` ellipsis "
+                        "means truncated context). "
                         "How should she handle it in a casual Discord group chat?"
                     ),
                     criteria={
                         "respond": (
                             "Direct address: question, request, greeting to her, "
-                            "or clear expectation of a written reply"
+                            "opinion asked of her, or clear expectation of a written reply "
+                            "— even if her name comes after a long setup"
                         ),
                         "react": (
                             "Worth a light emoji ack without words: joke she is in, "

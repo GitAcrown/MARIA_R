@@ -44,20 +44,26 @@ _MAX_GALLERY_IMAGES = 4
 # Builder LayoutView — galerie d'images
 # ---------------------------------------------------------------------------
 
-def build_image_view(data: dict, commentary: str = ""):
-    """Construit une galerie d'images (MediaGallery) depuis le résultat search_images."""
+def _gallery_items_from_data(data: dict) -> list[dict]:
+    """Images affichables d'un résultat search_images (ordre Brave)."""
     if not isinstance(data, dict) or "error" in data:
-        return None
-    images = data.get("images") or []
+        return []
+    out: list[dict] = []
+    for img in data.get("images") or []:
+        url = (img.get("image_url") or "").strip()
+        if url.startswith(("http://", "https://")):
+            out.append(img)
+    return out
+
+
+def _build_gallery_from_images(images: list[dict], commentary: str = ""):
+    """MediaGallery Discord à partir d'une liste d'images déjà filtrées."""
     if not images:
         return None
-
     gallery = discord.ui.MediaGallery()
     added = 0
     for img in images[:_MAX_GALLERY_IMAGES]:
         url = (img.get("image_url") or "").strip()
-        if not url.startswith(("http://", "https://")):
-            continue
         try:
             gallery.add_item(media=url, description=(img.get("title") or "")[:256] or None)
             added += 1
@@ -65,8 +71,46 @@ def build_image_view(data: dict, commentary: str = ""):
             continue
     if added == 0:
         return None
-
     return layout_with_commentary(gallery, commentary)
+
+
+def build_image_view(data: dict, commentary: str = ""):
+    """Construit une galerie d'images (MediaGallery) depuis le résultat search_images."""
+    return _build_gallery_from_images(_gallery_items_from_data(data), commentary)
+
+
+def build_image_view_group(datas: list[dict], commentary: str = ""):
+    """Fusionne plusieurs search_images du même tour en une seule galerie.
+
+    Round-robin entre les requêtes pour que chaque sujet ait sa place (plafond 4).
+    """
+    pools = [_gallery_items_from_data(d) for d in datas]
+    pools = [p for p in pools if p]
+    if not pools:
+        return None
+    if len(pools) == 1:
+        return _build_gallery_from_images(pools[0], commentary)
+
+    merged: list[dict] = []
+    seen: set[str] = set()
+    idx = [0] * len(pools)
+    while len(merged) < _MAX_GALLERY_IMAGES:
+        added_this_round = False
+        for p, pool in enumerate(pools):
+            if len(merged) >= _MAX_GALLERY_IMAGES:
+                break
+            while idx[p] < len(pool):
+                img = pool[idx[p]]
+                idx[p] += 1
+                url = (img.get("image_url") or "").strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    merged.append(img)
+                    added_this_round = True
+                    break
+        if not added_this_round:
+            break
+    return _build_gallery_from_images(merged, commentary)
 
 class Web(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -544,7 +588,9 @@ class Web(commands.Cog):
                 description=(
                     "Recherche des images sur le web via Brave et les affiche dans une galerie. "
                     "Utile pour illustrer une réponse, trouver une photo, un logo, un personnage, etc. "
-                    "Choisis count selon le besoin/demande : 1 par défaut, plus si on veut un aperçu (max 4)."
+                    "Choisis count selon le besoin/demande : 1 par défaut, plus si on veut un aperçu (max 4). "
+                    "Plusieurs sujets distincts : un appel par sujet dans le MÊME tour "
+                    "(ex. 2× search_images) → une seule galerie fusionnée (max 4 images au total)."
                 ),
                 properties={
                     "query": {"type": "string", "description": "Requête de recherche d'images"},
@@ -563,7 +609,7 @@ class Web(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Web(bot))
-    register_widget("search_images", build_image_view)
+    register_widget("search_images", build_image_view, group_builder=build_image_view_group)
 
 
 async def teardown(bot):
