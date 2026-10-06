@@ -142,8 +142,23 @@ class SocialFocus:
         fatigue: float,
         confidence: float = 1.0,
         react_min_conf: float = 0.65,
+        is_addressee: bool = True,
     ) -> str:
-        """Follow-up : 1er tour plutôt conservé ; paresse surtout sur chaîne / fatigue."""
+        """Follow-up : 1er tour plutôt conservé ; paresse surtout sur chaîne / fatigue.
+
+        `is_addressee=False` : jamais de respond écrit — react au mieux.
+        """
+        if not is_addressee:
+            if verdict == "respond":
+                verdict = "react"
+            if verdict == "react":
+                need = react_min_conf + 0.08 + (0.1 if fatigue >= FATIGUE_TIRED else 0.0)
+                return "react" if (
+                    fatigue < FATIGUE_TIRED
+                    and attention >= ATTENTION_HOT
+                    and confidence >= need
+                ) else "ignore"
+            return "ignore"
         if verdict == "respond":
             # Premier follow-up : on garde respond sauf fatigue réelle.
             if chain_depth == 0 and fatigue < FATIGUE_TIRED:

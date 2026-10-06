@@ -1308,7 +1308,7 @@ class Chat(commands.Cog):
     def _open_followup(
         self, message, bot_text: str, *, dyn_wid: str | None = None, chain_depth: int = 0,
     ) -> None:
-        """Ouvre une fenêtre follow-up sur le salon (tous les membres éligibles)."""
+        """Ouvre une fenêtre follow-up sur le salon (priorité au destinataire)."""
         if not getattr(message, "guild", None):
             return
         now = time.monotonic()
@@ -1344,7 +1344,7 @@ class Chat(commands.Cog):
     async def _followup_decision(
         self, message: discord.Message, resolved_ref,
     ) -> tuple[str, _Followup | None]:
-        """(respond|react|ignore, follow). Fenêtre par salon, tous membres."""
+        """(respond|react|ignore, follow). Fenêtre par salon ; priorité au destinataire."""
         if not message.guild or message.author.bot:
             return "ignore", None
         channel_id = message.channel.id
@@ -1364,24 +1364,36 @@ class Chat(commands.Cog):
         text = (message.clean_content or message.content or "").strip()
         if not text and not (message.attachments or message.stickers or message.embeds):
             return "ignore", None
-        if _is_media_only(message):
-            # GIF / image sans texte : jamais de réponse écrite, au mieux une réaction.
+
+        is_addressee = message.author.id == follow.addressee_id
+        # Autre membre : ne brûle pas la fenêtre ; répond seulement s'il est déjà hot
+        # (et alors au mieux react — un vrai respond reste pour le destinataire / un ping).
+        if not is_addressee:
+            if not self.focus.attention.is_hot(message.guild.id, message.author.id):
+                return "ignore", follow
+            if _is_media_only(message) or not text:
+                if self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
+                    logger.info("Suite d'échange #%s : tiers hot → react", channel_id)
+                    return "react", follow
+                return "ignore", follow
+            # Texte d'un tiers hot : JEV peut dire react ; respond est clippé après.
+        elif _is_media_only(message):
             follow.checks += 1
-            warm = (
-                message.author.id == follow.addressee_id
-                or self.focus.attention.is_warm(message.guild.id, message.author.id)
-            )
-            if warm and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
+            if self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
                 logger.info("Suite d'échange #%s : media seul → react", channel_id)
                 return "react", follow
             return "ignore", follow
         if not text:
             return "ignore", None
-        follow.checks += 1
+
+        if is_addressee:
+            follow.checks += 1
         att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
-        # Destinataire de la dernière réponse : un cran plus « chaud » pour JEV.
-        if message.author.id == follow.addressee_id:
+        if is_addressee:
             att_n = min(1.0, att_n + 0.35)
+        else:
+            # Tiers : paresse JEV forte (préférer ignore / react).
+            att_n = max(0.0, att_n - 0.45)
         fat_n = self.focus.fatigue.normalized(channel_id)
         try:
             decision = await self.typesafe.classify_followup(
@@ -1390,6 +1402,7 @@ class Chat(commands.Cog):
                 chain_depth=follow.chain_depth,
                 attention=att_n,
                 fatigue=fat_n,
+                is_addressee=is_addressee,
             )
         except Exception:
             logger.debug("classify_followup JEV échoué", exc_info=True)
@@ -1401,11 +1414,13 @@ class Chat(commands.Cog):
             fatigue=self.focus.fatigue.value(channel_id),
             confidence=1.0 if decision != "ignore" else 0.0,
             react_min_conf=REACT_VERDICT_CONFIDENCE,
+            is_addressee=is_addressee,
         )
         if decision != "ignore":
             logger.info(
-                "Suite d'échange #%s : %s (depth=%d att=%.2f fat=%.2f)",
+                "Suite d'échange #%s : %s (depth=%d att=%.2f fat=%.2f%s)",
                 channel_id, decision, follow.chain_depth, att_n, fat_n,
+                "" if is_addressee else " tiers",
             )
         return decision, follow
 

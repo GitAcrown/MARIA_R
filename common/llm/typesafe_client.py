@@ -530,11 +530,13 @@ class MariaTypeSafeClient:
         chain_depth: int = 0,
         attention: float = 0.5,
         fatigue: float = 0.0,
+        is_addressee: bool = True,
     ) -> str:
         """Suite après une réponse de MARIA : respond / react / ignore.
 
         Sans JEV, ou en cas d'erreur ou de doute : ignore.
         `chain_depth` / `attention` / `fatigue` (0–1) renforcent la paresse.
+        `is_addressee=False` : membre autre que le destinataire → paresse forte.
         """
         text = (message or "").strip()
         if not self.enabled or not text:
@@ -548,7 +550,8 @@ class MariaTypeSafeClient:
                 0.0,
                 0.18 * max(0, chain_depth)
                 + 0.45 * fatigue
-                + 0.20 * (1.0 - attention),
+                + 0.20 * (1.0 - attention)
+                + (0.35 if not is_addressee else 0.0),
             ),
         )
         min_conf = FOLLOWUP_CONFIDENCE + 0.12 * lazy
@@ -560,23 +563,27 @@ class MariaTypeSafeClient:
                 "message": text[:400],
                 "laziness": f"{lazy:.2f}",
                 "chain_depth": str(max(0, int(chain_depth))),
+                "addressee": "yes" if is_addressee else "no",
             },
             {
                 "followup": Choice(
                     instructions=(
                         "`bot_last` is what the bot MARIA just said in the channel. "
                         "`message` is a member follow-up without naming her. "
+                        "`addressee` is yes if this member is who she just answered; "
+                        "no = another member chiming in — prefer ignore, then react, almost never respond. "
                         "`laziness` (0–1) and `chain_depth` say how much she should stay out: "
                         "high laziness → prefer ignore, then react, rarely respond. "
-                        "On the FIRST follow-up (chain_depth 0), be responsive: "
+                        "On the FIRST follow-up from the addressee (chain_depth 0), be responsive: "
                         "pushback, insistence, or disagreement with her answer needs words. "
                         "How would a chill friend handle it?"
                     ),
                     criteria={
                         "respond": (
-                            "Continues with MARIA and needs words: question, request, "
-                            "another tab/facet, OR short insistence / contradiction "
-                            "(« si », « non », « fais-le », « allez », disagreeing with her refusal)"
+                            "The ADDRESSEE continues with MARIA and needs words: question, "
+                            "request, another tab/facet, OR short insistence / contradiction "
+                            "(« si », « non », « fais-le », « allez », disagreeing with her refusal). "
+                            "Not a bystander commenting to the room."
                         ),
                         "react": (
                             "Closing ack only (thanks, ok, lol, nice), a GIF/image/sticker "
@@ -584,7 +591,8 @@ class MariaTypeSafeClient:
                             "no argument and no ask"
                         ),
                         "ignore": (
-                            "Unrelated to her answer, aimed at someone else, or nothing to answer"
+                            "Unrelated to her answer, another member talking to the room, "
+                            "aimed at someone else, or nothing to answer"
                         ),
                     },
                 ),
