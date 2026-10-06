@@ -903,6 +903,41 @@ class ChannelSession:
             if ctx_hint:
                 hint = f"{hint}\n{ctx_hint}"
             messages = messages + [{"role": "user", "content": hint, "name": "system"}]
+        elif depth > 0 and not skip_focus and focus_msg is not None:
+            # Tour après outil : sans rappel, le modèle peut dériver vers un vieux message du fil.
+            f_author = getattr(getattr(focus_msg, "author", None), "name", "?")
+            f_bot_id, f_bot_names = _bot_identity(focus_msg)
+            f_text = _strip_bot_address(
+                (getattr(focus_msg, "clean_content", None) or focus_msg.content or "").strip(),
+                bot_id=f_bot_id, names=f_bot_names,
+            )
+            if f_text:
+                messages = messages + [{
+                    "role": "user",
+                    "name": "system",
+                    "content": (
+                        f"[FOCUS] Tu réponds à {f_author} : « {f_text[:FOCUS_CONTENT]} ». "
+                        "Utilise les résultats d'outils ci-dessus pour CETTE demande, "
+                        "pas pour un ancien message du fil."
+                    ),
+                }]
+
+        if depth == 0 and trigger is not None:
+            try:
+                _msgs = self.context.get_recent_messages(10_000)
+                _oldest = min((m.created_at for m in _msgs if getattr(m, "created_at", None)), default=None)
+                _age = (
+                    int((datetime.now(timezone.utc) - _oldest).total_seconds() // 60)
+                    if _oldest is not None else 0
+                )
+                logger.info(
+                    "Tour #%s ← %s (%d msgs en contexte, le plus ancien : %d min)",
+                    getattr(getattr(trigger, "channel", None), "id", "?"),
+                    getattr(getattr(trigger, "author", None), "name", "?"),
+                    len(_msgs), _age,
+                )
+            except Exception:
+                logger.debug("log tour échoué", exc_info=True)
 
         if widget_done:
             messages = messages + [{

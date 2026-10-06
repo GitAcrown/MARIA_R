@@ -1590,14 +1590,18 @@ class Chat(commands.Cog):
         blob = intent_text(message)
         if message.reference is None:
             self.typesafe.prefetch_intent(blob)
+        t_start = time.monotonic()
         intent = None
         try:
             intent = await self.typesafe.resolve_intent(blob)
         except Exception:
             logger.debug("resolve_intent avant RAG échoué", exc_info=True)
+        t_intent = time.monotonic()
+        # Pas de RAG mémoire si aucune catégorie spécialisée (hors météo, foot…) et pas de
+        # rappel explicite : chat, opinion, ou question factuelle/actu (→ outils, pas souvenirs).
+        # Les profils des personnes présentes restent injectés ; search_memory reste disponible.
         skip_rag = bool(
             intent is not None
-            and intent.force_level == "none"
             and (
                 intent.category == "none"
                 or intent.category_confidence < CATEGORY_CONFIDENCE
@@ -1612,6 +1616,7 @@ class Chat(commands.Cog):
         )
         try:
             gathered, memories = await self._gather_prompt_context(message, skip_rag=skip_rag)
+            t_ctx = time.monotonic()
             prompt_context = {
                 **gathered,
                 "style_ctx": _style_examples_ctx(),
@@ -1622,6 +1627,14 @@ class Chat(commands.Cog):
                 trigger_message=message,
                 model=MODEL_MAIN,
                 prompt_context=prompt_context,
+            )
+            logger.info(
+                "Latence #%s : intent %.2fs · contexte%s %.2fs · complétion %.2fs",
+                getattr(message.channel, "id", "?"),
+                t_intent - t_start,
+                " (sans RAG)" if skip_rag else "",
+                t_ctx - t_intent,
+                time.monotonic() - t_ctx,
             )
         finally:
             typing_task.cancel()
@@ -2213,6 +2226,13 @@ class Chat(commands.Cog):
                 self._followups.pop(ch_key, None)
                 self._spawn(self._apply_learned_reaction(message))
             # ignore : fenêtre conservée jusqu'à deadline / max checks
+        if should_respond and not other_bot and not edited and message.reference is None:
+            # JEV intent en tâche de fond pendant l'ingestion + le debounce (même clé de cache
+            # que `_send_response` : zéro appel en plus, ~0,3 s de latence en moins).
+            try:
+                self.typesafe.prefetch_intent(intent_text(message))
+            except Exception:
+                logger.debug("prefetch_intent précoce échoué", exc_info=True)
         session = self.gpt_api.session_manager.get_or_create(message.channel)
         await session.ingest_message(message, is_context_only=not should_respond)
 
