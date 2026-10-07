@@ -143,10 +143,12 @@ class SocialFocus:
         confidence: float = 1.0,
         react_min_conf: float = 0.65,
         is_addressee: bool = True,
+        is_question: bool = False,
     ) -> str:
         """Follow-up : 1er tour plutôt conservé ; paresse surtout sur chaîne / fatigue.
 
         `is_addressee=False` : jamais de respond écrit — react au mieux.
+        `is_question=True` : destinataire qui pose une question → répondre sauf fatigue forte.
         """
         if not is_addressee:
             if verdict == "respond":
@@ -159,6 +161,13 @@ class SocialFocus:
                     and confidence >= need
                 ) else "ignore"
             return "ignore"
+        # Question explicite du destinataire : prioritaire sur le verdict JEV.
+        if is_question and fatigue < FATIGUE_EXHAUSTED and chain_depth < 3:
+            if fatigue >= FATIGUE_TIRED and chain_depth >= 1:
+                return "react" if verdict != "ignore" or confidence >= react_min_conf else "ignore"
+            if fatigue >= FATIGUE_TIRED:
+                return "react"
+            return "respond"
         if verdict == "respond":
             # Premier follow-up : on garde respond sauf fatigue réelle.
             if chain_depth == 0 and fatigue < FATIGUE_TIRED:
@@ -170,13 +179,17 @@ class SocialFocus:
             return "respond"
         if verdict == "react":
             need = react_min_conf + (0.1 if fatigue >= FATIGUE_TIRED else 0.0)
+            # Destinataire : un react JEV ne doit pas retomber en ignore faute de conf.
+            if is_addressee and chain_depth == 0 and fatigue < FATIGUE_TIRED:
+                return "react"
             return "react" if confidence >= need else "ignore"
-        # ignore → react seulement membre hot, 1er tour, pas fatiguée
+        # ignore → destinataire 1er tour : rester dans l'échange (sans exiger la conf JEV).
+        if fatigue < FATIGUE_TIRED and chain_depth == 0:
+            return "respond" if attention >= ATTENTION_HOT else "react"
         if (
             fatigue < FATIGUE_TIRED
             and attention >= ATTENTION_HOT
-            and chain_depth == 0
-            and confidence >= react_min_conf
+            and chain_depth == 1
         ):
             return "react"
         return "ignore"

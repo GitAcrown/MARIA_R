@@ -1404,6 +1404,7 @@ class Chat(commands.Cog):
             return "ignore", None
 
         is_addressee = message.author.id == follow.addressee_id
+        is_question = "?" in text or "？" in text
         # Autre membre : ne brûle pas la fenêtre ; répond seulement s'il est déjà hot
         # (et alors au mieux react — un vrai respond reste pour le destinataire / un ping).
         if not is_addressee:
@@ -1428,7 +1429,8 @@ class Chat(commands.Cog):
             follow.checks += 1
         att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
         if is_addressee:
-            att_n = min(1.0, att_n + 0.35)
+            # Destinataire : fort biais « rester dans l'échange », encore plus si « ? ».
+            att_n = min(1.0, att_n + (0.55 if is_question else 0.42))
         else:
             # Tiers : paresse JEV forte (préférer ignore / react).
             att_n = max(0.0, att_n - 0.45)
@@ -1441,9 +1443,15 @@ class Chat(commands.Cog):
                 attention=att_n,
                 fatigue=fat_n,
                 is_addressee=is_addressee,
+                is_question=is_question and is_addressee,
             )
         except Exception:
             logger.debug("classify_followup JEV échoué", exc_info=True)
+            # Destinataire + question : ne pas laisser tomber si JEV plante.
+            if is_addressee and is_question and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
+                return "respond", follow
+            if is_addressee and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
+                return "react", follow
             return "ignore", follow
         decision = self.focus.soften_followup(
             decision,
@@ -1453,6 +1461,7 @@ class Chat(commands.Cog):
             confidence=1.0 if decision != "ignore" else 0.0,
             react_min_conf=REACT_VERDICT_CONFIDENCE,
             is_addressee=is_addressee,
+            is_question=is_question and is_addressee,
         )
         if decision != "ignore":
             logger.info(
