@@ -20,7 +20,7 @@ FORCE_CONFIDENCE = 0.5
 RAG_SCORE_MIN = 1.0
 RAG_CONFIDENCE_MIN = 0.4
 DURABLE_THRESHOLD = 0.5
-FOLLOWUP_CONFIDENCE = 0.48
+FOLLOWUP_CONFIDENCE = 0.58
 # React « à froid » : plus strict que la mention — évite le spam d'emojis.
 REACTION_CONFIDENCE = 0.68
 BANDWAGON_CONFIDENCE = 0.55
@@ -603,25 +603,23 @@ class MariaTypeSafeClient:
             return "ignore"
         from typesafe_sdk import Choice
 
-        # Paresse douce : la fatigue / la chaîne comptent, pas un premier follow-up à froid.
+        # Paresse haute : follow-up rare — surtout ignore / react, respond seulement si clair.
         lazy = min(
             1.0,
             max(
                 0.0,
-                0.18 * max(0, chain_depth)
-                + 0.45 * fatigue
-                + 0.20 * (1.0 - attention)
-                + (0.35 if not is_addressee else 0.0),
+                0.22
+                + 0.25 * max(0, chain_depth)
+                + 0.50 * fatigue
+                + 0.28 * (1.0 - attention)
+                + (0.40 if not is_addressee else 0.0),
             ),
         )
-        # Destinataire : rester dans l'échange ; question explicite → encore moins paresseux.
-        if is_addressee:
-            lazy = max(0.0, lazy - (0.40 if is_question else 0.18))
-        min_conf = FOLLOWUP_CONFIDENCE + 0.12 * lazy
-        react_min = REACT_VERDICT_CONFIDENCE + 0.10 * lazy
+        # Question du destinataire : léger coup de pouce seulement (pas un free-pass).
         if is_addressee and is_question:
-            min_conf = max(0.28, min_conf - 0.18)
-            react_min = max(0.28, react_min - 0.10)
+            lazy = max(0.0, lazy - 0.12)
+        min_conf = FOLLOWUP_CONFIDENCE + 0.16 * lazy
+        react_min = REACT_VERDICT_CONFIDENCE + 0.12 * lazy
 
         result = await self.system_one(
             {
@@ -637,34 +635,25 @@ class MariaTypeSafeClient:
                     instructions=(
                         "`bot_last` is what the bot MARIA just said in the channel. "
                         "`message` is a member follow-up without naming her. "
-                        "`addressee` is yes if this member is who she just answered; "
-                        "no = another member chiming in — prefer ignore, then react, almost never respond. "
-                        "`is_question` is yes when the message clearly asks something (e.g. '?'). "
-                        "`laziness` (0–1) and `chain_depth` say how much she should stay out: "
-                        "high laziness → prefer ignore, then react, rarely respond. "
-                        "On the FIRST follow-up from the addressee (chain_depth 0), be responsive: "
-                        "pushback, insistence, or disagreement with her answer needs words. "
-                        "If addressee=yes AND is_question=yes → almost always respond "
-                        "(a chill friend answers a follow-up question). "
-                        "How would a chill friend handle it?"
+                        "`addressee` yes = who she just answered; no = bystander "
+                        "(almost always ignore). "
+                        "`laziness` is HIGH on purpose — prefer ignore, then react, "
+                        "respond ONLY when words are clearly needed. "
+                        "A chill friend often lets the chat breathe."
                     ),
                     criteria={
                         "respond": (
-                            "The ADDRESSEE continues with MARIA and needs words: question "
-                            "(especially if is_question=yes / contains '?'), "
-                            "request, another tab/facet, OR short insistence / contradiction "
-                            "(« si », « non », « fais-le », « allez », disagreeing with her refusal). "
-                            "Not a bystander commenting to the room."
+                            "Clear need for words from the ADDRESSEE: a real new question "
+                            "about her answer, a request, another tab/facet, OR short "
+                            "insistence (« si », « non », « fais-le ») against a refusal. "
+                            "Not vibes, not commentary, not a bystander."
                         ),
                         "react": (
-                            "Closing ack only (thanks, ok, lol, nice), a GIF/image/sticker "
-                            "or a bare media link with no text — emoji enough, "
-                            "no argument and no ask. Never for a clear question from the addressee."
+                            "Ack / vibe only (thanks, ok, lol, nice, GIF) — emoji enough"
                         ),
                         "ignore": (
-                            "Unrelated to her answer, another member talking to the room, "
-                            "aimed at someone else, or nothing to answer. "
-                            "Do NOT ignore an addressee follow-up question."
+                            "Default: unrelated, room talk, soft ack, or nothing that "
+                            "needs her — when unsure, ignore"
                         ),
                     },
                 ),

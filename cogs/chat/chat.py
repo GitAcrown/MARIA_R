@@ -357,7 +357,7 @@ _TAB_SWITCH_TYPING_SECONDS = 1.0
 _SILENCE_TYPING_DELAY = 2.5
 
 # Follow-up salon : deadline de lecture (+ extension typing), pas une fenêtre fixe.
-FOLLOWUP_MAX_CHECKS = 2
+FOLLOWUP_MAX_CHECKS = 1
 _FOLLOWUP_MAX_ENTRIES = 80
 _AMBIENT_COOLDOWN = 45.0
 
@@ -1339,8 +1339,8 @@ class Chat(commands.Cog):
         return None
 
     def _followup_base_seconds(self, bot_text: str, channel_id: int) -> float:
-        # Entre-deux : ~12–30 s (assez pour un « si », pas une fenêtre trop longue).
-        base = max(12.0, min(30.0, 10.0 + len(bot_text or "") / 35.0))
+        # Fenêtre courte : ~8–18 s (assez pour un « si », peu de suites parasites).
+        base = max(8.0, min(18.0, 7.0 + len(bot_text or "") / 45.0))
         return base * self.focus.followup_deadline_factor(channel_id)
 
     def _open_followup(
@@ -1429,10 +1429,8 @@ class Chat(commands.Cog):
             follow.checks += 1
         att_n = self.focus.attention.normalized(message.guild.id, message.author.id)
         if is_addressee:
-            # Destinataire : fort biais « rester dans l'échange », encore plus si « ? ».
-            att_n = min(1.0, att_n + (0.55 if is_question else 0.42))
+            att_n = min(1.0, att_n + (0.20 if is_question else 0.10))
         else:
-            # Tiers : paresse JEV forte (préférer ignore / react).
             att_n = max(0.0, att_n - 0.45)
         fat_n = self.focus.fatigue.normalized(channel_id)
         try:
@@ -1447,11 +1445,7 @@ class Chat(commands.Cog):
             )
         except Exception:
             logger.debug("classify_followup JEV échoué", exc_info=True)
-            # Destinataire + question : ne pas laisser tomber si JEV plante.
-            if is_addressee and is_question and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
-                return "respond", follow
-            if is_addressee and self.focus.fatigue.value(channel_id) < FATIGUE_TIRED:
-                return "react", follow
+            # Fail-closed : pas de suite si JEV plante.
             return "ignore", follow
         decision = self.focus.soften_followup(
             decision,
