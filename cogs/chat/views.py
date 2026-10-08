@@ -40,18 +40,19 @@ from common.memory.store import (
 from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
 from common.task_recipe import (
+    compact_limits,
+    delivery_hint,
+    focus_label,
     human_status_line,
+    kind_label,
     natural_summary,
     pattern_ok,
-    render_pseudocode,
+    scope_label,
 )
 from common.tasks import (
     DRAFT_TTL_MINUTES,
-    EVENT_COOLDOWN_MIN,
-    KIND_AT,
     KIND_EVENT,
     KIND_WATCH,
-    QUOTA_STATUSES,
     SCHEDULE_ONCE,
     STATUS_ARMED,
     STATUS_DRAFT,
@@ -59,7 +60,6 @@ from common.tasks import (
     STATUS_PAUSED,
     STATUS_PENDING as TASK_PENDING,
     TASK_INSTRUCTION_MAX,
-    TASK_MAX_PENDING,
     ScheduledTask,
     TaskStore,
     format_schedule,
@@ -1073,7 +1073,7 @@ def _task_status_label(t: ScheduledTask) -> str:
     if t.status == STATUS_DRAFT:
         return "brouillon"
     if t.status == STATUS_ARMED:
-        return "à l'écoute"
+        return "à l'écoute" if t.kind == KIND_EVENT else "en veille" if t.kind == KIND_WATCH else "active"
     if t.status == STATUS_PAUSED:
         return "en pause"
     if t.status == STATUS_FAILED:
@@ -1082,21 +1082,22 @@ def _task_status_label(t: ScheduledTask) -> str:
 
 
 def _kind_prefix(t: ScheduledTask) -> str:
-    if t.kind == KIND_EVENT:
-        return "Écoute · "
-    if t.kind == KIND_WATCH:
-        return "Veille · "
+    if t.kind in (KIND_EVENT, KIND_WATCH):
+        return f"{kind_label(t.kind)} · "
     if t.schedule_kind != SCHEDULE_ONCE:
         return f"{REPEAT_REMINDER} "
     return ""
 
 
 def _task_rank(t: ScheduledTask) -> int:
+    # Brouillons en tête (à confirmer), puis actives, pause, échec.
+    if t.status == STATUS_DRAFT:
+        return 0
     if t.status == STATUS_PAUSED:
-        return 1
-    if t.status == STATUS_FAILED:
         return 2
-    return 0
+    if t.status == STATUS_FAILED:
+        return 3
+    return 1
 
 
 def _sorted_tasks(tasks: list[ScheduledTask]) -> list[ScheduledTask]:
@@ -1113,14 +1114,26 @@ def _task_pages(tasks: list[ScheduledTask]) -> list[list[ScheduledTask]]:
     return [ordered[i:i + _TASK_PAGE] for i in range(0, len(ordered), _TASK_PAGE)]
 
 
-def _task_meta(t: ScheduledTask) -> str:
-    bits: list[str] = [_task_status_label(t)]
-    if t.status == STATUS_DRAFT:
-        bits.append("brouillon")
+def _task_label(t: ScheduledTask, default: str = "Sans consigne") -> str:
     if t.kind in (KIND_EVENT, KIND_WATCH):
-        bits.append(human_status_line(t))
+        return focus_label(t) or default
+    return " ".join(((t.title or "").strip() or (t.instruction or "").strip() or default).split())
+
+
+def _task_meta(t: ScheduledTask) -> str:
+    """Ligne `-#` sous le titre du catalogue."""
+    bits: list[str] = [_task_status_label(t)]
+    if t.kind in (KIND_EVENT, KIND_WATCH):
+        mx = int(t.max_fires or 5)
+        fires = int(t.fires_count or 0)
+        if mx == 1:
+            bits.append("1 alerte")
+        else:
+            bits.append(f"{fires}/{mx}")
         if t.expires_at:
             bits.append(f"expire <t:{int(t.expires_at.timestamp())}:R>")
+        elif t.kind == KIND_EVENT:
+            bits.append(scope_label(t))
     else:
         ts = int(t.execute_at.timestamp())
         if t.schedule_kind != SCHEDULE_ONCE:
@@ -1132,6 +1145,7 @@ def _task_meta(t: ScheduledTask) -> str:
 
 
 def _task_meta_plain(t: ScheduledTask) -> str:
+    """Description du select (pas de timestamps Discord)."""
     bits = [_task_status_label(t)]
     if t.kind in (KIND_EVENT, KIND_WATCH):
         bits.append(human_status_line(t))
@@ -1145,41 +1159,62 @@ def _task_meta_plain(t: ScheduledTask) -> str:
     return " · ".join(bits)
 
 
-def _task_label(t: ScheduledTask, default: str = "Sans consigne") -> str:
-    return " ".join(((t.title or "").strip() or (t.instruction or "").strip() or default).split())
-
-
 def _task_catalog_text(t: ScheduledTask) -> discord.ui.TextDisplay:
-    """Bloc CRIT : `###` titre, consigne si elle diffère, ligne méta `-#`."""
+    """Bloc catalogue : titre clair + une ligne méta. Pas de pseudo-code."""
     heading = f"{_kind_prefix(t)}{_task_label(t)}"
     lines = [f"### {_clip(heading, 90)}"]
-    instr = " ".join((t.instruction or "").split())
-    label = _task_label(t)
-    if instr and instr != label:
-        lines.append(_clip(instr, 160))
-    lines.append(f"-# #{t.id} · {_task_meta(t)}")
+    if t.kind == KIND_EVENT:
+        trig = t.trigger
+        topic = str(trig.get("topic") or "").strip()
+        terms = [trig.get("pattern") or ""] + list(trig.get("aliases") or [])
+        terms = [str(x).strip() for x in terms if str(x).strip()]
+        if topic:
+            lines.append(_clip(f"Quand on parle de « {topic} »", 160))
+        elif terms:
+            lines.append(_clip("Quand quelqu'un dit « " + " / ".join(terms[:3]) + " »", 160))
+    elif t.kind == KIND_WATCH:
+        thr = t.trigger.get("threshold")
+        lines.append(f"Si le prix passe sous {thr:g} €" if thr is not None else "Veille prix")
+    else:
+        instr = " ".join((t.instruction or "").split())
+        label = _task_label(t)
+        if instr and instr != label:
+            lines.append(_clip(instr, 160))
+    lines.append(f"-# {_task_meta(t)}")
     if t.last_error:
         lines.append(f"-# {_clip(t.last_error, 80)}")
     return discord.ui.TextDisplay("\n".join(lines))
 
 
 def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) -> str:
+    """Détail d'une tâche : phrase claire + limites, sans bloc ```pseudo-code```."""
     if t.kind in (KIND_EVENT, KIND_WATCH):
-        code = render_pseudocode(t)
-        meta = human_status_line(t)
-        if t.expires_at:
-            meta += f" · expire <t:{int(t.expires_at.timestamp())}:R>"
-        if t.kind == KIND_WATCH and t.execute_at:
-            meta += f" · prochain check <t:{int(t.execute_at.timestamp())}:R>"
-        vars_line = ""
-        if store is not None and t.kind == KIND_WATCH:
+        price = None
+        url = ""
+        if t.kind == KIND_WATCH and store is not None:
             key = (t.trigger.get("var_key") or "").strip()
             if key:
                 raw = store.get_var(t.guild_id, t.user_id, key)
-                if raw:
-                    vars_line = f"\n-# dernier_prix = {raw} €"
-        err = f"\n-# Dernière erreur : {t.last_error}" if t.last_error else ""
-        return f"```\n{code}\n```\n-# {_task_status_label(t)} · {meta}{vars_line}{err}"
+                try:
+                    price = float(raw) if raw else None
+                except (TypeError, ValueError):
+                    price = None
+            url = (t.trigger.get("url") or "").strip()
+        summary = natural_summary(t, price=price)
+        limits = compact_limits(t, price=price)
+        hint = delivery_hint(t)
+        parts = [summary]
+        if hint:
+            parts.append(f"-# {hint}")
+        parts.append(f"-# {_task_status_label(t)} · {limits}")
+        if t.kind == KIND_WATCH and t.execute_at and t.status != STATUS_DRAFT:
+            parts.append(f"-# Prochain check <t:{int(t.execute_at.timestamp())}:R>")
+        if url:
+            short = url if len(url) <= 64 else url[:61] + "…"
+            parts.append(f"-# {short}")
+        if t.last_error:
+            parts.append(f"-# Dernière erreur : {t.last_error}")
+        return "\n".join(parts)
     ts = int(t.execute_at.timestamp())
     rec = format_schedule(t)
     if t.schedule_kind != SCHEDULE_ONCE:
@@ -1261,7 +1296,9 @@ class EditTaskModal(discord.ui.Modal, title="Modifier la tâche"):
         await self._hub.reload(interaction, note="Tâche modifiée.")
 
 
-class EditTriggerModal(discord.ui.Modal, title="Modifier écoute / veille"):
+class EditTriggerModal(discord.ui.Modal, title="Modifier l'alerte"):
+    """Écoute : sujet + mot-clé optionnel. Veille : seuil. Pas de cooldown manuel."""
+
     def __init__(self, hub: "TasksView", task: ScheduledTask):
         super().__init__()
         self._hub = hub
@@ -1273,22 +1310,25 @@ class EditTriggerModal(discord.ui.Modal, title="Modifier écoute / veille"):
             max_length=min(TASK_INSTRUCTION_MAX, 1024),
             required=True,
             default=(task.instruction or "")[:1024],
+            placeholder="Go ranked ?  /  Préviens-moi.",
         )
         self.add_item(self.instruction)
         if task.kind == KIND_EVENT:
             self.field_a = discord.ui.TextInput(
-                label="Mot-clé (3–24 car.)",
+                label="Sujet (détecté par le sens)",
                 style=discord.TextStyle.short,
-                max_length=24,
-                required=True,
-                default=(trig.get("pattern") or "")[:24],
+                max_length=160,
+                required=False,
+                default=(trig.get("topic") or "")[:160],
+                placeholder="quelqu'un propose une partie ranked",
             )
             self.field_b = discord.ui.TextInput(
-                label="Cooldown (heures, min 1)",
+                label="Mot-clé (optionnel, 3–24)",
                 style=discord.TextStyle.short,
-                max_length=4,
+                max_length=24,
                 required=False,
-                default=str(max(1, (task.cooldown_seconds or 3600) // 3600)),
+                default=(trig.get("pattern") or "")[:24],
+                placeholder="ranked",
             )
         else:
             self.field_a = discord.ui.TextInput(
@@ -1299,7 +1339,7 @@ class EditTriggerModal(discord.ui.Modal, title="Modifier écoute / veille"):
                 default=str(trig.get("threshold") or ""),
             )
             self.field_b = discord.ui.TextInput(
-                label="Max alertes",
+                label="Nombre d'alertes max",
                 style=discord.TextStyle.short,
                 max_length=4,
                 required=False,
@@ -1316,21 +1356,20 @@ class EditTriggerModal(discord.ui.Modal, title="Modifier écoute / veille"):
         instr = self.instruction.value.strip()
         kwargs: dict = {"instruction": instr or None}
         if self.task.kind == KIND_EVENT:
-            pat = self.field_a.value.strip()
-            bad = pattern_ok(pat)
-            if bad:
-                return await self._hub.reload(interaction, note=bad)
-            kwargs["pattern"] = pat
-            try:
-                hours = float(self.field_b.value or "3")
-                cd = int(hours * 3600)
-            except ValueError:
-                cd = EVENT_COOLDOWN_MIN
-            if cd < EVENT_COOLDOWN_MIN:
+            topic = (self.field_a.value or "").strip()
+            pat = (self.field_b.value or "").strip()
+            if not topic and not pat:
                 return await self._hub.reload(
-                    interaction, note=f"Cooldown min {EVENT_COOLDOWN_MIN // 3600} h.",
+                    interaction, note="Indique un sujet ou un mot-clé.",
                 )
-            kwargs["cooldown_seconds"] = cd
+            if pat:
+                bad = pattern_ok(pat)
+                if bad:
+                    return await self._hub.reload(interaction, note=bad)
+            kwargs["topic"] = topic
+            kwargs["pattern"] = pat
+            # Titre lisible à jour.
+            kwargs["title"] = f"Écoute · {topic or pat}"[:80]
         else:
             try:
                 kwargs["threshold"] = float(self.field_a.value.replace(",", "."))
@@ -1340,11 +1379,12 @@ class EditTriggerModal(discord.ui.Modal, title="Modifier écoute / veille"):
                 kwargs["max_fires"] = max(1, int(self.field_b.value or "5"))
             except ValueError:
                 pass
+            kwargs["title"] = f"Veille · ≤ {kwargs['threshold']:g} €"
         self._hub.store.edit(self.task.id, self._hub.user_id, **kwargs)
         chat = interaction.client.get_cog("Chat")
         if chat is not None and hasattr(chat, "event_triggers"):
             chat.event_triggers.invalidate(self.task.guild_id)
-        await self._hub.reload(interaction, note="Tâche modifiée.")
+        await self._hub.reload(interaction, note="Alerte mise à jour.")
 
 
 class _TaskBackButton(discord.ui.Button):
@@ -1474,13 +1514,13 @@ class _OpenTaskSelect(discord.ui.Select):
     def __init__(self, hub: "TasksView", tasks: list[ScheduledTask]):
         options = [
             discord.SelectOption(
-                label=_clip(f"#{t.id} · {_task_label(t)}", 100),
+                label=_clip(f"{_kind_prefix(t)}{_task_label(t)}", 100),
                 value=str(t.id),
                 description=_clip(_task_meta_plain(t), 100),
             )
             for t in tasks
         ]
-        super().__init__(placeholder="Ouvrir une tâche…", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder="Ouvrir…", options=options, min_values=1, max_values=1)
         self._hub = hub
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1537,22 +1577,17 @@ class TasksView(MariaLayout):
             self.screen = "catalog"
             self._build()
             return
-        heading = _task_label(task, "Tâche")
+        kind = kind_label(task.kind) if task.kind in (KIND_EVENT, KIND_WATCH) else "Tâche"
+        focus = _task_label(task, "Sans titre")
         body: list[discord.ui.Item] = [
-            title_text(_clip(heading, 90), f"#{task.id}"),
+            title_text(_clip(f"{kind} · {focus}", 90), f"#{task.id}"),
             sep_wide(),
+            discord.ui.TextDisplay(_format_task_body(task, store=self.store)),
         ]
-        instr = (task.instruction or "").strip()
-        if instr and " ".join(instr.split()) != heading:
-            body.append(discord.ui.TextDisplay(instr))
-        body.append(discord.ui.TextDisplay(_format_task_body(task, store=self.store)))
         if self.note:
             body += [sep_tight(), discord.ui.TextDisplay(f"-# {self.note}")]
         actions: list[discord.ui.Button] = []
-        if task.kind in (KIND_EVENT, KIND_WATCH):
-            if task.status != STATUS_DRAFT:
-                actions.append(_EditTaskButton(self, task))
-        else:
+        if task.status != STATUS_DRAFT:
             actions.append(_EditTaskButton(self, task))
         if (
             task.kind in (KIND_EVENT, KIND_WATCH)
@@ -1590,21 +1625,22 @@ class TasksView(MariaLayout):
         self.page = max(0, min(self.page, len(pages) - 1))
         shown = pages[self.page]
         q = self.store.quota_summary(self.user_id)
+        draft_n = sum(1 for t in self.tasks if t.status == STATUS_DRAFT)
         paused_n = sum(1 for t in self.tasks if t.status == STATUS_PAUSED)
-        meta = (
-            f"Tâches {q['total']}/{q['max_total']} · "
-            f"Écoute {q['event']}/{q['max_event']} · "
-            f"Veille {q['watch']}/{q['max_watch']}"
-        )
-        if paused_n:
+        # Quotas serrés : on montre ce qui compte (écoutes / veille), pas un règlement.
+        meta = f"{q['event']}/{q['max_event']} écoutes · {q['watch']}/{q['max_watch']} veille"
+        if draft_n:
+            meta = f"{draft_n} à confirmer · " + meta
+        elif paused_n:
             meta += f" · {paused_n} en pause"
         if len(pages) > 1:
-            meta += f" · page {self.page + 1}/{len(pages)}"
+            meta += f" · {self.page + 1}/{len(pages)}"
         body: list[discord.ui.Item] = [title_text("Tâches", meta), sep_wide()]
         rows: list[discord.ui.ActionRow] = []
         if not self.tasks:
             body.append(discord.ui.TextDisplay(
-                "*Aucune tâche en attente. Demande-moi un rappel dans le tchat.*"
+                "Rien pour l'instant.\n"
+                "-# Dis-moi « préviens-moi si… », « surveille ce prix » ou « rappelle-moi… »."
             ))
         else:
             for index, t in enumerate(shown):
@@ -1672,41 +1708,37 @@ class ConfirmTaskCreateView(MariaLayout):
     def _quota_line(self) -> str:
         q = self.quotas or {}
         return (
-            f"Écoute {q.get('event', 0)}/{q.get('max_event', 2)} · "
-            f"Veille {q.get('watch', 0)}/{q.get('max_watch', 1)} · "
-            f"Tâches {q.get('total', 0)}/{q.get('max_total', 8)}"
+            f"{q.get('event', 0)}/{q.get('max_event', 2)} écoutes · "
+            f"{q.get('watch', 0)}/{q.get('max_watch', 1)} veille"
         )
 
     def _build(self) -> None:
         task = self.task
+        kind = kind_label(task.kind)
         titles = {
-            "pending": "Je m'en occupe ?",
-            "confirmed": "C'est activé",
+            "pending": f"{kind} ?",
+            "confirmed": f"{kind} activée",
             "cancelled": "Annulé",
-            "expired": "Brouillon expiré",
+            "expired": "Expiré",
         }
+        focus = focus_label(task)
         body: list[discord.ui.Item] = [
-            title_text(titles.get(self.state, "Tâche"), f"#{task.id}"),
+            title_text(titles.get(self.state, kind), focus or f"#{task.id}"),
             sep_wide(),
         ]
         if self.state == "pending" and self.commentary:
             body.append(discord.ui.TextDisplay(self.commentary))
         if self.state in ("pending", "confirmed"):
             body.append(discord.ui.TextDisplay(natural_summary(task, price=self.price)))
+            hint = delivery_hint(task)
+            if hint:
+                body.append(discord.ui.TextDisplay(f"-# {hint}"))
         if self.state == "pending":
-            scope_bit = (
-                "Serveur entier · modo" if task.scope == "guild"
-                else "Ce salon" if len(task.channel_ids) <= 1
-                else f"{len(task.channel_ids)} salons"
-            )
-            body += [
-                sep_tight(),
-                discord.ui.TextDisplay(f"```\n{render_pseudocode(task)}\n```"),
-                discord.ui.TextDisplay(
-                    f"-# {scope_bit} · {self._quota_line()}\n"
-                    "-# Tu peux aussi répondre « oui » / « plutôt moins souvent… » dans le tchat."
-                ),
-            ]
+            body.append(discord.ui.TextDisplay(
+                f"-# {compact_limits(task, price=self.price)}\n"
+                f"-# {self._quota_line()}\n"
+                "-# Confirme ici, ou réponds « oui » / « non » dans le tchat."
+            ))
             self.set_layout(
                 body,
                 discord.ui.ActionRow(
@@ -1716,7 +1748,9 @@ class ConfirmTaskCreateView(MariaLayout):
             )
         else:
             if self.state == "confirmed":
-                body.append(discord.ui.TextDisplay(f"-# {self._quota_line()}"))
+                body.append(discord.ui.TextDisplay(
+                    f"-# {compact_limits(task, price=self.price)} · {self._quota_line()}"
+                ))
             self.set_layout(body)
 
     async def finish(self, interaction: discord.Interaction, state: str) -> None:

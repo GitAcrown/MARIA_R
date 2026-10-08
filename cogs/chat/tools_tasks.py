@@ -128,7 +128,8 @@ def _format_widget_line(item: dict) -> str:
     status_bit = " · en pause" if status == STATUS_PAUSED else ""
     task_kind = item.get("kind") or KIND_AT
     if task_kind in (KIND_EVENT, KIND_WATCH):
-        return f"-# {item.get('human_status') or task_kind}{status_bit}\n› {desc}"
+        label = "Écoute" if task_kind == KIND_EVENT else "Veille"
+        return f"**{label}** {item.get('human_status') or ''}{status_bit}\n› {desc}"
     if kind != SCHEDULE_ONCE:
         until = ""
         if item.get("until_at_ts"):
@@ -313,22 +314,20 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     quota = data.get("quotas") or {}
     if quota:
         meta = (
-            f"{quota.get('total', len(items))}/{quota.get('max_total', TASK_MAX_PENDING)} · "
-            f"Écoute {quota.get('event', 0)}/{quota.get('max_event', TASK_MAX_EVENT)} · "
-            f"Veille {quota.get('watch', 0)}/{quota.get('max_watch', TASK_MAX_WATCH)}"
+            f"{quota.get('event', 0)}/{quota.get('max_event', TASK_MAX_EVENT)} écoutes · "
+            f"{quota.get('watch', 0)}/{quota.get('max_watch', TASK_MAX_WATCH)} veille"
         )
     else:
-        quota_n = sum(
-            1 for it in items
-            if (it.get("status") or STATUS_PENDING) in (STATUS_PENDING, STATUS_PAUSED, STATUS_DRAFT)
-        )
-        meta = f"{quota_n}/{TASK_MAX_PENDING}"
+        meta = f"{len(items)} tâche{'s' if len(items) != 1 else ''}"
     children: list[discord.ui.Item] = [
-        discord.ui.TextDisplay(f"## Tâches · {name} · {meta}"),
+        discord.ui.TextDisplay(f"## Tâches · {name}"),
+        discord.ui.TextDisplay(f"-# {meta}"),
         sep_wide(),
     ]
     if not items:
-        children.append(discord.ui.TextDisplay("-# Aucune tâche en attente."))
+        children.append(discord.ui.TextDisplay(
+            "-# Rien en cours. Dis « préviens-moi si… » ou « surveille ce prix »."
+        ))
     else:
         body = "\n\n".join(_format_widget_line(it) for it in items)
         children.append(discord.ui.TextDisplay(body))

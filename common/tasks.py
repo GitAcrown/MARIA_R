@@ -1200,6 +1200,7 @@ class TaskStore:
         clear_until: bool = False,
         deliver_dm: Optional[bool] = None,
         pattern: Optional[str] = None,
+        topic: Optional[str] = None,
         cooldown_seconds: Optional[int] = None,
         max_fires: Optional[int] = None,
         threshold: Optional[float] = None,
@@ -1276,6 +1277,11 @@ class TaskStore:
         trig_changed = False
         if pattern is not None and current.kind == KIND_EVENT:
             trig["pattern"] = str(pattern).strip()[:24]
+            trig_changed = True
+        if topic is not None and current.kind == KIND_EVENT:
+            t = str(topic).strip()[:160]
+            trig["topic"] = t
+            trig["semantic"] = bool(t)
             trig_changed = True
         if threshold is not None and current.kind == KIND_WATCH:
             trig["threshold"] = float(threshold)

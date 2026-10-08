@@ -374,54 +374,130 @@ def _fmt_duration_days(expires_at: Optional[datetime]) -> str:
     return f"{max(1, round(secs / 86400))} jours"
 
 
-def natural_summary(task, *, price: Optional[float] = None) -> str:
-    """Phrase en clair de ce que MARIA va faire (confirm + liste)."""
+def kind_label(kind: str) -> str:
+    return {"event": "Écoute", "watch": "Veille", "recurring": "Rappel", "at": "Rappel"}.get(
+        kind or "", "Tâche",
+    )
+
+
+def focus_label(task, *, max_len: int = 60) -> str:
+    """Sujet court d'une tâche (liste, select, titres) — topic > mots-clés > seuil > titre."""
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
-    cd = int(getattr(task, "cooldown_seconds", 0) or EVENT_COOLDOWN_DEFAULT)
-    mx = int(getattr(task, "max_fires", 0) or EVENT_MAX_FIRES_DEFAULT)
-    duree = _fmt_duration_days(getattr(task, "expires_at", None))
-    alertes = "1 seule alerte" if mx == 1 else f"{mx} alertes max"
     if kind == KIND_EVENT:
-        terms = trigger_terms(trigger)
         topic = str(trigger.get("topic") or "").strip()
-        quoted = " / ".join(f"« {t} »" for t in terms) if terms else f"« {topic or '?'} »"
-        scope = getattr(task, "scope", "channel") or "channel"
-        where = "sur tout le serveur" if scope == "guild" else "dans ce salon"
-        spacing = "" if mx == 1 else f", au moins {_fmt_cooldown(cd)} entre deux"
-        return (
-            f"Je te ping quand quelqu'un parle de {quoted} {where}. "
-            f"{alertes}{spacing}, pendant {duree}."
-        )
+        terms = trigger_terms(trigger)
+        raw = topic or (" / ".join(terms) if terms else "") or (getattr(task, "title", "") or "")
+        raw = re.sub(r"^Écoute\s*[·•\-:]?\s*", "", raw, flags=re.IGNORECASE).strip(" «»\"'")
+    elif kind == KIND_WATCH:
+        thr = trigger.get("threshold")
+        raw = f"≤ {thr:g} €" if thr is not None else (getattr(task, "title", "") or "prix")
+        raw = re.sub(r"^Veille\s*[·•\-:]?\s*", "", str(raw), flags=re.IGNORECASE).strip()
+    else:
+        raw = (getattr(task, "title", None) or getattr(task, "instruction", None) or "Sans consigne")
+    text = " ".join(str(raw).split())
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def scope_label(task) -> str:
+    scope = getattr(task, "scope", "channel") or "channel"
+    if scope == "guild":
+        return "tout le serveur"
+    n = len(getattr(task, "channel_ids", None) or [])
+    if n <= 1:
+        return "ce salon"
+    return f"{n} salons"
+
+
+def delivery_hint(task) -> str:
+    """Ce que le membre recevra — vide si mode générique (GPT)."""
+    recipe = parse_recipe(getattr(task, "recipe_json", None) or {})
+    mode = str(recipe.get("mode") or "generate")
+    say = (recipe.get("say") or getattr(task, "instruction", "") or "").strip()
+    say = " ".join(say.split())
+    if mode == "verbatim" and say:
+        short = say if len(say) <= 70 else say[:69] + "…"
+        return f'Enverra « {short} »'
+    if mode == "ping_only":
+        return "Ping simple (sans message rédigé)"
+    return ""
+
+
+def compact_limits(task, *, price: Optional[float] = None) -> str:
+    """Une ligne de limites, sans jargon (confirm + détail)."""
+    kind = getattr(task, "kind", None) or KIND_AT
+    trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
+    bits: list[str] = []
+    if kind == KIND_EVENT:
+        bits.append(scope_label(task))
+    elif kind == KIND_WATCH:
+        if price is not None:
+            bits.append(f"actuellement {price:.2f} €")
+        interval = int(trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
+        bits.append(f"vérif ~{max(1, interval // 60)} h")
+    mx = int(getattr(task, "max_fires", 0) or EVENT_MAX_FIRES_DEFAULT)
+    fires = int(getattr(task, "fires_count", 0) or 0)
+    if mx == 1:
+        bits.append("1 seule alerte")
+    elif fires:
+        bits.append(f"{fires}/{mx} alertes")
+    else:
+        bits.append(f"{mx} alertes max")
+    cd = int(getattr(task, "cooldown_seconds", 0) or EVENT_COOLDOWN_DEFAULT)
+    if mx > 1 and kind == KIND_EVENT:
+        bits.append(f"≥ {_fmt_cooldown(cd)} entre deux")
+    exp = getattr(task, "expires_at", None)
+    if exp is not None:
+        bits.append(f"expire <t:{int(exp.timestamp())}:R>")
+    if getattr(task, "deliver_dm", False):
+        bits.append("MP")
+    return " · ".join(bits)
+
+
+def natural_summary(task, *, price: Optional[float] = None) -> str:
+    """Phrase en clair (ce qui déclenche). Les chiffres vont dans `compact_limits`."""
+    kind = getattr(task, "kind", None) or KIND_AT
+    trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
+    if kind == KIND_EVENT:
+        topic = str(trigger.get("topic") or "").strip()
+        terms = trigger_terms(trigger)
+        if topic and terms:
+            about = f"« {topic} »"
+            # Mot-clé secondaire seulement s'il n'est pas déjà dans le sujet.
+            extras = [t for t in terms if t.casefold() not in topic.casefold()]
+            if extras:
+                about += f" (aussi « {' / '.join(extras)} »)"
+        elif topic:
+            about = f"« {topic} »"
+        elif terms:
+            about = " / ".join(f"« {t} »" for t in terms)
+        else:
+            about = "« ? »"
+        where = "sur tout le serveur" if (getattr(task, "scope", "") or "") == "guild" else "dans ce salon"
+        return f"Je te ping quand quelqu'un parle de {about} {where}."
     if kind == KIND_WATCH:
         thr = trigger.get("threshold")
         op = trigger.get("op") or "lt"
         op_fr = {"lt": "passe sous", "lte": "passe à", "gt": "dépasse", "change": "bouge de"}.get(op, "passe sous")
         now_bit = f" (actuellement {price:.2f} €)" if price is not None else ""
-        interval = int(trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
-        return (
-            f"Je surveille cette page et je te ping si le prix {op_fr} {thr} €{now_bit}. "
-            f"Vérif ~toutes les {max(1, interval // 60)} h, {alertes}, pendant {duree}."
-        )
+        return f"Je te ping si le prix {op_fr} {thr} €{now_bit}."
     return ""
 
 
 def human_status_line(task) -> str:
-    """Une ligne statut pour la liste /taches."""
+    """Ligne courte pour liste / widget (sans jargon cd/Mot)."""
     kind = getattr(task, "kind", KIND_AT) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     if kind == KIND_EVENT:
-        pat = event_label(trigger)
-        label = "Mot" if trigger_terms(trigger) else "Sujet"
-        cd = int(getattr(task, "cooldown_seconds", 0) or EVENT_COOLDOWN_DEFAULT)
         fires = int(getattr(task, "fires_count", 0) or 0)
         mx = int(getattr(task, "max_fires", 0) or EVENT_MAX_FIRES_DEFAULT)
-        return f"{label} « {pat} » · cd {_fmt_cooldown(cd)} · {fires}/{mx}"
+        focus = focus_label(task, max_len=36)
+        return f"« {focus} » · {fires}/{mx}"
     if kind == KIND_WATCH:
         thr = trigger.get("threshold")
-        interval = int(trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
-        exp = _fmt_expire(getattr(task, "expires_at", None))
-        return f"Sous {thr}€ · ~{interval // 60}h · {exp}"
+        fires = int(getattr(task, "fires_count", 0) or 0)
+        mx = int(getattr(task, "max_fires", 0) or EVENT_MAX_FIRES_DEFAULT)
+        return f"≤ {thr:g} € · {fires}/{mx}"
     from common.tasks import SCHEDULE_ONCE
     if getattr(task, "schedule_kind", SCHEDULE_ONCE) != SCHEDULE_ONCE:
         return format_schedule(task)
