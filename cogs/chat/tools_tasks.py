@@ -1269,6 +1269,10 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
             }, datetime.now(timezone.utc))
 
         if action == "pause":
+            if target.kind not in (KIND_EVENT, KIND_WATCH) and target.schedule_kind == SCHEDULE_ONCE:
+                return ToolResponseRecord(tc.id, {
+                    "error": "Un rappel à date unique ne se met pas en pause. Annule-le s'il ne sert plus.",
+                }, datetime.now(timezone.utc))
             ok = await asyncio.to_thread(store.pause, tid, user_id)
             if not ok:
                 return ToolResponseRecord(

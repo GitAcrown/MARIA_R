@@ -15,7 +15,7 @@ from typing import Optional
 import discord
 
 from common.discord_ui import member_accent_colour
-from common.emojis import REPEAT_REMINDER
+from common.emojis import EVENT_TASK, REPEAT_REMINDER
 from common.menu_layout import (
     HubPageButton,
     HubTabButton,
@@ -1082,9 +1082,19 @@ def _task_status_label(t: ScheduledTask) -> str:
     return "active"
 
 
+def _partial_emoji(markup: str) -> Optional[discord.PartialEmoji]:
+    """Le markdown <:…:> ne s'affiche pas dans un select : il faut un PartialEmoji."""
+    m = re.fullmatch(r"<(a?):(\w+):(\d+)>", markup)
+    if not m:
+        return None
+    return discord.PartialEmoji(name=m.group(2), id=int(m.group(3)), animated=bool(m.group(1)))
+
+
 def _kind_prefix(t: ScheduledTask, *, plain: bool = False) -> str:
     """Préfixe type. `plain=True` pour les selects (pas d'emoji custom en texte)."""
-    if t.kind in (KIND_EVENT, KIND_WATCH):
+    if t.kind == KIND_EVENT:
+        return "Écoute · " if plain else f"{EVENT_TASK} "
+    if t.kind == KIND_WATCH:
         return f"{kind_label(t.kind)} · "
     if t.schedule_kind != SCHEDULE_ONCE:
         return "Rappel · " if plain else f"{REPEAT_REMINDER} "
@@ -1092,13 +1102,11 @@ def _kind_prefix(t: ScheduledTask, *, plain: bool = False) -> str:
 
 
 def _select_emoji(t: ScheduledTask) -> Optional[discord.PartialEmoji]:
-    """Emoji Discord natif du select (le markdown <:…:> ne marche PAS dans label/desc)."""
-    if t.schedule_kind == SCHEDULE_ONCE or t.kind in (KIND_EVENT, KIND_WATCH):
-        return None
-    m = re.fullmatch(r"<(a?):(\w+):(\d+)>", REPEAT_REMINDER)
-    if not m:
-        return None
-    return discord.PartialEmoji(name=m.group(2), id=int(m.group(3)), animated=bool(m.group(1)))
+    if t.kind == KIND_EVENT:
+        return _partial_emoji(EVENT_TASK)
+    if t.schedule_kind != SCHEDULE_ONCE and t.kind != KIND_WATCH:
+        return _partial_emoji(REPEAT_REMINDER)
+    return None
 
 
 def _task_rank(t: ScheduledTask) -> int:
@@ -1206,6 +1214,11 @@ def _task_instruction_text(t: ScheduledTask) -> str:
     return " ".join((t.instruction or "").split()).strip()
 
 
+def _is_one_shot(t: ScheduledTask) -> bool:
+    """Rappel unique à une date : pas de pause, seulement supprimer."""
+    return t.kind not in (KIND_EVENT, KIND_WATCH) and t.schedule_kind == SCHEDULE_ONCE
+
+
 def _has_next_run(t: ScheduledTask) -> bool:
     """Horloge et veille ont une prochaine exécution. Les écoutes attendent un message."""
     if t.status == STATUS_DRAFT or t.execute_at is None:
@@ -1218,10 +1231,11 @@ def _has_next_run(t: ScheduledTask) -> bool:
 def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) -> str:
     """Détail : pseudo-code, prochaine exécution, puis #id et le reste en bas."""
     parts = [f"```\n{render_pseudocode(t)}\n```"]
+    foot: list[str] = []
     if _has_next_run(t):
         ts = int(t.execute_at.timestamp())
-        parts.append(f"**Prochaine exécution**\n<t:{ts}:F> · <t:{ts}:R>")
-    foot: list[str] = [f"#{t.id}"]
+        foot.append(f"Prochaine exécution · <t:{ts}:F> · <t:{ts}:R>")
+    foot.append(f"#{t.id}")
     if t.deliver_dm:
         foot.append("MP")
     if t.kind in (KIND_EVENT, KIND_WATCH):
@@ -1242,7 +1256,7 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
             foot.append(url if len(url) <= 64 else url[:61] + "…")
     elif t.status == STATUS_DRAFT:
         foot.append("brouillon")
-    parts.append(f"-# {' · '.join(foot)}")
+    parts.append(" · ".join(foot))
     if t.last_error:
         parts.append(f"-# Dernière erreur : {t.last_error}")
     return "\n".join(parts)
@@ -1670,8 +1684,12 @@ class TasksView(MariaLayout):
             else:
                 note = "Pas de prochaine occurrence."
         elif action == "pause":
-            ok = self.store.pause(task.id, self.user_id)
-            note = "Tâche en pause." if ok else "Impossible de mettre en pause."
+            if _is_one_shot(task):
+                note = "Un rappel unique ne se met pas en pause."
+                ok = False
+            else:
+                ok = self.store.pause(task.id, self.user_id)
+                note = "Tâche en pause." if ok else "Impossible de mettre en pause."
             stay_on_detail = ok
         elif action == "resume":
             ok = self.store.resume(task.id, self.user_id)
@@ -1709,7 +1727,10 @@ class TasksView(MariaLayout):
         else:
             heading = _task_label(task, "Tâche")
         title = discord.ui.TextDisplay(f"## {_clip(heading, 80)}")
-        can_switch = task.status in (TASK_PENDING, STATUS_ARMED, STATUS_PAUSED)
+        can_switch = (
+            task.status in (TASK_PENDING, STATUS_ARMED, STATUS_PAUSED)
+            and not _is_one_shot(task)
+        )
         head: discord.ui.Item = (
             discord.ui.Section(title, accessory=_TaskPowerButton(self, task))
             if can_switch else title
