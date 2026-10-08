@@ -1206,10 +1206,24 @@ def _task_instruction_text(t: ScheduledTask) -> str:
     return " ".join((t.instruction or "").split()).strip()
 
 
+def _has_next_run(t: ScheduledTask) -> bool:
+    """Horloge et veille ont une prochaine exécution. Les écoutes attendent un message."""
+    if t.status == STATUS_DRAFT or t.execute_at is None:
+        return False
+    if t.kind == KIND_EVENT or t.execute_at.year >= 2090:
+        return False
+    return True
+
+
 def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) -> str:
-    """Détail : pseudo-code (clair) + ligne de statut."""
-    code = render_pseudocode(t)
-    parts = [f"```\n{code}\n```"]
+    """Détail : pseudo-code, prochaine exécution, puis #id et le reste en bas."""
+    parts = [f"```\n{render_pseudocode(t)}\n```"]
+    if _has_next_run(t):
+        ts = int(t.execute_at.timestamp())
+        parts.append(f"**Prochaine exécution**\n<t:{ts}:F> · <t:{ts}:R>")
+    foot: list[str] = [f"#{t.id}"]
+    if t.deliver_dm:
+        foot.append("MP")
     if t.kind in (KIND_EVENT, KIND_WATCH):
         price = None
         if t.kind == KIND_WATCH and store is not None:
@@ -1220,18 +1234,15 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
                     price = float(raw) if raw else None
                 except (TypeError, ValueError):
                     price = None
-        parts.append(f"-# {_task_status_label(t)} · {compact_limits(t, price=price)}")
-        if t.kind == KIND_WATCH and t.execute_at and t.status != STATUS_DRAFT:
-            parts.append(f"-# Prochain check <t:{int(t.execute_at.timestamp())}:R>")
+        limits = compact_limits(t, price=price)
+        if limits:
+            foot.append(limits)
         url = (t.trigger.get("url") or "").strip() if t.kind == KIND_WATCH else ""
         if url:
-            short = url if len(url) <= 64 else url[:61] + "…"
-            parts.append(f"-# {short}")
-    else:
-        ts = int(t.execute_at.timestamp())
-        dest = " · MP" if t.deliver_dm else ""
-        parts.append(f"-# {_task_status_label(t)}{dest}")
-        parts.append(f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>)")
+            foot.append(url if len(url) <= 64 else url[:61] + "…")
+    elif t.status == STATUS_DRAFT:
+        foot.append("brouillon")
+    parts.append(f"-# {' · '.join(foot)}")
     if t.last_error:
         parts.append(f"-# Dernière erreur : {t.last_error}")
     return "\n".join(parts)
@@ -1438,6 +1449,26 @@ class _TaskBackButton(discord.ui.Button):
         await apply_view(interaction, self._hub)
 
 
+class _TaskPowerButton(discord.ui.Button):
+    """Interrupteur ON (vert) / OFF (gris), accessoire du titre."""
+
+    def __init__(self, hub: "TasksView", task: ScheduledTask):
+        on = task.status != STATUS_PAUSED
+        super().__init__(
+            style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
+            label="ON" if on else "OFF",
+        )
+        self._hub = hub
+        self.on = on
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _task_deny(interaction, self._hub.user_id)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        self._hub.pending_action = "pause" if self.on else "resume"
+        await self._hub.apply_pending_action(interaction)
+
+
 class _TaskActionSelect(discord.ui.Select):
     """Une seule entrée pour toutes les actions du détail — confirmation ensuite."""
 
@@ -1449,27 +1480,6 @@ class _TaskActionSelect(discord.ui.Select):
                 value="edit",
                 description="Changer la consigne ou le déclencheur",
             ))
-        can_pause = (
-            task.status != STATUS_DRAFT
-            and (
-                task.kind in (KIND_EVENT, KIND_WATCH)
-                or task.schedule_kind != SCHEDULE_ONCE
-                or task.status == STATUS_PAUSED
-            )
-        )
-        if can_pause:
-            if task.status == STATUS_PAUSED:
-                options.append(discord.SelectOption(
-                    label="Reprendre",
-                    value="resume",
-                    description="Remettre la tâche en route",
-                ))
-            else:
-                options.append(discord.SelectOption(
-                    label="Mettre en pause",
-                    value="pause",
-                    description="Suspendre jusqu'à reprise",
-                ))
         if (
             task.schedule_kind != SCHEDULE_ONCE
             and task.kind not in (KIND_EVENT, KIND_WATCH)
@@ -1698,8 +1708,14 @@ class TasksView(MariaLayout):
             heading = f"{kind_label(task.kind)} · {_task_label(task)}"
         else:
             heading = _task_label(task, "Tâche")
+        title = discord.ui.TextDisplay(f"## {_clip(heading, 80)}")
+        can_switch = task.status in (TASK_PENDING, STATUS_ARMED, STATUS_PAUSED)
+        head: discord.ui.Item = (
+            discord.ui.Section(title, accessory=_TaskPowerButton(self, task))
+            if can_switch else title
+        )
         body: list[discord.ui.Item] = [
-            title_text(_clip(heading, 90), f"#{task.id}"),
+            head,
             sep_wide(),
             discord.ui.TextDisplay(_format_task_body(task, store=self.store)),
         ]
