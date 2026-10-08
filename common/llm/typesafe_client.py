@@ -178,10 +178,13 @@ class MariaTypeSafeClient:
         message: str,
         *,
         bot_name: str,
+        bias_respond: bool = False,
     ) -> str:
         """Mention / nom du bot : respond | react | ignore.
 
         Sans JEV / erreur → respond (fail-open comme avant).
+        `bias_respond` (mode greedy) : préfère fortement une vraie réponse ;
+        ignore seulement si JEV est sûr que c'est un name-drop passif.
         """
         if not self.enabled:
             return "respond"
@@ -204,33 +207,59 @@ class MariaTypeSafeClient:
                 snippet = snippet[start:end]
             else:
                 snippet = snippet[:500]
+        if bias_respond:
+            instructions = (
+                "The bot `bot_name` was named in `message` (greedy mode: she should "
+                "usually JOIN the chat with words). Prefer `respond` whenever she is "
+                "part of the bit — question, tease, opinion, joke about her, "
+                "« elle », « ta pote », comparing her, asking what she thinks, "
+                "or any clear hook. Use `ignore` ONLY for pure roll-call / name lists "
+                "with zero engagement expected. `react` is rare."
+            )
+            criteria = {
+                "respond": (
+                    "She is involved: asked something, teased, joked about, "
+                    "opinion expected, talked to indirectly, or the bit lands better "
+                    "if she answers in words — default when unsure"
+                ),
+                "react": (
+                    "Tiny nod only; words would be overkill (very rare)"
+                ),
+                "ignore": (
+                    "Pure passive list/roll-call/invite tags — naming her among "
+                    "others with no joke, no ask, no reason to jump in"
+                ),
+            }
+        else:
+            instructions = (
+                "The bot `bot_name` was named or mentioned in `message` "
+                "(may be a long preamble with her name mid/end — the `…` ellipsis "
+                "means truncated context). "
+                "How should she handle it in a casual Discord group chat?"
+            )
+            criteria = {
+                "respond": (
+                    "Direct address: question, request, greeting to her, "
+                    "opinion asked of her, or clear expectation of a written reply "
+                    "— even if her name comes after a long setup"
+                ),
+                "react": (
+                    "Worth a light emoji ack without words: joke she is in, "
+                    "talking about her with room for a vibe reaction, "
+                    "group banter she can nod to — NOT asking her to answer"
+                ),
+                "ignore": (
+                    "Passive name-drop only: listed among other members, "
+                    "roll call, invite list, tags list, or talking about her "
+                    "to someone else with no reason to acknowledge"
+                ),
+            }
         result = await self.system_one(
             {"bot_name": name, "message": snippet},
             {
                 "mention": Choice(
-                    instructions=(
-                        "The bot `bot_name` was named or mentioned in `message` "
-                        "(may be a long preamble with her name mid/end — the `…` ellipsis "
-                        "means truncated context). "
-                        "How should she handle it in a casual Discord group chat?"
-                    ),
-                    criteria={
-                        "respond": (
-                            "Direct address: question, request, greeting to her, "
-                            "opinion asked of her, or clear expectation of a written reply "
-                            "— even if her name comes after a long setup"
-                        ),
-                        "react": (
-                            "Worth a light emoji ack without words: joke she is in, "
-                            "talking about her with room for a vibe reaction, "
-                            "group banter she can nod to — NOT asking her to answer"
-                        ),
-                        "ignore": (
-                            "Passive name-drop only: listed among other members, "
-                            "roll call, invite list, tags list, or talking about her "
-                            "to someone else with no reason to acknowledge"
-                        ),
-                    },
+                    instructions=instructions,
+                    criteria=criteria,
                 ),
             },
         )
@@ -244,6 +273,15 @@ class MariaTypeSafeClient:
             return "respond"
         if choice not in ("respond", "react", "ignore"):
             return "respond"
+
+        if bias_respond:
+            # Greedy : ignore seulement si JEV est vraiment sûr ; sinon répondre.
+            ignore_floor = CATEGORY_CONFIDENCE + 0.18  # ~0.68
+            if choice == "ignore" and conf >= ignore_floor:
+                return "ignore"
+            # react / respond / ignore douteux → vraie réponse.
+            return "respond"
+
         if choice == "react" and conf < REACT_VERDICT_CONFIDENCE:
             # React forcé = spam : conf basse → silence.
             return "ignore"

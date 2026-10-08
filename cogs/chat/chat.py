@@ -1133,6 +1133,7 @@ class Chat(commands.Cog):
                         names[0],
                     ),
                     bot_name=names[0],
+                    bias_respond=True,
                 )
                 verdict = decision
                 # Soften n'upgradera un ignore que si conf déjà haute (jamais un ignore « inventé »).
@@ -1147,8 +1148,7 @@ class Chat(commands.Cog):
                     f" → {decision}" if decision != verdict else "", att, fat,
                 )
                 if decision == "respond":
-                    # JEV dit « adressée à elle » : on répond. Seule une fatigue extrême
-                    # (salon saturé de ses réponses) la ramène à un simple emoji.
+                    # Greedy + nom cité : on répond. Fatigue extrême → emoji seulement.
                     if fat >= FATIGUE_EXHAUSTED and not self.focus.attention.is_hot(
                         message.guild.id, message.author.id,
                     ):
