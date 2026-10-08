@@ -1176,9 +1176,12 @@ def _task_catalog_text(t: ScheduledTask) -> discord.ui.TextDisplay:
         thr = t.trigger.get("threshold")
         lines.append(f"Si le prix passe sous {thr:g} €" if thr is not None else "Veille prix")
     else:
-        instr = " ".join((t.instruction or "").split())
+        instr = _task_instruction_text(t)
         label = _task_label(t)
-        if instr and instr != label:
+        # Toujours montrer un extrait de la consigne si elle apporte plus que le titre.
+        if instr and instr.casefold() != label.casefold():
+            lines.append(_clip(instr, 160))
+        elif instr and len(instr) > len(label) + 8:
             lines.append(_clip(instr, 160))
     lines.append(f"-# {_task_meta(t)}")
     if t.last_error:
@@ -1186,8 +1189,14 @@ def _task_catalog_text(t: ScheduledTask) -> discord.ui.TextDisplay:
     return discord.ui.TextDisplay("\n".join(lines))
 
 
+def _task_instruction_text(t: ScheduledTask) -> str:
+    """Consigne affichée en corps (ce que MARIA doit faire)."""
+    return " ".join((t.instruction or "").split()).strip()
+
+
 def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) -> str:
-    """Détail d'une tâche : phrase claire + limites, sans bloc ```pseudo-code```."""
+    """Détail : consigne d'abord, puis déclencheur / horloge, puis limites."""
+    instr = _task_instruction_text(t)
     if t.kind in (KIND_EVENT, KIND_WATCH):
         price = None
         url = ""
@@ -1200,13 +1209,17 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
                 except (TypeError, ValueError):
                     price = None
             url = (t.trigger.get("url") or "").strip()
+        parts: list[str] = []
+        if instr:
+            parts.append(instr)
         summary = natural_summary(t, price=price)
-        limits = compact_limits(t, price=price)
+        if summary:
+            parts.append(summary)
+        # Consigne déjà affichée → on ne répète pas « Enverra « … » ».
         hint = delivery_hint(t)
-        parts = [summary]
-        if hint:
+        if hint.startswith("Ping simple"):
             parts.append(f"-# {hint}")
-        parts.append(f"-# {_task_status_label(t)} · {limits}")
+        parts.append(f"-# {_task_status_label(t)} · {compact_limits(t, price=price)}")
         if t.kind == KIND_WATCH and t.execute_at and t.status != STATUS_DRAFT:
             parts.append(f"-# Prochain check <t:{int(t.execute_at.timestamp())}:R>")
         if url:
@@ -1214,7 +1227,11 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
             parts.append(f"-# {short}")
         if t.last_error:
             parts.append(f"-# Dernière erreur : {t.last_error}")
-        return "\n".join(parts)
+        return "\n".join(parts) if parts else "-# (vide)"
+    # Rappel horloge / série
+    parts = []
+    if instr:
+        parts.append(instr)
     ts = int(t.execute_at.timestamp())
     rec = format_schedule(t)
     if t.schedule_kind != SCHEDULE_ONCE:
@@ -1223,11 +1240,11 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
             rec += f" · jusqu'au <t:{int(t.until_at.timestamp())}:d>"
     if t.deliver_dm:
         rec += " · MP"
-    err = f"\n-# Dernière erreur : {t.last_error}" if t.last_error else ""
-    return (
-        f"-# {_task_status_label(t)} · {rec}\n"
-        f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>){err}"
-    )
+    parts.append(f"-# {_task_status_label(t)} · {rec}")
+    parts.append(f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>)")
+    if t.last_error:
+        parts.append(f"-# Dernière erreur : {t.last_error}")
+    return "\n".join(parts)
 
 
 def _reload_tasks(
@@ -1387,6 +1404,33 @@ class EditTriggerModal(discord.ui.Modal, title="Modifier l'alerte"):
         await self._hub.reload(interaction, note="Alerte mise à jour.")
 
 
+def _task_action_prompt(task: ScheduledTask, action: str) -> str:
+    """Question de confirmation affichée avant d'exécuter une action."""
+    label = _clip(_task_label(task), 60)
+    when = f"<t:{int(task.execute_at.timestamp())}:f>"
+    if action == "skip":
+        return (
+            f"Passer la prochaine occurrence de **{label}** ?\n"
+            f"-# Prévue {when} — la suivante sera recalculée."
+        )
+    if action == "pause":
+        return (
+            f"Mettre **{label}** en pause ?\n"
+            f"-# Elle ne se déclenchera plus tant que tu ne la reprends pas."
+        )
+    if action == "resume":
+        return (
+            f"Reprendre **{label}** ?\n"
+            f"-# Prochaine : {when}."
+        )
+    if action == "delete":
+        return (
+            f"Supprimer **{label}** ?\n"
+            f"-# Irréversible."
+        )
+    return f"Confirmer l'action sur **{label}** ?"
+
+
 class _TaskBackButton(discord.ui.Button):
     def __init__(self, hub: "TasksView"):
         super().__init__(style=discord.ButtonStyle.secondary, label="Retour")
@@ -1398,92 +1442,126 @@ class _TaskBackButton(discord.ui.Button):
             return await interaction.response.send_message(err, ephemeral=True)
         self._hub.screen = "catalog"
         self._hub.selected = None
+        self._hub.pending_action = None
         self._hub.note = ""
         self._hub._build()
         await apply_view(interaction, self._hub)
 
 
-class _PauseTaskButton(discord.ui.Button):
+class _TaskActionSelect(discord.ui.Select):
+    """Une seule entrée pour toutes les actions du détail — confirmation ensuite."""
+
     def __init__(self, hub: "TasksView", task: ScheduledTask):
-        paused = task.status == STATUS_PAUSED
+        options: list[discord.SelectOption] = []
+        if task.status != STATUS_DRAFT:
+            options.append(discord.SelectOption(
+                label="Modifier",
+                value="edit",
+                description="Changer la consigne ou le déclencheur",
+            ))
+        can_pause = (
+            task.status != STATUS_DRAFT
+            and (
+                task.kind in (KIND_EVENT, KIND_WATCH)
+                or task.schedule_kind != SCHEDULE_ONCE
+                or task.status == STATUS_PAUSED
+            )
+        )
+        if can_pause:
+            if task.status == STATUS_PAUSED:
+                options.append(discord.SelectOption(
+                    label="Reprendre",
+                    value="resume",
+                    description="Remettre la tâche en route",
+                ))
+            else:
+                options.append(discord.SelectOption(
+                    label="Mettre en pause",
+                    value="pause",
+                    description="Suspendre jusqu'à reprise",
+                ))
+        if (
+            task.schedule_kind != SCHEDULE_ONCE
+            and task.kind not in (KIND_EVENT, KIND_WATCH)
+            and task.status != STATUS_DRAFT
+        ):
+            options.append(discord.SelectOption(
+                label="Passer 1 fois",
+                value="skip",
+                description="Sauter uniquement la prochaine occurrence",
+            ))
+        options.append(discord.SelectOption(
+            label="Supprimer",
+            value="delete",
+            description="Retirer définitivement cette tâche",
+        ))
         super().__init__(
-            style=discord.ButtonStyle.secondary,
-            label="Reprendre" if paused else "Pause",
+            placeholder="Choisir une action…",
+            options=options,
+            min_values=1,
+            max_values=1,
         )
         self._hub = hub
         self.task = task
-        self.paused = paused
 
     async def callback(self, interaction: discord.Interaction) -> None:
         err = _task_deny(interaction, self._hub.user_id)
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
-        if self.paused:
-            ok = self._hub.store.resume(self.task.id, self._hub.user_id)
-            note = "Tâche reprise." if ok else "Impossible de reprendre."
-        else:
-            ok = self._hub.store.pause(self.task.id, self._hub.user_id)
-            note = "Tâche en pause." if ok else "Impossible de mettre en pause."
-        chat = interaction.client.get_cog("Chat")
-        if chat is not None and hasattr(chat, "event_triggers"):
-            chat.event_triggers.invalidate(self.task.guild_id)
-        await self._hub.reload(interaction, note=note)
+        action = self.values[0]
+        # Modifier → modal tout de suite (pas de confirmation).
+        if action == "edit":
+            if self.task.kind in (KIND_EVENT, KIND_WATCH):
+                await interaction.response.send_modal(EditTriggerModal(self._hub, self.task))
+            else:
+                await interaction.response.send_modal(EditTaskModal(self._hub, self.task))
+            return
+        self._hub.pending_action = action
+        self._hub.screen = "confirm_action"
+        self._hub.note = ""
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
-class _SkipTaskButton(discord.ui.Button):
-    def __init__(self, hub: "TasksView", task: ScheduledTask):
-        super().__init__(style=discord.ButtonStyle.secondary, label="Sauter")
-        self._hub = hub
-        self.task = task
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        err = _task_deny(interaction, self._hub.user_id)
-        if err:
-            return await interaction.response.send_message(err, ephemeral=True)
-        nxt = self._hub.store.skip_next(self.task.id, self._hub.user_id)
-        note = "Prochaine occurrence sautée." if nxt else "Pas de prochaine occurrence."
-        await self._hub.reload(interaction, note=note)
-
-
-class _EditTaskButton(discord.ui.Button):
-    def __init__(self, hub: "TasksView", task: ScheduledTask):
-        super().__init__(style=discord.ButtonStyle.primary, label="Modifier")
-        self._hub = hub
-        self.task = task
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        err = _task_deny(interaction, self._hub.user_id)
-        if err:
-            return await interaction.response.send_message(err, ephemeral=True)
-        if self.task.kind in (KIND_EVENT, KIND_WATCH):
-            await interaction.response.send_modal(EditTriggerModal(self._hub, self.task))
-        else:
-            await interaction.response.send_modal(EditTaskModal(self._hub, self.task))
-
-
-class _CancelTaskButton(discord.ui.Button):
-    def __init__(self, hub: "TasksView", task: ScheduledTask):
-        super().__init__(style=discord.ButtonStyle.danger, label="Annuler")
-        self._hub = hub
-        self.task = task
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        err = _task_deny(interaction, self._hub.user_id)
-        if err:
-            return await interaction.response.send_message(err, ephemeral=True)
-        ok = self._hub.store.cancel(self.task.id, self._hub.user_id)
-        chat = interaction.client.get_cog("Chat")
-        if chat is not None and hasattr(chat, "event_triggers"):
-            chat.event_triggers.invalidate(self.task.guild_id)
-        await self._hub.reload(
-            interaction,
-            note="Tâche annulée." if ok else "Tâche introuvable.",
+class _ConfirmTaskActionButton(discord.ui.Button):
+    def __init__(self, hub: "TasksView", *, danger: bool = False):
+        super().__init__(
+            style=discord.ButtonStyle.danger if danger else discord.ButtonStyle.success,
+            label="Confirmer",
         )
+        self._hub = hub
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _task_deny(interaction, self._hub.user_id)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        await self._hub.apply_pending_action(interaction)
+
+
+class _AbortTaskActionButton(discord.ui.Button):
+    def __init__(self, hub: "TasksView"):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Annuler")
+        self._hub = hub
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        err = _task_deny(interaction, self._hub.user_id)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        self._hub.pending_action = None
+        self._hub.screen = "detail"
+        self._hub.note = ""
+        # Rafraîchir la tâche depuis le store (au cas où).
+        if self._hub.selected is not None:
+            fresh = self._hub.store.get(self._hub.selected.id)
+            if fresh is not None:
+                self._hub.selected = fresh
+        self._hub._build()
+        await apply_view(interaction, self._hub)
 
 
 class _CancelAllTasksButton(discord.ui.Button):
     def __init__(self, hub: "TasksView"):
-        super().__init__(style=discord.ButtonStyle.danger, label="Tout annuler")
+        super().__init__(style=discord.ButtonStyle.danger, label="Tout supprimer")
         self._hub = hub
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -1505,7 +1583,7 @@ class _ConfirmCancelAllTasksButton(discord.ui.Button):
         if err:
             return await interaction.response.send_message(err, ephemeral=True)
         n = self._hub.store.cancel_all(self._hub.user_id)
-        await self._hub.reload(interaction, note=f"{n} tâche(s) annulée(s).")
+        await self._hub.reload(interaction, note=f"{n} tâche(s) supprimée(s).")
 
 
 class _OpenTaskSelect(discord.ui.Select):
@@ -1532,6 +1610,7 @@ class _OpenTaskSelect(discord.ui.Select):
         if task is None:
             return await self._hub.reload(interaction, note="Tâche introuvable.")
         self._hub.selected = task
+        self._hub.pending_action = None
         self._hub.screen = "detail"
         self._hub._build()
         await apply_view(interaction, self._hub)
@@ -1561,15 +1640,62 @@ class TasksView(MariaLayout):
         self.page = page
         self.screen = "catalog"
         self.selected: Optional[ScheduledTask] = None
+        self.pending_action: Optional[str] = None
         self._build()
 
     async def reload(self, interaction: discord.Interaction, note: str = "") -> None:
         self.tasks = self.store.get_user_tasks(self.user_id)
         self.screen = "catalog"
         self.selected = None
+        self.pending_action = None
         self.note = note
         self._build()
         await self.push(interaction)
+
+    async def apply_pending_action(self, interaction: discord.Interaction) -> None:
+        """Exécute l'action choisie dans le select, après confirmation."""
+        task = self.selected
+        action = self.pending_action
+        if task is None or not action:
+            return await self.reload(interaction, note="Action annulée.")
+        chat = interaction.client.get_cog("Chat")
+        note = ""
+        stay_on_detail = False
+        if action == "skip":
+            nxt = self.store.skip_next(task.id, self.user_id)
+            if nxt:
+                note = f"Prochaine occurrence passée — suivant <t:{int(nxt.timestamp())}:f>."
+                stay_on_detail = True
+            else:
+                note = "Pas de prochaine occurrence."
+        elif action == "pause":
+            ok = self.store.pause(task.id, self.user_id)
+            note = "Tâche en pause." if ok else "Impossible de mettre en pause."
+            stay_on_detail = ok
+        elif action == "resume":
+            ok = self.store.resume(task.id, self.user_id)
+            note = "Tâche reprise." if ok else "Impossible de reprendre."
+            stay_on_detail = ok
+        elif action == "delete":
+            ok = self.store.cancel(task.id, self.user_id)
+            note = "Tâche supprimée." if ok else "Tâche introuvable."
+        else:
+            note = "Action inconnue."
+        if chat is not None and hasattr(chat, "event_triggers") and task.guild_id:
+            chat.event_triggers.invalidate(task.guild_id)
+        self.pending_action = None
+        if stay_on_detail and action != "delete":
+            self.tasks = self.store.get_user_tasks(self.user_id)
+            fresh = self.store.get(task.id)
+            if fresh is None:
+                return await self.reload(interaction, note=note)
+            self.selected = fresh
+            self.screen = "detail"
+            self.note = note
+            self._build()
+            await self.push(interaction)
+            return
+        await self.reload(interaction, note=note)
 
     def _build_detail(self) -> None:
         task = self.selected
@@ -1577,41 +1703,59 @@ class TasksView(MariaLayout):
             self.screen = "catalog"
             self._build()
             return
-        kind = kind_label(task.kind) if task.kind in (KIND_EVENT, KIND_WATCH) else "Tâche"
-        focus = _task_label(task, "Sans titre")
+        if task.kind in (KIND_EVENT, KIND_WATCH):
+            heading = f"{kind_label(task.kind)} · {_task_label(task)}"
+        else:
+            heading = _task_label(task, "Tâche")
         body: list[discord.ui.Item] = [
-            title_text(_clip(f"{kind} · {focus}", 90), f"#{task.id}"),
+            title_text(_clip(heading, 90), f"#{task.id}"),
             sep_wide(),
             discord.ui.TextDisplay(_format_task_body(task, store=self.store)),
         ]
         if self.note:
             body += [sep_tight(), discord.ui.TextDisplay(f"-# {self.note}")]
-        actions: list[discord.ui.Button] = []
-        if task.status != STATUS_DRAFT:
-            actions.append(_EditTaskButton(self, task))
-        if (
-            task.kind in (KIND_EVENT, KIND_WATCH)
-            or task.schedule_kind != SCHEDULE_ONCE
-            or task.status == STATUS_PAUSED
-        ) and task.status != STATUS_DRAFT:
-            actions.append(_PauseTaskButton(self, task))
-        if task.schedule_kind != SCHEDULE_ONCE and task.kind not in (KIND_EVENT, KIND_WATCH):
-            actions.append(_SkipTaskButton(self, task))
-        actions.append(_CancelTaskButton(self, task))
         self.set_layout(
             body,
-            discord.ui.ActionRow(*actions[:5]),
+            discord.ui.ActionRow(_TaskActionSelect(self, task)),
             discord.ui.ActionRow(_TaskBackButton(self)),
+        )
+
+    def _build_confirm_action(self) -> None:
+        task = self.selected
+        action = self.pending_action
+        if task is None or not action:
+            self.screen = "catalog"
+            self.pending_action = None
+            self._build()
+            return
+        titles = {
+            "skip": "Passer une fois ?",
+            "pause": "Mettre en pause ?",
+            "resume": "Reprendre ?",
+            "delete": "Supprimer ?",
+        }
+        body: list[discord.ui.Item] = [
+            title_text(titles.get(action, "Confirmer ?"), f"#{task.id}"),
+            sep_wide(),
+            discord.ui.TextDisplay(_task_action_prompt(task, action)),
+        ]
+        self.set_layout(
+            body,
+            discord.ui.ActionRow(
+                _ConfirmTaskActionButton(self, danger=(action == "delete")),
+                _AbortTaskActionButton(self),
+            ),
         )
 
     def _build_confirm(self) -> None:
         n = len(self.tasks)
         self.set_layout(
             [
-                title_text("Tâches", f"{n} tâche{'s' if n != 1 else ''}"),
+                title_text("Tout supprimer ?", f"{n} tâche{'s' if n != 1 else ''}"),
                 sep_wide(),
                 discord.ui.TextDisplay(
-                    "**Annuler toutes tes tâches ?**\n-# Séries incluses. Irréversible."
+                    f"Supprimer **toutes** tes tâches ({n}) ?\n"
+                    "-# Rappels, écoutes et veilles inclus. Irréversible."
                 ),
             ],
             discord.ui.ActionRow(
@@ -1664,6 +1808,9 @@ class TasksView(MariaLayout):
     def _build(self) -> None:
         if self.screen == "confirm_cancel_all":
             self._build_confirm()
+            return
+        if self.screen == "confirm_action":
+            self._build_confirm_action()
             return
         if self.screen == "detail":
             self._build_detail()
