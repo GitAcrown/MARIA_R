@@ -19,13 +19,16 @@ from typing import Any, Optional
 from common.tasks import KIND_WATCH, WATCH_INTERVAL_MIN_MINUTES
 
 PRIMARY_TYPES = ("read_url", "web_search", "prompt", "post")
-_OPS = ("lt", "lte", "gt", "change")
-_OP_SYMBOL = {"lt": "<", "lte": "≤", "gt": ">", "change": "Δ"}
+_OPS = ("lt", "lte", "gt", "change", "lt_prev", "gt_prev")
+_REL_OPS = ("lt_prev", "gt_prev")
+_OP_SYMBOL = {"lt": "<", "lte": "≤", "gt": ">", "change": "Δ", "lt_prev": "<", "gt_prev": ">"}
 _OP_WORD = {
     "lt": "sous",
     "lte": "à ou sous",
     "gt": "au-dessus de",
     "change": "écarté de",
+    "lt_prev": "plus bas que le dernier relevé",
+    "gt_prev": "plus haut que le dernier relevé",
 }
 
 
@@ -38,15 +41,28 @@ def _mode(mode: str) -> str:
     return mode if mode in ("generate", "verbatim", "ping_only") else "generate"
 
 
+def _threshold_value(cond: dict) -> float:
+    try:
+        return float(cond.get("threshold") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def condition_label(cond: Optional[dict]) -> str:
     if not isinstance(cond, dict):
         return ""
     if cond.get("type") == "price":
+        op = str(cond.get("op") or "lt")
+        margin = _threshold_value(cond)
+        if op == "lt_prev":
+            return f"prix < dernier relevé de {margin:g} €" if margin > 0 else "prix < dernier relevé"
+        if op == "gt_prev":
+            return f"prix > dernier relevé de {margin:g} €" if margin > 0 else "prix > dernier relevé"
         try:
             thr = f"{float(cond.get('threshold')):g}"
         except (TypeError, ValueError):
             thr = "?"
-        symbol = _OP_SYMBOL.get(str(cond.get("op") or "lt"), "<")
+        symbol = _OP_SYMBOL.get(op, "<")
         return f"prix {symbol} {thr} €"
     return _clip(str(cond.get("text") or "condition"), 80)
 
@@ -82,7 +98,9 @@ def compile_plan(
     if when and when not in ("before", "after"):
         return None, "condition_when : before (avant l'action) ou after (sur son résultat)."
 
-    has_price = threshold is not None
+    op_s = (op or "").strip().lower()
+    relative = op_s in _REL_OPS
+    has_price = threshold is not None or relative
     if not primary_s:
         if url:
             primary_s = "read_url"
@@ -97,23 +115,30 @@ def compile_plan(
     if has_price and not primary_s:
         primary_s = "read_url" if url else "web_search"
 
-    op_s = (op or "lt").strip().lower()
+    if not op_s:
+        op_s = "lt"
     if op_s not in _OPS:
         op_s = "lt"
 
     cond: Optional[dict] = None
     if has_price:
-        try:
-            thr = float(threshold)
-        except (TypeError, ValueError):
-            return None, "Seuil de prix invalide."
+        if relative and threshold is None:
+            thr = 0.0
+        else:
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                return None, "Seuil de prix invalide."
         # Le chiffre n'existe qu'une fois la page lue : la condition est toujours après.
+        label = condition_label({
+            "type": "price", "op": op_s, "threshold": thr,
+        })
         cond = {
             "when": "after",
             "type": "price",
             "op": op_s,
             "threshold": thr,
-            "text": cond_text or f"prix {_OP_SYMBOL[op_s]} {thr:g} €",
+            "text": cond_text or label,
             "dedup": bool(dedup),
         }
     elif cond_text:
@@ -283,10 +308,19 @@ def describe_plan(plan: dict, *, when: str, price: Optional[float] = None) -> st
             thr = f"{float(cond.get('threshold')):g}"
         except (TypeError, ValueError):
             thr = "?"
-        word = _OP_WORD.get(str(cond.get("op") or "lt"), "sous")
+        op_name = str(cond.get("op") or "lt")
         now = f" (actuellement {price:.2f} €)" if price is not None else ""
         action = "je te ping" if bits else "je te parle"
         middle = (", ".join(bits) + ", ") if bits else ""
+        if op_name in _REL_OPS:
+            word = _OP_WORD[op_name]
+            margin = _threshold_value(cond)
+            extra = f" d'au moins {margin:g} €" if margin > 0 else ""
+            return (
+                f"{head}, {middle}{action} seulement si le prix est {word}{extra}{now}. "
+                "Sinon je ne dis rien."
+            )
+        word = _OP_WORD.get(op_name, "sous")
         return f"{head}, {middle}{action} seulement si le prix est {word} {thr} €{now}. Sinon je ne dis rien."
     if cond:
         text = _clip(str(cond.get("text") or "la condition"), 80)

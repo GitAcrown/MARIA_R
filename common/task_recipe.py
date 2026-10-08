@@ -407,7 +407,7 @@ def build_watch_trigger(
         "type": "url_price",
         "anchor": (anchor or "").strip()[:40],
         "url": (url or "").strip(),
-        "op": op if op in ("lt", "lte", "gt", "change") else "lt",
+        "op": op if op in ("lt", "lte", "gt", "change", "lt_prev", "gt_prev") else "lt",
         "threshold": float(threshold),
         "currency": currency or "EUR",
         "interval_minutes": max(WATCH_INTERVAL_MIN_MINUTES, int(interval_minutes)),
@@ -560,8 +560,8 @@ def confirm_title(task, state: str = "pending") -> tuple[str, str]:
         if state == "confirmed":
             return f"Je vérifie {when}", label
         if state == "cancelled":
-            return "Vérification annulée", label
-        return "Vérification expirée", label
+            return "Vérification annulée", ""
+        return "Vérification expirée", ""
     if kind == KIND_EVENT:
         if state == "pending":
             return f"Écouter « {focus} » ?", f"#{getattr(task, 'id', '?')}"

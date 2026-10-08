@@ -524,6 +524,9 @@ ou boucle sans heure (kind=watch, vérif ≥ 6 h). Une heure dite (« tous les j
 - condition : phrase (« il pleut », « le message parle d'une vente »). condition_when=after si elle juge
   le résultat de l'action, before si elle filtre le déclencheur (le message, le moment) AVANT l'action.
   Prix chiffré : threshold + op + url (comparaison exacte, pas une phrase).
+  Plus bas / plus haut que le dernier résultat de CETTE tâche : op=lt_prev ou gt_prev, url, sans threshold.
+  Autre comparaison au passage précédent (texte, info, « différent d'hier ») : mets-la dans condition.
+  Le résultat précédent (prix ou texte) est retenu et fourni au juge. Premier passage sans rien à comparer : pas de message.
 - instruction = le message à poster SI la condition est vraie. Rien n'est envoyé sinon.
   Sans condition, le message part à chaque déclenchement.
 - cooldown / nombre d'alertes / durée : OMETS-les. Interdit de demander « combien de fois ? ».
@@ -611,6 +614,27 @@ _TASK_SILENCE_RE = re.compile(r"^\s*\[\[SILENCE\]\]\s*$", re.IGNORECASE)
 
 def _is_task_silence(text: str) -> bool:
     return bool(_TASK_SILENCE_RE.match(text or ""))
+
+
+def _fresh_snapshot(evidence: str, price: Optional[float]) -> str:
+    """Ce que ce passage a trouvé, sans le résultat précédent ni le moment."""
+    source = evidence or ""
+    best = -1
+    best_end = 0
+    for marker in ("\n\nAnalyse :\n", "\n\nPage :\n", "\n\nRecherche «"):
+        idx = source.rfind(marker)
+        if idx > best:
+            best = idx
+            best_end = idx + len(marker)
+    chunk = " ".join(source[best_end:].split())[:360] if best >= 0 else ""
+    if price is None:
+        return chunk
+    head = f"Prix : {price:.2f} €"
+    return f"{head}\n{chunk}".strip() if chunk else head
+
+
+def _last_result_key(task_id: int) -> str:
+    return f"task:{task_id}:last"
 
 
 def _tool_evidence(resp) -> str:
@@ -1170,11 +1194,25 @@ class Chat(commands.Cog):
         *,
         trigger_message: Optional[discord.Message] = None,
     ) -> bool:
-        """Déclencheur déjà parti. Action, condition, suite. False = silence."""
+        """Déclencheur déjà parti. Action, condition, suite. False = silence.
+
+        Le résultat de ce passage (prix ou texte) est retenu pour le suivant.
+        """
         plan = plan_of_task(task)
         if plan.get("legacy"):
             return False
+        previous_note = (
+            await asyncio.to_thread(
+                self.tasks.get_var, task.guild_id, task.user_id, _last_result_key(task.id),
+            )
+            or ""
+        ).strip()
         evidence = self._trigger_evidence(trigger_message)
+        if previous_note:
+            evidence = (
+                "Résultat précédent de cette tâche :\n"
+                f"{previous_note[:300]}\n\n{evidence}"
+            )
         primary = plan.get("primary") if isinstance(plan.get("primary"), dict) else None
         cond = plan.get("condition") if isinstance(plan.get("condition"), dict) else None
         secondary = plan.get("secondary") if isinstance(plan.get("secondary"), dict) else None
@@ -1182,46 +1220,58 @@ class Chat(commands.Cog):
         previous: Optional[float] = None
         url = str((primary or {}).get("url") or "")
         var_key = str((primary or {}).get("var_key") or "")
+        snapshot = ""
 
-        if cond and cond.get("when") == "before":
-            if not await self._condition_holds(task, cond, evidence, None, None, var_key):
-                logger.info("Tâche #%s : silence (condition avant l'action)", task.id)
+        async def _keep() -> None:
+            if snapshot:
+                await asyncio.to_thread(
+                    self.tasks.set_var,
+                    task.guild_id, task.user_id, _last_result_key(task.id), snapshot[:500],
+                )
+
+        try:
+            if cond and cond.get("when") == "before":
+                if not await self._condition_holds(task, cond, evidence, None, None, var_key):
+                    logger.info("Tâche #%s : silence (condition avant l'action)", task.id)
+                    return False
+            if primary and primary.get("type") in ("read_url", "web_search", "prompt"):
+                evidence, price, previous, found_url = await self._run_primary(task, primary, evidence)
+                if found_url:
+                    url = found_url
+                snapshot = _fresh_snapshot(evidence, price)
+                if not evidence:
+                    logger.info("Tâche #%s : action sans résultat, silence", task.id)
+                    return False
+            if cond and cond.get("when") != "before":
+                if not await self._condition_holds(task, cond, evidence, price, previous, var_key):
+                    logger.info("Tâche #%s : silence (condition après l'action)", task.id)
+                    return False
+            if not secondary:
                 return False
-        if primary and primary.get("type") in ("read_url", "web_search", "prompt"):
-            evidence, price, previous, found_url = await self._run_primary(task, primary, evidence)
-            if found_url:
-                url = found_url
-            if not evidence:
-                logger.info("Tâche #%s : action sans résultat, silence", task.id)
-                return False
-        if cond and cond.get("when") != "before":
-            if not await self._condition_holds(task, cond, evidence, price, previous, var_key):
-                logger.info("Tâche #%s : silence (condition après l'action)", task.id)
-                return False
-        if not secondary:
-            return False
-        threshold: Optional[float] = None
-        if cond and cond.get("type") == "price":
-            try:
-                threshold = float(cond.get("threshold"))
-            except (TypeError, ValueError):
-                threshold = None
-        delivered = await self._deliver_secondary(
-            task,
-            secondary,
-            evidence=evidence,
-            price=price,
-            previous=previous,
-            threshold=threshold,
-            url=url,
-            trigger_message=trigger_message,
-        )
-        if delivered and cond and cond.get("dedup") and price is not None and var_key:
-            await asyncio.to_thread(
-                self.tasks.set_var,
-                task.guild_id, task.user_id, f"{var_key}:alerted", f"{price:.2f}",
+            threshold: Optional[float] = None
+            if cond and cond.get("type") == "price":
+                try:
+                    threshold = float(cond.get("threshold"))
+                except (TypeError, ValueError):
+                    threshold = None
+            delivered = await self._deliver_secondary(
+                task,
+                secondary,
+                evidence=evidence,
+                price=price,
+                previous=previous,
+                threshold=threshold,
+                url=url,
+                trigger_message=trigger_message,
             )
-        return delivered
+            if delivered and cond and cond.get("dedup") and price is not None and var_key:
+                await asyncio.to_thread(
+                    self.tasks.set_var,
+                    task.guild_id, task.user_id, f"{var_key}:alerted", f"{price:.2f}",
+                )
+            return delivered
+        finally:
+            await _keep()
 
     async def _fire_event_task(self, task: ScheduledTask, message: discord.Message) -> None:
         if not plan_of_task(task).get("legacy"):

@@ -683,16 +683,18 @@ async def _compile_task_plan(
     url = (url or args.get("url") or "").strip()
     if not op:
         op = (args.get("op") or "").strip().lower()
+    relative = op in ("lt_prev", "gt_prev")
     wants = force or bool(
         primary or query or condition or condition_when or primary_prompt
-        or threshold is not None or (url and primary in ("", "read_url"))
+        or threshold is not None or relative
+        or (url and primary in ("", "read_url"))
     )
     if not wants:
         return None, price, ""
 
     need_page = primary == "read_url" or (bool(url) and primary in ("", "read_url")) or (
-        threshold is not None and bool(url)
-    )
+        (threshold is not None or relative) and bool(url)
+    ) or relative
     if need_page:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -707,7 +709,7 @@ async def _compile_task_plan(
             )
             if fetch_err:
                 return None, None, fetch_err
-            if threshold is not None and price is None:
+            if price is None and (threshold is not None or relative):
                 return None, None, (
                     "Je ne trouve pas de prix en € sur cette page. Essaie une autre URL."
                 )
@@ -1031,6 +1033,7 @@ async def _tool_schedule_event_watch(
         if current_price is None:
             return ToolResponseRecord(tc.id, {"error": fetch_err}, now)
         op = (args.get("op") or "lt").strip().lower()
+        relative = op in ("lt_prev", "gt_prev")
         if args.get("threshold") is not None or args.get("price") is not None:
             try:
                 threshold = float(
@@ -1038,8 +1041,10 @@ async def _tool_schedule_event_watch(
                 )
             except (TypeError, ValueError):
                 return ToolResponseRecord(tc.id, {"error": "Seuil de prix invalide."}, now)
+        elif relative:
+            threshold = 0.0
         else:
-            # « préviens-moi si ça baisse » : seuil auto = -10 % (ou -5 € mini sous 50 €).
+            # « préviens-moi si ça baisse » : seuil auto = -10 %.
             try:
                 pct = float(args.get("drop_percent") or 10)
             except (TypeError, ValueError):
@@ -1673,7 +1678,9 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "primary : read_url (url), web_search (query), prompt (primary_prompt), post (publier tout de suite). "
                 "Omets primary si c'est évident (url → lire la page, query → chercher). "
                 "condition : phrase jugée sur le résultat (condition_when=after) ou sur le déclencheur (before). "
-                "Prix chiffré : threshold + op + url, comparaison exacte. "
+                "Prix chiffré : threshold + op + url. "
+                "Plus bas que le dernier relevé de cette tâche : op=lt_prev (gt_prev si plus haut), sans threshold. "
+                "Autre comparaison au résultat précédent : phrase dans condition. "
                 "instruction = message posté SEULEMENT si la condition est vraie. Sans condition, il part à chaque fois. "
                 "Une condition ou une lecture/recherche → brouillon à confirmer (oui → manage_task confirm). "
                 "Écoute : mot cité → pattern. « quand JE dis » → author=self. "
@@ -1769,8 +1776,11 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 },
                 "op": {
                     "type": "string",
-                    "enum": ["lt", "lte", "gt", "change"],
-                    "description": "Comparaison prix (défaut lt)",
+                    "enum": ["lt", "lte", "gt", "change", "lt_prev", "gt_prev"],
+                    "description": (
+                        "Comparaison. lt/lte/gt = seuil fixe. "
+                        "lt_prev/gt_prev = par rapport au dernier résultat de cette tâche (omettre threshold)."
+                    ),
                 },
                 "interval_minutes": {
                     "type": "integer",

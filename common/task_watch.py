@@ -126,4 +126,14 @@ def condition_met(
         return price > threshold
     if op == "change":
         return previous is not None and abs(price - previous) >= threshold
+    if op == "lt_prev":
+        if previous is None:
+            return False
+        margin = threshold if threshold and threshold > 0 else 0.0
+        return price < previous - margin
+    if op == "gt_prev":
+        if previous is None:
+            return False
+        margin = threshold if threshold and threshold > 0 else 0.0
+        return price > previous + margin
     return price < threshold

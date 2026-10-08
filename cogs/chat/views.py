@@ -1905,6 +1905,9 @@ class ConfirmTaskCreateView(MariaLayout):
     def _build(self) -> None:
         task = self.task
         title, subtitle = confirm_title(task, self.state)
+        if self.state not in ("pending", "confirmed"):
+            self.set_layout([title_text(title, subtitle)])
+            return
         body: list[discord.ui.Item] = [
             title_text(title, subtitle),
             sep_wide(),

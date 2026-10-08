@@ -707,6 +707,8 @@ class MariaTypeSafeClient:
                         "(page text, search snippets, or the triggering message). "
                         "`condition` is what must be true before the bot speaks. "
                         "Answer yes only if the evidence clearly satisfies the condition. "
+                        "Evidence may include « Résultat précédent de cette tâche ». "
+                        "If the condition compares to that previous result and none is present, answer no. "
                         "If the evidence is missing, off-topic, or not enough, answer no."
                     ),
                     criteria={
