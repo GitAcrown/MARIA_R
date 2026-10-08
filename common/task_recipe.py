@@ -554,7 +554,9 @@ def confirm_title(task, state: str = "pending") -> tuple[str, str]:
     if isinstance(cond, dict) and kind not in (KIND_EVENT, KIND_WATCH):
         sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
         when = format_schedule(task) if sk != SCHEDULE_ONCE else "à cette heure"
-        label = condition_label(cond) or focus
+        # Seul un seuil chiffré tient sous le titre. Une phrase de condition
+        # est déjà dans le résumé et le pseudo-code ; tronquée, elle ne dit rien.
+        label = condition_label(cond) if cond.get("type") == "price" else ""
         if state == "pending":
             return f"Vérifier {when} ?", label
         if state == "confirmed":

@@ -46,7 +46,9 @@ from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
 from common.menu_layout import bind_view_message
 from common.task_plan import plan_of_task
-from common.task_recipe import event_label, natural_summary, parse_trigger, quick_reply_verdict
+from common.task_recipe import (
+    event_label, natural_summary, parse_trigger, quick_delivery_mode, quick_reply_verdict,
+)
 from common.task_triggers import EventTriggerCache, find_firing_tasks
 from common.task_watch import condition_met, extract_price_eur
 from common.tasks import (
@@ -529,6 +531,10 @@ ou boucle sans heure (kind=watch, vérif ≥ 6 h). Une heure dite (« tous les j
   Le résultat précédent (prix ou texte) est retenu et fourni au juge. Premier passage sans rien à comparer : pas de message.
 - instruction = le message à poster SI la condition est vraie. Rien n'est envoyé sinon.
   Sans condition, le message part à chaque déclenchement.
+  Un ping, un prix ou une page déjà lue ne passe pas par une rédaction : message fabriqué.
+  Résumé, météo, explication, blague → là seulement le message est rédigé au déclenchement.
+- primary=prompt seulement pour produire ce texte. Un oui/non ou un prix = condition,
+  jugée sans rédaction (JEV, ou le chiffre).
 - cooldown / nombre d'alertes / durée : OMETS-les. Interdit de demander « combien de fois ? ».
 Écoute : mot cité → pattern. « quand JE dis… » → author=self. topic seulement si sujet flou.
 Veille continue (pas d'heure) : pas d'URL → search_web puis url. Pas de seuil → omets threshold (seuil auto).
@@ -582,6 +588,9 @@ def _widget_commentary(text: str, tool_name: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
+    if tool_name in ("schedule_task", "manage_task", "show_tasks"):
+        # La carte dit déjà quoi. On garde seulement les pieds (sources).
+        return "\n".join(line for line in raw.splitlines() if line.startswith("-# "))
     body = "\n".join(
         line for line in raw.splitlines() if not line.startswith("-# ")
     ).strip()
@@ -940,7 +949,11 @@ class Chat(commands.Cog):
             await self._exec_watch_task(task)
             return
         if plan_of_task(task).get("legacy"):
-            await self._exec_task_llm(task)
+            fast = await self._legacy_fast_text(task)
+            if fast:
+                await self._exec_task_llm(task, fast_text=fast)
+            else:
+                await self._exec_task_llm(task)
             return
         await self._run_plan(task)
 
@@ -1112,9 +1125,11 @@ class Chat(commands.Cog):
         url: str,
         trigger_message: Optional[discord.Message],
     ) -> bool:
-        mode = secondary.get("mode") or "generate"
+        mode = str(secondary.get("mode") or "generate")
         say = str(secondary.get("say") or "")
         relay = bool(secondary.get("relay"))
+        if not relay and mode == "generate":
+            mode = await self._cheap_post_mode(say)
         mention = f"<@{task.user_id}>"
         self_event = (
             trigger_message is not None
@@ -1294,6 +1309,12 @@ class Chat(commands.Cog):
             author = getattr(message.author, "display_name", None) or message.author.name
             chan = getattr(message.channel, "name", "?")
             fast = self._fast_alert_text(task, message=message, author=author, excerpt=excerpt)
+            if fast is None:
+                mode = await self._cheap_post_mode(task.instruction)
+                if mode != "generate":
+                    fast = self._fast_alert_text(
+                        task, message=message, author=author, excerpt=excerpt, mode=mode,
+                    )
             enriched = ScheduledTask(
                 **{**task.__dict__, "instruction": (
                     f"{task.instruction}\n"
@@ -1360,7 +1381,10 @@ class Chat(commands.Cog):
         state = await view.settle("confirmed" if verdict == "confirm" else "cancelled")
         self._draft_views.pop(message.author.id, None)
         self.event_triggers.invalidate(view.task.guild_id)
-        await view.push()
+        if state == "cancelled":
+            await view.discard()
+        else:
+            await view.push()
         try:
             await message.add_reaction("✅" if state == "confirmed" else "❌")
         except discord.HTTPException:
@@ -1371,6 +1395,31 @@ class Chat(commands.Cog):
         except Exception:
             logger.debug("Ingestion réponse brouillon échouée", exc_info=True)
         return True
+
+    async def _cheap_post_mode(self, instruction: str) -> str:
+        """generate seulement si le message doit être rédigé. Sinon JEV, puis un fait brut."""
+        quick = quick_delivery_mode(instruction)
+        if quick:
+            return quick
+        if self.typesafe is not None:
+            verdict = await self.typesafe.classify_alert_mode(instruction, facts_ready=True)
+            if verdict:
+                return verdict
+        return "ping_only"
+
+    async def _legacy_fast_text(self, task: ScheduledTask) -> Optional[str]:
+        """Rappel simple : le texte est déjà la consigne. None = il faut rédiger."""
+        stored = str((task.recipe or {}).get("mode") or "generate")
+        mode = stored
+        if stored == "generate":
+            quick = quick_delivery_mode(task.instruction)
+            if quick in ("verbatim", "ping_only"):
+                mode = quick
+            else:
+                return None
+        if mode == "generate":
+            return None
+        return self._fast_alert_text(task, mode=mode)
 
     def _fast_alert_text(
         self,
@@ -1383,12 +1432,14 @@ class Chat(commands.Cog):
         previous: Optional[float] = None,
         threshold: Optional[float] = None,
         url: str = "",
+        mode: Optional[str] = None,
     ) -> Optional[str]:
         """Alerte fabriquée sans GPT (mode verbatim / ping_only décidé par JEV à la création).
 
         None → il faut GPT (mode generate).
         """
-        mode = str(task.recipe.get("mode") or "generate")
+        if mode is None:
+            mode = str(task.recipe.get("mode") or "generate")
         if mode not in ("verbatim", "ping_only"):
             return None
         mention = f"<@{task.user_id}>"
@@ -1405,6 +1456,8 @@ class Chat(commands.Cog):
             return say
         if mode == "verbatim" and say:
             head = f"{mention} {say}"
+        elif message is None and say:
+            head = f"{mention} {say}"
         else:
             trig = parse_trigger(task.trigger_json)
             head = f"{mention} {author or 'quelqu’un'} en parle ici : « {event_label(trig)} »"
@@ -1413,7 +1466,7 @@ class Chat(commands.Cog):
     async def _post_fast_alert(
         self, task: ScheduledTask, dest, text: str, footer_detail: str,
     ) -> None:
-        label = "Écoute" if task.kind == KIND_EVENT else "Veille"
+        label = "Écoute" if task.kind == KIND_EVENT else ("Veille" if task.kind == KIND_WATCH else "Rappel")
         body = f"{text}\n-# {_foot_tag(label, footer_detail)}" if footer_detail else text
         posted = await dest.send(
             suppress_link_embeds(body),

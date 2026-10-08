@@ -567,14 +567,33 @@ def _infer_trigger_limits(
     }
 
 
-async def _delivery_mode(typesafe, instruction: str) -> str:
-    """Regex d'abord, JEV seulement si ambigu ; sans verdict, GPT rédige (comportement sûr)."""
+def _facts_will_be_ready(args: dict) -> bool:
+    """La tâche lira une page ou jugera une condition : le fait existe avant le message."""
+    op = (args.get("op") or "").strip().lower()
+    return bool(
+        (args.get("url") or "").strip()
+        or (args.get("query") or "").strip()
+        or (args.get("condition") or "").strip()
+        or args.get("threshold") is not None
+        or op in ("lt_prev", "gt_prev")
+    )
+
+
+async def _delivery_mode(typesafe, instruction: str, *, facts_ready: bool = False) -> str:
+    """Regex d'abord, JEV si ambigu. GPT seulement pour rédiger.
+
+    Un fait déjà connu (prix, page, recherche) se poste sans completion si personne
+    ne demande un texte.
+    """
     quick = quick_delivery_mode(instruction)
     if quick:
         return quick
     if typesafe is None:
-        return "generate"
-    return (await typesafe.classify_alert_mode(instruction)) or "generate"
+        return "ping_only" if facts_ready else "generate"
+    verdict = await typesafe.classify_alert_mode(instruction, facts_ready=facts_ready)
+    if verdict:
+        return verdict
+    return "ping_only" if facts_ready else "generate"
 
 
 def _watch_var_key(url: str) -> str:
@@ -964,7 +983,9 @@ async def _tool_schedule_event_watch(
             topic=topic,
             owner_id=author.id,
         )
-        mode = await _delivery_mode(typesafe, instruction)
+        mode = await _delivery_mode(
+            typesafe, instruction, facts_ready=_facts_will_be_ready(args),
+        )
         plan, plan_price, plan_err = await _compile_task_plan(
             ctx, store, guild.id, author.id, args,
             instruction=instruction, mode=mode, typesafe=typesafe,
@@ -1069,7 +1090,9 @@ async def _tool_schedule_event_watch(
             var_key=var_key,
             anchor=anchor,
         )
-        mode = await _delivery_mode(typesafe, instruction)
+        mode = await _delivery_mode(
+            typesafe, instruction, facts_ready=True,
+        )
         plan, plan_price, plan_err = await _compile_task_plan(
             ctx, store, guild.id, author.id, args,
             instruction=instruction, mode=mode, typesafe=typesafe,
@@ -1243,7 +1266,9 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
         title = (args.get("title") or "").strip()
         guild = ctx.trigger_message.guild
         task_kind_store = KIND_RECURRING if kind != SCHEDULE_ONCE else KIND_AT
-        mode = await _delivery_mode(typesafe, instruction)
+        mode = await _delivery_mode(
+            typesafe, instruction, facts_ready=_facts_will_be_ready(args),
+        )
         plan, current_price, plan_err = await _compile_task_plan(
             ctx, store, guild.id if guild else 0, ctx.trigger_message.author.id, args,
             instruction=instruction, mode=mode, typesafe=typesafe,
@@ -1682,6 +1707,9 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "Plus bas que le dernier relevé de cette tâche : op=lt_prev (gt_prev si plus haut), sans threshold. "
                 "Autre comparaison au résultat précédent : phrase dans condition. "
                 "instruction = message posté SEULEMENT si la condition est vraie. Sans condition, il part à chaque fois. "
+                "Ping, prix ou page déjà lus : pas de rédaction, message fabriqué. "
+                "GPT seulement pour un texte (résumé, météo, explication). "
+                "primary=prompt seulement dans ce cas. Un oui/non ou un prix = condition (JEV ou le chiffre). "
                 "Une condition ou une lecture/recherche → brouillon à confirmer (oui → manage_task confirm). "
                 "Écoute : mot cité → pattern. « quand JE dis » → author=self. "
                 "Boucle prix sans heure : pas d'URL → search_web puis url ; pas de seuil → omets threshold (−10 %). "
@@ -1752,7 +1780,10 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 },
                 "primary_prompt": {
                     "type": "string",
-                    "description": "Consigne du prompt primaire (sa réponse sert de preuve, elle n'est pas postée telle quelle).",
+                    "description": (
+                        "Seulement si le résultat doit être un texte rédigé. "
+                        "Un oui/non ou un prix se juge sans ça (condition)."
+                    ),
                 },
                 "condition": {
                     "type": "string",

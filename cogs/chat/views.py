@@ -1943,7 +1943,30 @@ class ConfirmTaskCreateView(MariaLayout):
         chat = interaction.client.get_cog("Chat")
         if chat is not None and hasattr(chat, "event_triggers"):
             chat.event_triggers.invalidate(self.task.guild_id)
+        if state == "cancelled":
+            await self.discard(interaction)
+            return
         await apply_view(interaction, self)
+
+    async def discard(self, interaction: discord.Interaction | None = None) -> None:
+        """Efface la carte. Le brouillon est déjà annulé en base."""
+        try:
+            if interaction is not None:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                await interaction.delete_original_response()
+                return
+        except discord.HTTPException:
+            pass
+        message = getattr(self, "message", None) or getattr(self, "_message", None)
+        if interaction is not None and message is None:
+            message = interaction.message
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
 
     async def settle(self, state: str) -> str:
         """Applique la décision en base et reconstruit la vue (sans interaction).

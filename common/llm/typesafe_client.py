@@ -648,16 +648,26 @@ class MariaTypeSafeClient:
             return choice
         return "other"
 
-    async def classify_alert_mode(self, instruction: str) -> str | None:
+    async def classify_alert_mode(self, instruction: str, *, facts_ready: bool = False) -> str | None:
         """Comment délivrer l'alerte : verbatim | ping_only | generate. None = JEV absent.
 
         verbatim  : la consigne EST le message (« Go ranked ? »).
         ping_only : consigne générique (« préviens-moi ») → message fabriqué sans GPT.
         generate  : il faut un vrai travail (météo, recherche, résumé…) → GPT au déclenchement.
+        `facts_ready` : la page, le prix ou la recherche est déjà là. Générer seulement
+        si la consigne demande un texte rédigé.
         """
         text = (instruction or "").strip()
         if not self.enabled or not text:
             return None
+        ready = ""
+        if facts_ready:
+            ready = (
+                " The check already ran: the price, the page or the search result is known. "
+                "Pick generate ONLY if the instruction asks for a written piece "
+                "(summary, explanation, advice, joke). "
+                "A ping, a warning, or « tell me if it is true » is ping_only."
+            )
         result = await self.system_one(
             {"instruction": text[:300]},
             {
@@ -665,6 +675,7 @@ class MariaTypeSafeClient:
                     instructions=(
                         "A member set up an alert. `instruction` is what the bot should do "
                         "when it fires. Decide how to deliver it."
+                        + ready
                     ),
                     criteria={
                         "verbatim": "The instruction is itself a short message to post (« Go ranked ? »)",
