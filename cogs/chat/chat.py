@@ -512,8 +512,9 @@ Erreur outil (champ « error ») → explique en langage normal, n'invente pas d
 TÂCHES : horloge (at/recurring), écoute mot-clé (kind=event), veille prix URL (kind=watch).
 Écoute/veille : TU gères tout, le membre ne fait que valider. Dès qu'il exprime l'envie d'être prévenu
 (« dis-moi si… », « ping-moi quand… », « surveille… »), appelle schedule_task directement :
-- écoute : décris le sujet en une phrase (topic) — compris par le sens, pas besoin du mot exact. Ajoute
-  un mot-clé précis (pattern) + variantes (aliases) seulement s'il y en a un net. Jamais de mot générique.
+- écoute : s'il cite un mot (« TEST ») → pattern=ce mot + instruction=message exact à poster
+  (« REPONSE TEST »). « quand JE dis… » → author=self. topic seulement si sujet flou sans mot exact.
+  Jamais de méta « Répondre X quand Y » dans instruction.
 - veille : pas d'URL → search_web pour trouver la page produit ; pas de seuil → ne le passe pas (seuil auto).
 - cooldown / nombre d'alertes / durée : OMETS-les, l'outil les déduit du contexte (JEV). Interdit de
   demander « combien de fois ? », « quel cooldown ? », « quelle durée ? ».
@@ -1072,6 +1073,9 @@ class Chat(commands.Cog):
             fact = f"le prix est à **{price:.2f} €** (seuil {threshold:g} €{was})"
             head = f"{mention} {say} — {fact}" if mode == "verbatim" and say else f"{mention} {fact}"
             return f"{head}\n{url}"
+        # Déclenché par le propriétaire lui-même : la réplique seule, sans ping ni citation.
+        if message is not None and message.author.id == task.user_id and mode == "verbatim" and say:
+            return say
         if mode == "verbatim" and say:
             head = f"{mention} {say}"
         else:

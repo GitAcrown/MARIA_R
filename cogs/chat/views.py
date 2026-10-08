@@ -41,6 +41,7 @@ from common.memory.summary import summarize_memories
 from common.memory.vector import VectorStore
 from common.task_recipe import (
     compact_limits,
+    confirm_title,
     delivery_hint,
     focus_label,
     human_status_line,
@@ -1861,16 +1862,9 @@ class ConfirmTaskCreateView(MariaLayout):
 
     def _build(self) -> None:
         task = self.task
-        kind = kind_label(task.kind)
-        titles = {
-            "pending": f"{kind} ?",
-            "confirmed": f"{kind} activée",
-            "cancelled": "Annulé",
-            "expired": "Expiré",
-        }
-        focus = focus_label(task)
+        title, subtitle = confirm_title(task, self.state)
         body: list[discord.ui.Item] = [
-            title_text(titles.get(self.state, kind), focus or f"#{task.id}"),
+            title_text(title, subtitle),
             sep_wide(),
         ]
         if self.state == "pending" and self.commentary:
@@ -1957,6 +1951,11 @@ class _ConfirmDraftButton(discord.ui.Button):
         self._hub = hub
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        # Ceinture + bretelles : MariaLayout.interaction_check filtre déjà via viewer_id.
+        if interaction.user.id != self._hub.task.user_id:
+            return await interaction.response.send_message(
+                "C'est pas ton brouillon.", ephemeral=True,
+            )
         await self._hub.finish(interaction, "confirmed")
 
 
@@ -1966,6 +1965,10 @@ class _CancelDraftButton(discord.ui.Button):
         self._hub = hub
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self._hub.task.user_id:
+            return await interaction.response.send_message(
+                "C'est pas ton brouillon.", ephemeral=True,
+            )
         await self._hub.finish(interaction, "cancelled")
 
 

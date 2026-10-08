@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ from common.task_recipe import (
     human_status_line,
     keyword_is_specific,
     natural_summary,
+    normalize_author_filter,
     pattern_ok,
     quick_delivery_mode,
 )
@@ -70,6 +72,77 @@ TASK_MAX_MINUTES = TASK_MAX_DAYS * 24 * 60
 def sanitize_task_instruction(text: str) -> str:
     """Normalise la consigne (trim + plafond), sans retirer « Rappelle… »."""
     return (text or "").strip()[:TASK_INSTRUCTION_MAX]
+
+
+_QUOTE_RE = re.compile(r"[«\"“]([^»\"”]{1,80})[»\"”]")
+_SELF_AUTHOR_RE = re.compile(
+    r"\b(?:quand|d[eè]s que|la prochaine fois que|si)\s+je\s+"
+    r"(?:dis|dirai|parle|parlerai|écris|ecris|mentionne|mentionnerai)\b"
+    r"|\bje\s+dis\b.+\b(?:préviens|previens|dis[- ]moi|ping)\b"
+    r"|\b(?:préviens|previens|dis[- ]moi|ping(?:ue)?[- ]?moi).+\bquand je\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_quoted(text: str) -> list[str]:
+    return [m.group(1).strip() for m in _QUOTE_RE.finditer(text or "") if m.group(1).strip()]
+
+
+def _pick_event_pattern(pattern: str, topic: str, user_text: str, instruction: str) -> str:
+    """Mot-clé concret : arg GPT, sinon mot après « dis/dit » entre guillemets."""
+    if pattern and pattern_ok(pattern) is None:
+        return pattern.strip()
+    # « … que je dis 'Singe' » / « dit le mot « Singe » »
+    m = re.search(
+        r"(?:dis|dit|parle(?:r)?\s+de|mot)\s+[«\"“']([^»\"”']{2,24})[»\"”']",
+        user_text or "",
+        re.IGNORECASE,
+    )
+    if m and pattern_ok(m.group(1).strip()) is None:
+        return m.group(1).strip()
+    for src in (topic, user_text):
+        for q in _extract_quoted(src):
+            if pattern_ok(q) is None:
+                return q
+    return (pattern or "").strip()
+
+
+def _clean_event_instruction(instruction: str, user_text: str, pattern: str) -> str:
+    """Garde le message à poster (ex. STOPPPPP), pas la méta « Répondre X quand Y »."""
+    instr = (instruction or "").strip()
+    # « tu peux me dire 'STOPPPPP' … » / « dis-moi "…" »
+    m = re.search(
+        r"(?:me\s+dire|dis[- ]moi|répond(?:re|s)?|envoyer)\s+[«\"“']([^»\"”']{1,80})[»\"”']",
+        user_text or "",
+        re.IGNORECASE,
+    )
+    if m:
+        q = m.group(1).strip()
+        if q and (not pattern or q.casefold() != pattern.casefold()):
+            return q
+    for q in _extract_quoted(user_text):
+        if pattern and q.casefold() == pattern.casefold():
+            continue
+        if 1 <= len(q) <= 80:
+            return q
+    # Instruction GPT trop méta : « Répondre « STOPPPPP » quand… »
+    low = instr.casefold()
+    if low.startswith(("répondre", "repondre", "dire ", "envoyer", "écrire", "ecrire")):
+        for q in _extract_quoted(instr):
+            if pattern and q.casefold() == pattern.casefold():
+                continue
+            if 1 <= len(q) <= 80:
+                return q
+    return instr
+
+
+def _infer_author_filter(user_text: str, args: dict, owner_id: int) -> str:
+    """self si « quand je dis… », sinon arg GPT, sinon not_self."""
+    if args.get("author") is not None:
+        return normalize_author_filter(args.get("author"), owner_id=owner_id)
+    if _SELF_AUTHOR_RE.search(user_text or ""):
+        return "self"
+    return "not_self"
 
 
 def _parse_execute_at(execute_at_str: str) -> datetime:
@@ -653,8 +726,12 @@ async def _tool_schedule_event_watch(
             return ToolResponseRecord(tc.id, {
                 "error": f"Tu as déjà {TASK_MAX_EVENT} écoutes (max).{hint}",
             }, now)
-        pattern = (args.get("pattern") or args.get("keyword") or "").strip()
         topic = (args.get("topic") or "").strip()[:160]
+        pattern = _pick_event_pattern(
+            (args.get("pattern") or args.get("keyword") or "").strip(),
+            topic, user_text, instruction,
+        )
+        instruction = _clean_event_instruction(instruction, user_text, pattern) or instruction
         jev_on = typesafe is not None and getattr(typesafe, "enabled", False)
         if not pattern and not (topic and jev_on):
             return ToolResponseRecord(tc.id, {
@@ -683,6 +760,13 @@ async def _tool_schedule_event_watch(
                         "Propose un mot plus précis ou décris le sujet avec topic."
                     ),
                 }, now)
+        # Topic trop « scénario » alors qu'on a un mot-clé : on le simplifie.
+        if pattern and topic and (
+            len(topic) > 40
+            or "dit le mot" in topic.casefold()
+            or pattern.casefold() in topic.casefold()
+        ):
+            topic = ""
         dup = await asyncio.to_thread(
             store.find_event_duplicate, author.id, guild.id, pattern or topic,
         )
@@ -766,14 +850,16 @@ async def _tool_schedule_event_watch(
         cd = max(EVENT_COOLDOWN_MIN, cd)
         max_fires = max(1, min(20, _int_arg("max_fires", suggested["max_fires"])))
 
+        author_filter = _infer_author_filter(user_text, args, author.id)
         trigger = build_event_trigger(
             pattern=pattern,
             channel_ids=channel_ids or [msg.channel.id],
-            author=(args.get("author") or "not_self"),
+            author=author_filter,
             scope=scope,
             aliases=args.get("aliases"),
             intent=user_text,
             topic=topic,
+            owner_id=author.id,
         )
         recipe = build_recipe(
             say=instruction, ping=True, mode=await _delivery_mode(typesafe, instruction),
@@ -1427,8 +1513,10 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "TU gères tout : le membre ne précise presque jamais cooldown / max / durée. "
                 "Omets cooldown_hours / max_fires / ttl_days : l'outil les déduit (JEV + contexte) "
                 "— ne les passe que si le membre a été explicite. Ne demande JAMAIS « combien de fois ? ». "
-                "Écoute : donne topic (le sujet en une phrase, compris par le sens) ; pattern/aliases "
-                "(1–3 variantes) en plus si un mot précis existe. Jamais un mot générique seul. "
+                "Écoute : si le membre cite un mot (« Singe », « ranked ») → pattern = ce mot "
+                "(obligatoire). topic seulement pour un sujet flou sans mot exact. "
+                "instruction = le message exact à envoyer (« STOPPPPP »), PAS une méta "
+                "« Répondre X quand Y ». author=self si « quand JE dis… », sinon not_self. "
                 "Veille : si pas d'URL, trouve la page produit avec search_web ; si pas de seuil, "
                 "omets threshold (seuil auto -10 %, ou drop_percent). La page est lue à la création. "
                 "Défauts si indécis : cd 3 h, 5 alertes, 7 j (veille : check ≥6 h). "
@@ -1538,8 +1626,12 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 },
                 "author": {
                     "type": "string",
-                    "enum": ["any", "not_self"],
-                    "description": "Filtre auteur (défaut not_self)",
+                    "enum": ["any", "not_self", "self"],
+                    "description": (
+                        "Qui déclenche : self = le membre lui-même (« quand JE dis… »), "
+                        "not_self = les autres (défaut), any = tout le monde. "
+                        "À INFÉRER : « quand je dis X » → self."
+                    ),
                 },
             },
             optional_props=[

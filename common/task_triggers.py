@@ -72,9 +72,11 @@ def _channel_allowed(task, channel_id: int) -> bool:
 
 def _author_allowed(task, author_id: int) -> bool:
     trig = parse_trigger(task.trigger_json)
-    mode = trig.get("author") or "not_self"
+    mode = str(trig.get("author") or "not_self").strip().casefold()
     if mode == "any":
         return True
+    if mode == "self":
+        return author_id == task.user_id
     if mode == "not_self":
         return author_id != task.user_id
     try:
@@ -231,8 +233,9 @@ async def find_firing_tasks(
         if not await _budget_ok(store, task):
             continue
         trig = parse_trigger(task.trigger_json)
-        # Expression de 2+ mots (« game night ») : déjà assez précise, pas besoin de JEV.
-        if any(
+        # Pas de JEV si l'expression fait 2+ mots (« game night ») ou si le membre écoute
+        # ses propres messages : il sait ce qu'il tape, le mot exact suffit.
+        if str(trig.get("author") or "").casefold() == "self" or any(
             " " in term.strip() and match_message_pattern(text, term, whole_word=True)
             for term in trigger_terms(trig)
         ):

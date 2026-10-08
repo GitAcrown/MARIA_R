@@ -173,6 +173,9 @@ def quick_delivery_mode(instruction: str) -> Optional[str]:
         return "verbatim"
     if _SHORT_LINE_RE.match(text) and len(text.split()) <= 8:
         return "verbatim"
+    # Réplique courte sans verbe de travail (« STOPPPPP », « Go ranked ») = message à poster tel quel.
+    if len(text.split()) <= 4 and len(text) <= 40:
+        return "verbatim"
     return None
 
 
@@ -310,6 +313,28 @@ def render_pseudocode(task) -> str:
     return "\n".join(lines)
 
 
+def normalize_author_filter(raw: Any, *, owner_id: int = 0) -> str:
+    """any | not_self | self | <user_id>."""
+    if raw is None:
+        return "not_self"
+    s = str(raw).strip().casefold()
+    if s in ("any", "anyone", "tous", "anybody"):
+        return "any"
+    if s in ("self", "me", "moi", "owner", "auteur"):
+        return "self"
+    if s in ("not_self", "others", "autres", "not-self"):
+        return "not_self"
+    try:
+        uid = int(str(raw).strip())
+        if uid > 0:
+            return str(uid)
+    except (TypeError, ValueError):
+        pass
+    if owner_id and s == str(owner_id):
+        return "self"
+    return "not_self"
+
+
 def build_event_trigger(
     *,
     pattern: str,
@@ -319,6 +344,7 @@ def build_event_trigger(
     aliases: Optional[list[str]] = None,
     intent: str = "",
     topic: str = "",
+    owner_id: int = 0,
 ) -> dict:
     topic = (topic or "").strip()[:160]
     return {
@@ -330,7 +356,7 @@ def build_event_trigger(
         "semantic": bool(topic),
         "intent": (intent or "").strip()[:200],
         "match": "word",
-        "author": author if author in ("any", "not_self") else "not_self",
+        "author": normalize_author_filter(author, owner_id=owner_id),
         "channel_ids": [int(c) for c in channel_ids],
         "scope": scope,
     }
@@ -381,13 +407,19 @@ def kind_label(kind: str) -> str:
 
 
 def focus_label(task, *, max_len: int = 60) -> str:
-    """Sujet court d'une tâche (liste, select, titres) — topic > mots-clés > seuil > titre."""
+    """Sujet court d'une tâche (liste, select, titres) — mots-clés > topic court > seuil > titre."""
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     if kind == KIND_EVENT:
-        topic = str(trigger.get("topic") or "").strip()
         terms = trigger_terms(trigger)
-        raw = topic or (" / ".join(terms) if terms else "") or (getattr(task, "title", "") or "")
+        topic = str(trigger.get("topic") or "").strip()
+        # Préférer le mot-clé net ; un topic long type « X dit le mot Y » est mauvais en titre.
+        if terms:
+            raw = " / ".join(terms)
+        elif topic and len(topic) <= 40:
+            raw = topic
+        else:
+            raw = topic or (getattr(task, "title", "") or "")
         raw = re.sub(r"^Écoute\s*[·•\-:]?\s*", "", raw, flags=re.IGNORECASE).strip(" «»\"'")
     elif kind == KIND_WATCH:
         thr = trigger.get("threshold")
@@ -430,6 +462,11 @@ def compact_limits(task, *, price: Optional[float] = None) -> str:
     bits: list[str] = []
     if kind == KIND_EVENT:
         bits.append(scope_label(task))
+        author = str(trigger.get("author") or "not_self").casefold()
+        if author == "self":
+            bits.append("toi seulement")
+        elif author not in ("not_self", "any") and author.isdigit():
+            bits.append(f"<@{author}>")
     elif kind == KIND_WATCH:
         if price is not None:
             bits.append(f"actuellement {price:.2f} €")
@@ -454,27 +491,52 @@ def compact_limits(task, *, price: Optional[float] = None) -> str:
     return " · ".join(bits)
 
 
+def confirm_title(task, state: str = "pending") -> tuple[str, str]:
+    """(titre, sous-titre) pour la carte de confirmation — ex. « Écouter « Singe » ? »."""
+    focus = focus_label(task, max_len=40) or "?"
+    kind = getattr(task, "kind", None) or KIND_AT
+    if kind == KIND_EVENT:
+        if state == "pending":
+            return f"Écouter « {focus} » ?", f"#{getattr(task, 'id', '?')}"
+        if state == "confirmed":
+            return f"J'écoute « {focus} »", f"#{getattr(task, 'id', '?')}"
+        if state == "cancelled":
+            return "Écoute annulée", f"« {focus} »"
+        return "Écoute expirée", f"« {focus} »"
+    if kind == KIND_WATCH:
+        if state == "pending":
+            return f"Surveiller {focus} ?", f"#{getattr(task, 'id', '?')}"
+        if state == "confirmed":
+            return f"Veille {focus}", f"#{getattr(task, 'id', '?')}"
+        if state == "cancelled":
+            return "Veille annulée", focus
+        return "Veille expirée", focus
+    return (kind_label(kind), f"#{getattr(task, 'id', '?')}")
+
+
 def natural_summary(task, *, price: Optional[float] = None) -> str:
     """Phrase en clair (ce qui déclenche). Les chiffres vont dans `compact_limits`."""
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     if kind == KIND_EVENT:
-        topic = str(trigger.get("topic") or "").strip()
         terms = trigger_terms(trigger)
-        if topic and terms:
-            about = f"« {topic} »"
-            # Mot-clé secondaire seulement s'il n'est pas déjà dans le sujet.
-            extras = [t for t in terms if t.casefold() not in topic.casefold()]
-            if extras:
-                about += f" (aussi « {' / '.join(extras)} »)"
+        topic = str(trigger.get("topic") or "").strip()
+        # Afficher le mot-clé en priorité (clair) ; topic seulement s'il n'y a pas de mot.
+        if terms:
+            about = " / ".join(f"« {t} »" for t in terms)
         elif topic:
             about = f"« {topic} »"
-        elif terms:
-            about = " / ".join(f"« {t} »" for t in terms)
         else:
             about = "« ? »"
         where = "sur tout le serveur" if (getattr(task, "scope", "") or "") == "guild" else "dans ce salon"
-        return f"Je te ping quand quelqu'un parle de {about} {where}."
+        author = str(trigger.get("author") or "not_self").casefold()
+        if author == "self":
+            who = "tu dis"
+        elif author == "any":
+            who = "quelqu'un dit"
+        else:
+            who = "quelqu'un d'autre dit"
+        return f"Je réagis quand {who} {about} {where}."
     if kind == KIND_WATCH:
         thr = trigger.get("threshold")
         op = trigger.get("op") or "lt"
