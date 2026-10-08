@@ -25,13 +25,25 @@ SCHEDULE_DAILY = "daily"
 SCHEDULE_WEEKLY = "weekly"
 VALID_SCHEDULES = (SCHEDULE_ONCE, SCHEDULE_DAILY, SCHEDULE_WEEKLY)
 
+KIND_AT = "at"
+KIND_RECURRING = "recurring"
+KIND_EVENT = "event"
+KIND_WATCH = "watch"
+VALID_KINDS = (KIND_AT, KIND_RECURRING, KIND_EVENT, KIND_WATCH)
+
+SCOPE_CHANNEL = "channel"
+SCOPE_GUILD = "guild"
+
 STATUS_PENDING = "pending"
 STATUS_PAUSED = "paused"
 STATUS_RUNNING = "running"
+STATUS_ARMED = "armed"
+STATUS_DRAFT = "draft"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
-ACTIVE_STATUSES = (STATUS_PENDING, STATUS_PAUSED, STATUS_RUNNING)
+ACTIVE_STATUSES = (STATUS_PENDING, STATUS_PAUSED, STATUS_RUNNING, STATUS_ARMED)
+QUOTA_STATUSES = (STATUS_PENDING, STATUS_PAUSED, STATUS_ARMED, STATUS_DRAFT)
 
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 WEEKDAYS_FR = {
@@ -49,8 +61,27 @@ MAX_SEND_RETRIES = 3
 # de retries après incrément (1ère → 2e → 3e tentative).
 _RETRY_BACKOFF_SECONDS = {1: 30, 2: 120, 3: 300}
 _RETRY_BACKOFF_SECONDS_MAX = 300
-TASK_MAX_PENDING = 10
-TASK_MAX_RECURRING = 3
+TASK_MAX_PENDING = 8
+TASK_MAX_RECURRING = 2
+TASK_MAX_EVENT = 2
+TASK_MAX_WATCH = 1
+TASK_MAX_EVENT_CHANNELS = 2
+TASK_MAX_GUILD_SCOPE_PER_USER = 1
+TASK_MAX_GUILD_SCOPE_PER_GUILD = 3
+EVENT_COOLDOWN_MIN = 3600
+EVENT_COOLDOWN_DEFAULT = 3 * 3600
+EVENT_MAX_FIRES_DEFAULT = 5
+EVENT_TTL_DEFAULT_DAYS = 7
+EVENT_TTL_MAX_DAYS = 30
+WATCH_INTERVAL_MIN_MINUTES = 6 * 60
+WATCH_WEB_BUDGET_GUILD_DAY = 40
+FIRE_STORM_MAX_PER_HOUR = 3
+DRAFT_TTL_MINUTES = 10
+MEMBER_VARS_MAX_KEYS = 20
+MEMBER_VARS_MAX_BYTES = 1024
+MEMBER_VARS_TTL_DAYS = 30
+# Events : pas claimés par l'horloge.
+EVENT_SENTINEL_AT = datetime(2099, 1, 1, tzinfo=timezone.utc)
 TASK_MIN_MINUTES = 1
 TASK_MIN_SECONDS = 45
 TASK_MAX_DAYS = 365
@@ -80,6 +111,42 @@ class ScheduledTask:
     created_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None
     deliver_dm: bool = False
+    kind: str = KIND_AT
+    trigger_json: str = "{}"
+    recipe_json: str = "{}"
+    scope: str = SCOPE_CHANNEL
+    channel_ids_json: str = "[]"
+    cooldown_seconds: int = 0
+    max_fires: int = 0
+    fires_count: int = 0
+    expires_at: Optional[datetime] = None
+    last_fired_at: Optional[datetime] = None
+
+    @property
+    def channel_ids(self) -> list[int]:
+        try:
+            raw = json.loads(self.channel_ids_json or "[]")
+            if isinstance(raw, list) and raw:
+                return [int(x) for x in raw]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return [self.channel_id] if self.channel_id else []
+
+    @property
+    def trigger(self) -> dict:
+        try:
+            data = json.loads(self.trigger_json or "{}")
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @property
+    def recipe(self) -> dict:
+        try:
+            data = json.loads(self.recipe_json or "{}")
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -244,8 +311,19 @@ def already_ran_today(task: ScheduledTask, now: Optional[datetime] = None) -> bo
     return _paris_date(task.last_run_at) == _paris_date(now or datetime.now(timezone.utc))
 
 
+def _infer_kind(schedule_kind: str, kind: str) -> str:
+    k = (kind or "").strip()
+    if k in VALID_KINDS:
+        return k
+    if schedule_kind in (SCHEDULE_DAILY, SCHEDULE_WEEKLY):
+        return KIND_RECURRING
+    return KIND_AT
+
+
 def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
     keys = r.keys()
+    sk = (r["schedule_kind"] if "schedule_kind" in keys else SCHEDULE_ONCE) or SCHEDULE_ONCE
+    kind_raw = (r["kind"] if "kind" in keys else "") or ""
     return ScheduledTask(
         id=r["id"],
         channel_id=r["channel_id"],
@@ -254,7 +332,7 @@ def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
         instruction=r["instruction"] or "",
         execute_at=_as_utc(datetime.fromisoformat(r["execute_at"])),
         title=(r["title"] if "title" in keys else "") or "",
-        schedule_kind=(r["schedule_kind"] if "schedule_kind" in keys else SCHEDULE_ONCE) or SCHEDULE_ONCE,
+        schedule_kind=sk,
         weekdays=normalize_weekdays(r["weekdays"] if "weekdays" in keys else "[]"),
         time_of_day=(r["time_of_day"] if "time_of_day" in keys else "") or "",
         until_at=_parse_optional_dt(r["until_at"] if "until_at" in keys else None),
@@ -265,6 +343,16 @@ def _row_to_task(r: sqlite3.Row) -> ScheduledTask:
         created_at=_parse_optional_dt(r["created_at"] if "created_at" in keys else None),
         last_run_at=_parse_optional_dt(r["last_run_at"] if "last_run_at" in keys else None),
         deliver_dm=bool((r["deliver_dm"] if "deliver_dm" in keys else 0) or 0),
+        kind=_infer_kind(sk, kind_raw),
+        trigger_json=(r["trigger_json"] if "trigger_json" in keys else None) or "{}",
+        recipe_json=(r["recipe_json"] if "recipe_json" in keys else None) or "{}",
+        scope=(r["scope"] if "scope" in keys else None) or SCOPE_CHANNEL,
+        channel_ids_json=(r["channel_ids"] if "channel_ids" in keys else None) or "[]",
+        cooldown_seconds=int((r["cooldown_seconds"] if "cooldown_seconds" in keys else 0) or 0),
+        max_fires=int((r["max_fires"] if "max_fires" in keys else 0) or 0),
+        fires_count=int((r["fires_count"] if "fires_count" in keys else 0) or 0),
+        expires_at=_parse_optional_dt(r["expires_at"] if "expires_at" in keys else None),
+        last_fired_at=_parse_optional_dt(r["last_fired_at"] if "last_fired_at" in keys else None),
     )
 
 
@@ -297,12 +385,56 @@ def _init_db() -> None:
             """
         )
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-        if "deliver_dm" not in cols:
-            conn.execute(
-                "ALTER TABLE tasks ADD COLUMN deliver_dm INTEGER NOT NULL DEFAULT 0"
-            )
+        alters = {
+            "deliver_dm": "INTEGER NOT NULL DEFAULT 0",
+            "kind": "TEXT DEFAULT 'at'",
+            "trigger_json": "TEXT DEFAULT '{}'",
+            "recipe_json": "TEXT DEFAULT '{}'",
+            "scope": "TEXT DEFAULT 'channel'",
+            "channel_ids": "TEXT DEFAULT '[]'",
+            "cooldown_seconds": "INTEGER DEFAULT 0",
+            "max_fires": "INTEGER DEFAULT 0",
+            "fires_count": "INTEGER DEFAULT 0",
+            "expires_at": "TEXT",
+            "last_fired_at": "TEXT",
+        }
+        for col, decl in alters.items():
+            if col not in cols:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
+        # Backfill kind depuis schedule_kind.
+        conn.execute(
+            "UPDATE tasks SET kind=? WHERE (kind IS NULL OR kind='' OR kind='at') "
+            "AND schedule_kind IN (?, ?)",
+            (KIND_RECURRING, SCHEDULE_DAILY, SCHEDULE_WEEKLY),
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status_at ON tasks(status, execute_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_kind_status ON tasks(kind, status, guild_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS member_vars (
+                guild_id INTEGER NOT NULL,
+                user_id  INTEGER NOT NULL,
+                key      TEXT NOT NULL,
+                value_json TEXT NOT NULL DEFAULT '',
+                updated_at TEXT,
+                ttl_expires_at TEXT,
+                PRIMARY KEY (guild_id, user_id, key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watch_web_budget (
+                guild_id INTEGER NOT NULL,
+                day      TEXT NOT NULL,
+                fetches  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, day)
+            )
+            """
         )
         conn.execute(
             """
@@ -450,15 +582,32 @@ class TaskStore:
         until_at: Optional[datetime] = None,
         message_id: int = 0,
         deliver_dm: bool = False,
+        kind: str = KIND_AT,
+        trigger: Optional[dict] = None,
+        recipe: Optional[dict] = None,
+        scope: str = SCOPE_CHANNEL,
+        channel_ids: Optional[list[int]] = None,
+        cooldown_seconds: int = 0,
+        max_fires: int = 0,
+        expires_at: Optional[datetime] = None,
+        status: str = STATUS_PENDING,
     ) -> int:
         if schedule_kind not in VALID_SCHEDULES:
             schedule_kind = SCHEDULE_ONCE
+        kind = kind if kind in VALID_KINDS else _infer_kind(schedule_kind, kind)
+        if kind == KIND_EVENT:
+            execute_at = EVENT_SENTINEL_AT
+            status = status if status in (STATUS_DRAFT, STATUS_ARMED, STATUS_PAUSED) else STATUS_ARMED
+            schedule_kind = SCHEDULE_ONCE
+        elif kind == KIND_WATCH:
+            schedule_kind = SCHEDULE_ONCE
+            status = status if status in (STATUS_DRAFT, STATUS_PENDING, STATUS_PAUSED) else STATUS_PENDING
         execute_at = _as_utc(execute_at)
         days = normalize_weekdays(weekdays)
         if schedule_kind == SCHEDULE_WEEKLY and not days:
             days = [WEEKDAYS[execute_at.astimezone(PARIS_TZ).weekday()]]
         tod = ""
-        if schedule_kind != SCHEDULE_ONCE:
+        if schedule_kind != SCHEDULE_ONCE and kind == KIND_RECURRING:
             tod = normalize_time_of_day(time_of_day, execute_at)
             snapped = snap_execute_at(
                 kind=schedule_kind,
@@ -473,20 +622,33 @@ class TaskStore:
         instruction = (instruction or "").strip()[:TASK_INSTRUCTION_MAX]
         now_iso = datetime.now(timezone.utc).isoformat()
         until_iso = _as_utc(until_at).isoformat() if until_at else None
+        exp_iso = _as_utc(expires_at).isoformat() if expires_at else None
+        chans = channel_ids if channel_ids else [channel_id]
         with _db() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO tasks (
                     channel_id, user_id, guild_id, title, instruction, execute_at,
                     schedule_kind, weekdays, time_of_day, until_at, status,
-                    message_id, created_at, deliver_dm
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    message_id, created_at, deliver_dm,
+                    kind, trigger_json, recipe_json, scope, channel_ids,
+                    cooldown_seconds, max_fires, fires_count, expires_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     channel_id, user_id, guild_id, title, instruction,
                     execute_at.isoformat(), schedule_kind, json.dumps(days),
-                    tod, until_iso, STATUS_PENDING, message_id, now_iso,
+                    tod, until_iso, status, message_id, now_iso,
                     1 if deliver_dm else 0,
+                    kind,
+                    json.dumps(trigger or {}, ensure_ascii=False),
+                    json.dumps(recipe or {}, ensure_ascii=False),
+                    scope if scope in (SCOPE_CHANNEL, SCOPE_GUILD) else SCOPE_CHANNEL,
+                    json.dumps([int(c) for c in chans]),
+                    int(cooldown_seconds or 0),
+                    int(max_fires or 0),
+                    0,
+                    exp_iso,
                 ),
             )
             return int(cur.lastrowid)
@@ -501,21 +663,24 @@ class TaskStore:
             rows = conn.execute(
                 """
                 SELECT * FROM tasks
-                WHERE user_id=? AND status IN (?, ?, ?)
+                WHERE user_id=? AND status IN (?, ?, ?, ?, ?)
                 ORDER BY execute_at
                 """,
-                (user_id, STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED),
+                (
+                    user_id, STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED,
+                    STATUS_ARMED, STATUS_DRAFT,
+                ),
             ).fetchall()
         return [_row_to_task(r) for r in rows]
 
-    def count_active(self, user_id: int) -> int:
+    def count_active(self, user_id: int, *, exclude_id: int = 0) -> int:
         with _db() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) FROM tasks
-                WHERE user_id=? AND status IN (?, ?)
+                WHERE user_id=? AND id != ? AND status IN ({','.join('?' * len(QUOTA_STATUSES))})
                 """,
-                (user_id, STATUS_PENDING, STATUS_PAUSED),
+                (user_id, exclude_id, *QUOTA_STATUSES),
             ).fetchone()
         return row[0] if row else 0
 
@@ -524,16 +689,336 @@ class TaskStore:
             row = conn.execute(
                 """
                 SELECT COUNT(*) FROM tasks
-                WHERE user_id=? AND status IN (?, ?)
-                  AND schedule_kind IN (?, ?)
+                WHERE user_id=? AND status IN (?, ?, ?)
+                  AND (kind=? OR schedule_kind IN (?, ?))
                   AND id != ?
                 """,
                 (
-                    user_id, STATUS_PENDING, STATUS_PAUSED,
-                    SCHEDULE_DAILY, SCHEDULE_WEEKLY, exclude_id,
+                    user_id, STATUS_PENDING, STATUS_PAUSED, STATUS_ARMED,
+                    KIND_RECURRING, SCHEDULE_DAILY, SCHEDULE_WEEKLY, exclude_id,
                 ),
             ).fetchone()
         return row[0] if row else 0
+
+    def count_kind(self, user_id: int, kind: str, *, exclude_id: int = 0) -> int:
+        with _db() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM tasks
+                WHERE user_id=? AND kind=? AND id != ?
+                  AND status IN ({','.join('?' * len(QUOTA_STATUSES))})
+                """,
+                (user_id, kind, exclude_id, *QUOTA_STATUSES),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def count_guild_scope_events(self, guild_id: int, *, user_id: int = 0) -> tuple[int, int]:
+        """(total guild-scope events actifs, ceux du user)."""
+        with _db() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM tasks
+                WHERE guild_id=? AND kind=? AND scope=?
+                  AND status IN ({','.join('?' * len(QUOTA_STATUSES))})
+                """,
+                (guild_id, KIND_EVENT, SCOPE_GUILD, *QUOTA_STATUSES),
+            ).fetchone()[0]
+            mine = 0
+            if user_id:
+                mine = conn.execute(
+                    f"""
+                    SELECT COUNT(*) FROM tasks
+                    WHERE guild_id=? AND user_id=? AND kind=? AND scope=?
+                      AND status IN ({','.join('?' * len(QUOTA_STATUSES))})
+                    """,
+                    (guild_id, user_id, KIND_EVENT, SCOPE_GUILD, *QUOTA_STATUSES),
+                ).fetchone()[0]
+        return int(total or 0), int(mine or 0)
+
+    def quota_summary(self, user_id: int) -> dict[str, int]:
+        tasks = self.get_user_tasks(user_id)
+        active = [t for t in tasks if t.status in QUOTA_STATUSES]
+        return {
+            "total": len(active),
+            "max_total": TASK_MAX_PENDING,
+            "event": sum(1 for t in active if t.kind == KIND_EVENT),
+            "max_event": TASK_MAX_EVENT,
+            "watch": sum(1 for t in active if t.kind == KIND_WATCH),
+            "max_watch": TASK_MAX_WATCH,
+            "recurring": sum(
+                1 for t in active
+                if t.kind == KIND_RECURRING or t.schedule_kind in (SCHEDULE_DAILY, SCHEDULE_WEEKLY)
+            ),
+            "max_recurring": TASK_MAX_RECURRING,
+        }
+
+    def list_armed_events(self, guild_id: int) -> list[ScheduledTask]:
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE guild_id=? AND kind=? AND status=?
+                """,
+                (guild_id, KIND_EVENT, STATUS_ARMED),
+            ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    def latest_draft(self, user_id: int, kind: Optional[str] = None) -> Optional[ScheduledTask]:
+        sql = "SELECT * FROM tasks WHERE user_id=? AND status=?"
+        params: list = [user_id, STATUS_DRAFT]
+        if kind:
+            sql += " AND kind=?"
+            params.append(kind)
+        with _db() as conn:
+            row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+        return _row_to_task(row) if row else None
+
+    def cancel_drafts(self, user_id: int, kind: str) -> int:
+        """Un nouveau brouillon remplace les anciens (pas de quota gâché par un doublon)."""
+        with _db() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status=? WHERE user_id=? AND kind=? AND status=?",
+                (STATUS_CANCELLED, user_id, kind, STATUS_DRAFT),
+            )
+            return cur.rowcount
+
+    def find_event_duplicate(
+        self, user_id: int, guild_id: int, pattern: str,
+    ) -> Optional[ScheduledTask]:
+        """Écoute active du même membre sur le même mot-clé (hors brouillon)."""
+        want = (pattern or "").strip().casefold()
+        if not want:
+            return None
+        with _db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE user_id=? AND guild_id=? AND kind=? AND status IN (?, ?)
+                """,
+                (user_id, guild_id, KIND_EVENT, STATUS_ARMED, STATUS_PAUSED),
+            ).fetchall()
+        for row in rows:
+            t = _row_to_task(row)
+            key = t.trigger.get("pattern") or t.trigger.get("topic") or ""
+            if str(key).strip().casefold() == want:
+                return t
+        return None
+
+    def expire_overdue(self) -> int:
+        """Termine les écoutes / veilles dont la durée de vie est dépassée (libère le quota)."""
+        now = datetime.now(timezone.utc).isoformat()
+        with _db() as conn:
+            cur = conn.execute(
+                """
+                UPDATE tasks SET status=?, last_run_at=?
+                WHERE kind IN (?, ?) AND status IN (?, ?, ?)
+                  AND expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (
+                    STATUS_COMPLETED, now, KIND_EVENT, KIND_WATCH,
+                    STATUS_ARMED, STATUS_PENDING, STATUS_PAUSED, now,
+                ),
+            )
+            return cur.rowcount
+
+    def confirm_draft(self, task_id: int, user_id: int) -> bool:
+        task = self.get(task_id)
+        if task is None or task.user_id != user_id or task.status != STATUS_DRAFT:
+            return False
+        new_status = STATUS_ARMED if task.kind == KIND_EVENT else STATUS_PENDING
+        with _db() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status=? WHERE id=? AND user_id=? AND status=?",
+                (new_status, task_id, user_id, STATUS_DRAFT),
+            )
+            return cur.rowcount > 0
+
+    def purge_expired_drafts(self) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=DRAFT_TTL_MINUTES)).isoformat()
+        with _db() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status=? WHERE status=? AND created_at < ?",
+                (STATUS_CANCELLED, STATUS_DRAFT, cutoff),
+            )
+            return cur.rowcount
+
+    def touch_last_fired(self, task_id: int) -> None:
+        """Pose last_fired_at (anti-storm) sans incrémenter fires_count."""
+        now = datetime.now(timezone.utc).isoformat()
+        with _db() as conn:
+            conn.execute(
+                "UPDATE tasks SET last_fired_at=? WHERE id=?",
+                (now, task_id),
+            )
+
+    def record_fire(self, task_id: int) -> Optional[ScheduledTask]:
+        """Incrémente fires ; complete si max atteint ou expire. Retourne tâche à jour."""
+        now = datetime.now(timezone.utc)
+        with _db() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return None
+            task = _row_to_task(row)
+            fires = task.fires_count + 1
+            done = False
+            if task.max_fires and fires >= task.max_fires:
+                done = True
+            if task.expires_at and now >= task.expires_at:
+                done = True
+            status = STATUS_COMPLETED if done else (
+                STATUS_ARMED if task.kind == KIND_EVENT else STATUS_PENDING
+            )
+            next_at = task.execute_at
+            if task.kind == KIND_WATCH and not done:
+                mins = int(task.trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
+                next_at = now + timedelta(minutes=max(WATCH_INTERVAL_MIN_MINUTES, mins))
+            conn.execute(
+                """
+                UPDATE tasks SET fires_count=?, last_fired_at=?, last_run_at=?,
+                    status=?, execute_at=?, retries=0, last_error=''
+                WHERE id=?
+                """,
+                (
+                    fires, now.isoformat(), now.isoformat(),
+                    status, _as_utc(next_at).isoformat(), task_id,
+                ),
+            )
+        return self.get(task_id)
+
+    def reschedule_watch(self, task_id: int, *, fired: bool) -> Optional[ScheduledTask]:
+        """Après un poll watch : alerte (fired) ou simple report du prochain check."""
+        if fired:
+            return self.record_fire(task_id)
+        now = datetime.now(timezone.utc)
+        task = self.get(task_id)
+        if task is None:
+            return None
+        if task.expires_at and now >= task.expires_at:
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE tasks SET status=?, last_run_at=? WHERE id=?",
+                    (STATUS_COMPLETED, now.isoformat(), task_id),
+                )
+            return self.get(task_id)
+        mins = int(task.trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
+        next_at = now + timedelta(minutes=max(WATCH_INTERVAL_MIN_MINUTES, mins))
+        with _db() as conn:
+            conn.execute(
+                """
+                UPDATE tasks SET status=?, execute_at=?, last_run_at=?,
+                    retries=0, last_error=''
+                WHERE id=?
+                """,
+                (STATUS_PENDING, next_at.isoformat(), now.isoformat(), task_id),
+            )
+        return self.get(task_id)
+
+    def fires_last_hour(self, user_id: int) -> int:
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with _db() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE user_id=? AND kind IN (?, ?) AND last_fired_at >= ?
+                """,
+                (user_id, KIND_EVENT, KIND_WATCH, since),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def consume_watch_budget(self, guild_id: int, *, n: int = 1) -> bool:
+        """True si le fetch est autorisé (incrémente le compteur jour Paris)."""
+        day = datetime.now(timezone.utc).astimezone(PARIS_TZ).strftime("%Y-%m-%d")
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT fetches FROM watch_web_budget WHERE guild_id=? AND day=?",
+                (guild_id, day),
+            ).fetchone()
+            cur = int(row[0] if row else 0)
+            if cur + n > WATCH_WEB_BUDGET_GUILD_DAY:
+                return False
+            conn.execute(
+                """
+                INSERT INTO watch_web_budget(guild_id, day, fetches) VALUES (?,?,?)
+                ON CONFLICT(guild_id, day) DO UPDATE SET fetches = fetches + ?
+                """,
+                (guild_id, day, n, n),
+            )
+        return True
+
+    def get_var(self, guild_id: int, user_id: int, key: str) -> Optional[str]:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT value_json, ttl_expires_at FROM member_vars "
+                "WHERE guild_id=? AND user_id=? AND key=?",
+                (guild_id, user_id, key),
+            ).fetchone()
+        if not row:
+            return None
+        exp = _parse_optional_dt(row["ttl_expires_at"])
+        if exp and exp < datetime.now(timezone.utc):
+            self.delete_var(guild_id, user_id, key)
+            return None
+        return row["value_json"]
+
+    def set_var(self, guild_id: int, user_id: int, key: str, value: str) -> str | None:
+        """None si OK, sinon erreur FR."""
+        key = (key or "").strip()[:80]
+        if not key:
+            return "Clé vide."
+        val = (value or "")[:MEMBER_VARS_MAX_BYTES]
+        low = val.casefold()
+        if any(s in low for s in ("api_key", "token", "bearer ", "sk-", "password")):
+            return "Valeur refusée (ressemble à un secret)."
+        with _db() as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM member_vars WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            ).fetchone()[0]
+            exists = conn.execute(
+                "SELECT 1 FROM member_vars WHERE guild_id=? AND user_id=? AND key=?",
+                (guild_id, user_id, key),
+            ).fetchone()
+            if not exists and n >= MEMBER_VARS_MAX_KEYS:
+                return f"Limite de variables atteinte ({MEMBER_VARS_MAX_KEYS})."
+            ttl = (
+                datetime.now(timezone.utc) + timedelta(days=MEMBER_VARS_TTL_DAYS)
+            ).isoformat()
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                INSERT INTO member_vars(guild_id, user_id, key, value_json, updated_at, ttl_expires_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(guild_id, user_id, key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at=excluded.updated_at,
+                    ttl_expires_at=excluded.ttl_expires_at
+                """,
+                (guild_id, user_id, key, val, now, ttl),
+            )
+        return None
+
+    def delete_var(self, guild_id: int, user_id: int, key: str) -> None:
+        with _db() as conn:
+            conn.execute(
+                "DELETE FROM member_vars WHERE guild_id=? AND user_id=? AND key=?",
+                (guild_id, user_id, key),
+            )
+
+    def list_vars(self, guild_id: int, user_id: int) -> list[tuple[str, str]]:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT key, value_json, ttl_expires_at FROM member_vars "
+                "WHERE guild_id=? AND user_id=? ORDER BY key",
+                (guild_id, user_id),
+            ).fetchall()
+        out: list[tuple[str, str]] = []
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            exp = _parse_optional_dt(r["ttl_expires_at"])
+            if exp and exp < now:
+                continue
+            out.append((r["key"], r["value_json"]))
+        return out
 
     def list_runs(self, task_id: int, *, limit: int = TASK_RUN_KEEP) -> list[tuple[datetime, str]]:
         """Exécutions passées, plus anciennes d'abord."""
@@ -592,10 +1077,10 @@ class TaskStore:
                 row = conn.execute(
                     """
                     SELECT * FROM tasks
-                    WHERE status=? AND execute_at <= ?
+                    WHERE status=? AND execute_at <= ? AND kind != ?
                     ORDER BY execute_at LIMIT 1
                     """,
-                    (STATUS_PENDING, now),
+                    (STATUS_PENDING, now, KIND_EVENT),
                 ).fetchone()
                 if not row:
                     return None
@@ -714,11 +1199,18 @@ class TaskStore:
         until_at: Optional[datetime] = None,
         clear_until: bool = False,
         deliver_dm: Optional[bool] = None,
+        pattern: Optional[str] = None,
+        cooldown_seconds: Optional[int] = None,
+        max_fires: Optional[int] = None,
+        threshold: Optional[float] = None,
+        ttl_days: Optional[int] = None,
     ) -> bool:
         current = self.get(task_id)
         if current is None or current.user_id != user_id:
             return False
-        if current.status not in (STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED):
+        if current.status not in (
+            STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED, STATUS_ARMED, STATUS_DRAFT,
+        ):
             return False
         sets: list[str] = []
         params: list[object] = []
@@ -770,6 +1262,27 @@ class TaskStore:
         if deliver_dm is not None:
             sets.append("deliver_dm=?")
             params.append(1 if deliver_dm else 0)
+        if cooldown_seconds is not None:
+            sets.append("cooldown_seconds=?")
+            params.append(max(EVENT_COOLDOWN_MIN, int(cooldown_seconds)))
+        if max_fires is not None:
+            sets.append("max_fires=?")
+            params.append(max(1, int(max_fires)))
+        if ttl_days is not None and current.kind in (KIND_EVENT, KIND_WATCH):
+            days = max(1, min(EVENT_TTL_MAX_DAYS, int(ttl_days)))
+            sets.append("expires_at=?")
+            params.append((datetime.now(timezone.utc) + timedelta(days=days)).isoformat())
+        trig = dict(current.trigger)
+        trig_changed = False
+        if pattern is not None and current.kind == KIND_EVENT:
+            trig["pattern"] = str(pattern).strip()[:24]
+            trig_changed = True
+        if threshold is not None and current.kind == KIND_WATCH:
+            trig["threshold"] = float(threshold)
+            trig_changed = True
+        if trig_changed:
+            sets.append("trigger_json=?")
+            params.append(json.dumps(trig, ensure_ascii=False))
         if will_snap:
             snapped = snap_execute_at(
                 kind=effective_kind,
@@ -806,8 +1319,8 @@ class TaskStore:
     def pause(self, task_id: int, user_id: int) -> bool:
         with _db() as conn:
             cur = conn.execute(
-                "UPDATE tasks SET status=? WHERE id=? AND user_id=? AND status=?",
-                (STATUS_PAUSED, task_id, user_id, STATUS_PENDING),
+                "UPDATE tasks SET status=? WHERE id=? AND user_id=? AND status IN (?, ?)",
+                (STATUS_PAUSED, task_id, user_id, STATUS_PENDING, STATUS_ARMED),
             )
             return cur.rowcount > 0
 
@@ -815,6 +1328,13 @@ class TaskStore:
         task = self.get(task_id)
         if task is None or task.user_id != user_id or task.status != STATUS_PAUSED:
             return False
+        if task.kind == KIND_EVENT:
+            with _db() as conn:
+                cur = conn.execute(
+                    "UPDATE tasks SET status=?, retries=0 WHERE id=? AND user_id=?",
+                    (STATUS_ARMED, task_id, user_id),
+                )
+                return cur.rowcount > 0
         nxt = task.execute_at
         if nxt <= datetime.now(timezone.utc) and task.schedule_kind != SCHEDULE_ONCE:
             nxt = next_occurrence(task, after=datetime.now(timezone.utc)) or nxt
@@ -846,11 +1366,12 @@ class TaskStore:
             cur = conn.execute(
                 """
                 UPDATE tasks SET status=?
-                WHERE id=? AND user_id=? AND status IN (?, ?, ?, ?)
+                WHERE id=? AND user_id=? AND status IN (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     STATUS_CANCELLED, task_id, user_id,
                     STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED, STATUS_RUNNING,
+                    STATUS_ARMED, STATUS_DRAFT,
                 ),
             )
             return cur.rowcount > 0
@@ -860,9 +1381,13 @@ class TaskStore:
             cur = conn.execute(
                 """
                 UPDATE tasks SET status=?
-                WHERE user_id=? AND status IN (?, ?, ?)
+                WHERE user_id=? AND status IN (?, ?, ?, ?, ?)
                 """,
-                (STATUS_CANCELLED, user_id, STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED),
+                (
+                    STATUS_CANCELLED, user_id,
+                    STATUS_PENDING, STATUS_PAUSED, STATUS_FAILED,
+                    STATUS_ARMED, STATUS_DRAFT,
+                ),
             )
             return cur.rowcount
 
@@ -897,6 +1422,8 @@ class TaskWorker:
     async def _loop(self) -> None:
         while self._running:
             try:
+                await asyncio.to_thread(self.store.purge_expired_drafts)
+                await asyncio.to_thread(self.store.expire_overdue)
                 claimed = await asyncio.to_thread(self.store.claim_due)
                 if claimed is not None:
                     async with self._lock:
@@ -917,6 +1444,9 @@ class TaskWorker:
             await asyncio.sleep(delay)
 
     async def _run_one(self, task: ScheduledTask) -> None:
+        # Event : déclenché hors horloge (listener). Watch / at / recurring : claim_due.
+        if task.kind == KIND_EVENT:
+            return
         if not await asyncio.to_thread(self.store.still_running, task.id):
             return
         try:
@@ -931,6 +1461,12 @@ class TaskWorker:
                     "Tâche #%s échec (tentative %s/%s): %s",
                     task.id, attempts, MAX_SEND_RETRIES, e,
                 )
+            return
+        if task.kind == KIND_WATCH:
+            # L'executor appelle reschedule_watch ; filet si encore running.
+            still = await asyncio.to_thread(self.store.still_running, task.id)
+            if still:
+                await asyncio.to_thread(self.store.reschedule_watch, task.id, fired=False)
             return
         if not await asyncio.to_thread(self.store.still_running, task.id):
             return

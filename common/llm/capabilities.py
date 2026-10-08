@@ -201,6 +201,10 @@ _MOMENTUM_TOOL_FLAGS: dict[str, str] = {
     "search_web": "web",
     "search_images": "images_search",
     "read_web_page": "web",
+    # Brouillon d'écoute/veille en attente : « oui » / « plutôt moins souvent » doivent
+    # retrouver manage_task sans mot-clé.
+    "schedule_task": "tasks",
+    "manage_task": "tasks",
 }
 
 
@@ -338,6 +342,23 @@ def collect_structural_flags(*messages: discord.Message | None) -> set[str]:
     return flags
 
 
+# Rappels, écoutes (« préviens-moi si quelqu'un dit… ») et veilles (« surveille ce prix »).
+_TASKS_RE = re.compile(
+    r"\b(?:"
+    r"rappel(?:le|er|s)?|t[aâ]ches?|schedule|remind(?:er|me)?|"
+    r"pr[ée]viens?[- ](?:moi|nous)|ping[- ]?(?:moi|nous)|notifie[- ]?(?:moi)?|alerte[- ]?(?:moi)?|"
+    r"(?:dis|signale|fais)[- ]moi (?:si|quand|d[èe]s que)|"
+    r"surveill(?:e|er|ance)|[ée]coute (?:si|quand|le mot|les mots)|"
+    r"(?:une? )?veille|(?:si|quand|d[èe]s que) (?:le )?prix"
+    r")\b",
+    re.I,
+)
+# Une veille produit a souvent besoin de search_web pour trouver la page.
+_WATCH_WEB_RE = re.compile(
+    r"\b(?:prix|baisse|baisser|promo|solde|restock|stock|dispo(?:nible)?|surveill\w*|veille)\b",
+    re.I,
+)
+
 # Un seul scan pour le fallback hors JEV (évite ~10 .search() enchaînés).
 _THEMATIC_SCAN_RE = re.compile(
     "|".join((
@@ -350,7 +371,7 @@ _THEMATIC_SCAN_RE = re.compile(
         rf"(?P<weather>{_WEATHER_RE.pattern})",
         rf"(?P<media_topic>{_MEDIA_TOPIC_RE.pattern})",
         rf"(?P<server_stats>{_SERVER_STATS_RE.pattern})",
-        r"(?P<tasks>\b(?:rappel(?:le|er)?|t[aâ]ches?|schedule|remind(?:er|me)?)\b)",
+        rf"(?P<tasks>{_TASKS_RE.pattern})",
     )),
     re.I,
 )
@@ -493,11 +514,17 @@ async def resolve_capabilities(
                 force_level = "require_web"
             if search_momentum and "web" not in flags:
                 flags.add("web")
+            if "tasks" not in flags and _TASKS_RE.search(text):
+                flags.add("tasks")
+            if "tasks" in flags and _WATCH_WEB_RE.search(text):
+                flags.add("web")
             return CapabilityDecision(
                 flags=flags, force_level=force_level, from_jev=True,
             )
 
     flags = structural | collect_thematic_flags(*messages)
+    if "tasks" in flags and _WATCH_WEB_RE.search(text):
+        flags.add("web")
     force_level = "none"
     if should_force_tool(flags, text, search_momentum=search_momentum):
         force_level = "require_web"

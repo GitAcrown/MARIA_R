@@ -359,7 +359,12 @@ class MariaTypeSafeClient:
                         "server_stats": "Discord server or channel statistics",
                         "youtube": "YouTube video content / subtitles",
                         "web": "Read a specific web page (not a vague search)",
-                        "tasks": "Schedule, list, edit, pause, or cancel a reminder/task",
+                        "tasks": (
+                            "Schedule, list, edit, pause, cancel or CONFIRM a reminder/task; "
+                            "OR asks to be alerted when something happens (someone mentions a "
+                            "word, a price drops, a page changes); OR answers yes/no/adjusts "
+                            "a pending alert the bot just proposed"
+                        ),
                     },
                 ),
             },
@@ -579,6 +584,254 @@ class MariaTypeSafeClient:
                     (action.get("content") or "")[:80],
                 )
         return kept
+
+    # ------------------------------------------------------------------
+    # Tâches (écoutes / veilles) : JEV partout où GPT n'est pas nécessaire
+    # ------------------------------------------------------------------
+
+    async def match_topics(self, message: str, topics: dict[int, str]) -> set[int]:
+        """Quelles écoutes (id → sujet en clair) concernent vraiment ce message ?
+
+        Un seul appel JEV pour toutes les écoutes candidates du salon.
+        Sans JEV / erreur : ensemble vide (jamais d'alerte sur un doute).
+        """
+        text = (message or "").strip()
+        if not self.enabled or not text or not topics:
+            return set()
+        from typesafe_sdk import Noul
+
+        questions = {
+            f"t{tid}": Noul(
+                instructions=(
+                    "Does `message` (a Discord chat message) genuinely talk about, propose, "
+                    f"or announce this topic: « {topic[:160]} »? "
+                    "true only for a real, current mention of that topic (someone playing, "
+                    "asking, proposing, announcing it). false for unrelated chat, a passing "
+                    "word in another sense, jokes, quoting, or past/hypothetical talk."
+                ),
+                criteria={
+                    "true": "The message is really about the topic",
+                    "false": "Not about it (or only tangential)",
+                },
+            )
+            for tid, topic in list(topics.items())[:8]
+        }
+        result = await self.system_one({"message": text[:400]}, questions)
+        if result is None:
+            return set()
+        hits: set[int] = set()
+        for tid in topics:
+            try:
+                if float(result.nouls[f"t{tid}"].noul) >= 0.7:
+                    hits.add(tid)
+            except (KeyError, AttributeError, TypeError, ValueError):
+                continue
+        return hits
+
+    async def classify_draft_reply(self, text: str, summary: str) -> str:
+        """Réponse à un brouillon d'alerte proposé par MARIA : confirm | cancel | other.
+
+        « other » = ajustement, question ou sujet sans rapport → on laisse GPT répondre.
+        """
+        body = (text or "").strip()
+        if not self.enabled or not body:
+            return "other"
+        from typesafe_sdk import Choice
+
+        result = await self.system_one(
+            {"reply": body[:160], "proposal": (summary or "")[:300]},
+            {
+                "verdict": Choice(
+                    instructions=(
+                        "The bot just proposed `proposal` (an alert it will set up) and asks "
+                        "the member to confirm. `reply` is the member's next message. "
+                        "Pick `confirm` ONLY for a clear yes (ok, oui, vas-y, go, parfait, c'est bon). "
+                        "`cancel` for a clear no / drop it. `other` for anything else: "
+                        "adjustments (moins souvent, ajoute un mot…), questions, or unrelated chat."
+                    ),
+                    criteria={
+                        "confirm": "Clear approval of the proposal, nothing else asked",
+                        "cancel": "Clear refusal / not wanted",
+                        "other": "Adjustment, question, or unrelated",
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return "other"
+        try:
+            ans = result.choices["verdict"]
+            choice = str(ans.choice or "other")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return "other"
+        if choice in ("confirm", "cancel") and conf >= 0.72:
+            return choice
+        return "other"
+
+    async def classify_alert_mode(self, instruction: str) -> str | None:
+        """Comment délivrer l'alerte : verbatim | ping_only | generate. None = JEV absent.
+
+        verbatim  : la consigne EST le message (« Go ranked ? »).
+        ping_only : consigne générique (« préviens-moi ») → message fabriqué sans GPT.
+        generate  : il faut un vrai travail (météo, recherche, résumé…) → GPT au déclenchement.
+        """
+        text = (instruction or "").strip()
+        if not self.enabled or not text:
+            return None
+        from typesafe_sdk import Choice
+
+        result = await self.system_one(
+            {"instruction": text[:300]},
+            {
+                "mode": Choice(
+                    instructions=(
+                        "A member set up an alert. `instruction` is what the bot should do "
+                        "when it fires. Decide how to deliver it."
+                    ),
+                    criteria={
+                        "verbatim": "The instruction is itself a short message to post (« Go ranked ? »)",
+                        "ping_only": "Generic « notify / warn me / ping me » with no real content",
+                        "generate": (
+                            "Needs real work at fire time: weather, web search, summary, "
+                            "advice, transport, scores, a tailored written answer"
+                        ),
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return None
+        try:
+            ans = result.choices["mode"]
+            choice = str(ans.choice or "")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
+        if choice in ("verbatim", "ping_only", "generate") and conf >= 0.5:
+            return choice
+        return None
+
+    async def is_keyword_too_generic(self, keyword: str, intent: str = "") -> bool:
+        """Mot-clé si banal qu'il alerterait en permanence ? Fail-open (False)."""
+        word = (keyword or "").strip()
+        if not self.enabled or not word:
+            return False
+        from typesafe_sdk import Noul
+
+        result = await self.system_one(
+            {"keyword": word[:40], "intent": (intent or "")[:200]},
+            {
+                "generic": Noul(
+                    instructions=(
+                        "A bot will alert a member every time `keyword` appears in a busy "
+                        "friends Discord chat. Is the keyword so common / vague (everyday word, "
+                        "greeting, filler, a very frequent verb) that it would fire constantly "
+                        "and not reflect `intent`?"
+                    ),
+                    criteria={
+                        "true": "Everyday word: would fire constantly",
+                        "false": "Specific enough (game mode, product, name, event…)",
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return False
+        try:
+            return float(result.nouls["generic"].noul) >= 0.75
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return False
+
+    async def pick_main_price(self, candidates: Sequence[str]) -> int | None:
+        """Parmi des extraits « …contexte 54,90 € contexte… », lequel est le prix du produit ?"""
+        items = [c.strip()[:90] for c in candidates if c and c.strip()][:4]
+        if not self.enabled or len(items) < 2:
+            return None
+        from typesafe_sdk import Choice
+
+        criteria = {f"c{i}": f"Snippet {i} is the product's main price" for i in range(len(items))}
+        criteria["none"] = "None of them is the product's own price (shipping, savings, other item)"
+        result = await self.system_one(
+            {f"snippet_{i}": s for i, s in enumerate(items)},
+            {
+                "pick": Choice(
+                    instructions=(
+                        "These are snippets around euro amounts found on a shop page. "
+                        "Which one is the MAIN price of the product being sold "
+                        "(not shipping, not a discount amount, not an accessory)?"
+                    ),
+                    criteria=criteria,
+                ),
+            },
+        )
+        if result is None:
+            return None
+        try:
+            ans = result.choices["pick"]
+            choice = str(ans.choice or "none")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
+        if choice.startswith("c") and choice[1:].isdigit() and conf >= 0.5:
+            idx = int(choice[1:])
+            return idx if idx < len(items) else None
+        return None
+
+    async def infer_task_flags(self, request: str, *, kind: str) -> dict[str, bool] | None:
+        """Lit la demande d'une écoute / veille et en déduit le rythme voulu.
+
+        Le membre ne parle presque jamais de cooldown ou de durée : JEV devine l'urgence,
+        le one-shot, l'horizon. None = JEV absent / erreur (fallback heuristique côté appelant).
+        """
+        text = (request or "").strip()
+        if not self.enabled or not text:
+            return None
+        from typesafe_sdk import Noul
+
+        def _q(instructions: str, yes: str, no: str) -> Any:
+            return Noul(instructions=instructions, criteria={"true": yes, "false": no})
+
+        result = await self.system_one(
+            {"request": text[:400], "kind": kind},
+            {
+                "one_shot": _q(
+                    "The member wants to be alerted ONCE only (then stop).",
+                    "Explicitly one alert / the next time only",
+                    "Ongoing or unspecified",
+                ),
+                "urgent": _q(
+                    "The member wants to be alerted immediately and often as it happens.",
+                    "As soon as / ASAP / urgent / right away",
+                    "No urgency expressed",
+                ),
+                "short_term": _q(
+                    "The need only concerns today / tonight / the next day or two.",
+                    "Tonight, today, tomorrow, this weekend",
+                    "No near-term horizon expressed",
+                ),
+                "long_term": _q(
+                    "The member wants to keep watching for a long time (weeks) "
+                    "e.g. a sale, a restock, a price drop.",
+                    "Long horizon: sales, restock, 'for a while', a month",
+                    "No long horizon expressed",
+                ),
+                "low_noise": _q(
+                    "The member asked not to be spammed / only the important ones.",
+                    "Asks for few or rare alerts",
+                    "Nothing about alert frequency",
+                ),
+            },
+        )
+        if result is None:
+            return None
+        flags: dict[str, bool] = {}
+        for key in ("one_shot", "urgent", "short_term", "long_term", "low_noise"):
+            try:
+                flags[key] = float(result.nouls[key].noul) >= 0.6
+            except (KeyError, AttributeError, TypeError, ValueError):
+                flags[key] = False
+        return flags
 
     async def classify_followup(
         self,
