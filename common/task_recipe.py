@@ -266,16 +266,21 @@ def render_pseudocode(task) -> str:
             lines.append(f'QUAND message contient "{pat}" ({where})')
         else:
             lines.append(f'QUAND on parle de "{topic or "?"}" ({where})')
-        if author == "not_self":
+        author_s = str(author).casefold()
+        if author_s == "self":
+            lines.append("  SI auteur = moi")
+            indent = "    "
+        elif author_s == "not_self":
             lines.append("  SI auteur ≠ moi")
             indent = "    "
         else:
             indent = "  "
         say = (recipe.get("say") or getattr(task, "instruction", "") or "").strip()
-        if recipe.get("ping", True):
+        short = say.replace("\n", " ")[:80] if say else ""
+        # Auto-écoute : juste DIRE, sans se ping soi-même.
+        if author_s != "self" and recipe.get("ping", True):
             lines.append(f"{indent}PING moi")
-        if say:
-            short = say.replace("\n", " ")[:80]
+        if short:
             lines.append(f'{indent}DIRE "{short}"')
     elif kind == KIND_WATCH:
         url = (trigger.get("url") or "")[:60]
@@ -292,16 +297,20 @@ def render_pseudocode(task) -> str:
             lines.append(f"  VERIF toutes les {interval // 60}h")
         else:
             lines.append(f"  VERIF toutes les {interval} min")
-    elif kind == KIND_RECURRING:
-        lines.append(f"QUAND {format_schedule(task)}")
-        instr = (getattr(task, "instruction", "") or "").strip()
-        if instr:
-            lines.append(f'  FAIRE "{instr[:100]}"')
     else:
-        lines.append("QUAND l'heure arrive")
+        # Horloge : once / daily / weekly (kind at|recurring).
+        from common.tasks import SCHEDULE_ONCE
+        sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
+        if sk != SCHEDULE_ONCE or kind == KIND_RECURRING:
+            lines.append(f"QUAND {format_schedule(task)}")
+        else:
+            lines.append("QUAND l'heure arrive")
         instr = (getattr(task, "instruction", "") or "").strip()
         if instr:
             lines.append(f'  FAIRE "{instr[:100]}"')
+        until = getattr(task, "until_at", None)
+        if until is not None:
+            lines.append(f"JUSQUAU <t:{int(until.timestamp())}:d>")
 
     if kind in (KIND_EVENT, KIND_WATCH):
         cd = int(getattr(task, "cooldown_seconds", 0) or EVENT_COOLDOWN_DEFAULT)

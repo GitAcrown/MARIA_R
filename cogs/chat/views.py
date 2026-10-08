@@ -42,12 +42,12 @@ from common.memory.vector import VectorStore
 from common.task_recipe import (
     compact_limits,
     confirm_title,
-    delivery_hint,
     focus_label,
     human_status_line,
     kind_label,
     natural_summary,
     pattern_ok,
+    render_pseudocode,
     scope_label,
 )
 from common.tasks import (
@@ -1082,12 +1082,23 @@ def _task_status_label(t: ScheduledTask) -> str:
     return "active"
 
 
-def _kind_prefix(t: ScheduledTask) -> str:
+def _kind_prefix(t: ScheduledTask, *, plain: bool = False) -> str:
+    """Préfixe type. `plain=True` pour les selects (pas d'emoji custom en texte)."""
     if t.kind in (KIND_EVENT, KIND_WATCH):
         return f"{kind_label(t.kind)} · "
     if t.schedule_kind != SCHEDULE_ONCE:
-        return f"{REPEAT_REMINDER} "
+        return "Rappel · " if plain else f"{REPEAT_REMINDER} "
     return ""
+
+
+def _select_emoji(t: ScheduledTask) -> Optional[discord.PartialEmoji]:
+    """Emoji Discord natif du select (le markdown <:…:> ne marche PAS dans label/desc)."""
+    if t.schedule_kind == SCHEDULE_ONCE or t.kind in (KIND_EVENT, KIND_WATCH):
+        return None
+    m = re.fullmatch(r"<(a?):(\w+):(\d+)>", REPEAT_REMINDER)
+    if not m:
+        return None
+    return discord.PartialEmoji(name=m.group(2), id=int(m.group(3)), animated=bool(m.group(1)))
 
 
 def _task_rank(t: ScheduledTask) -> int:
@@ -1196,11 +1207,11 @@ def _task_instruction_text(t: ScheduledTask) -> str:
 
 
 def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) -> str:
-    """Détail : consigne d'abord, puis déclencheur / horloge, puis limites."""
-    instr = _task_instruction_text(t)
+    """Détail : pseudo-code (clair) + ligne de statut."""
+    code = render_pseudocode(t)
+    parts = [f"```\n{code}\n```"]
     if t.kind in (KIND_EVENT, KIND_WATCH):
         price = None
-        url = ""
         if t.kind == KIND_WATCH and store is not None:
             key = (t.trigger.get("var_key") or "").strip()
             if key:
@@ -1209,40 +1220,18 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
                     price = float(raw) if raw else None
                 except (TypeError, ValueError):
                     price = None
-            url = (t.trigger.get("url") or "").strip()
-        parts: list[str] = []
-        if instr:
-            parts.append(instr)
-        summary = natural_summary(t, price=price)
-        if summary:
-            parts.append(summary)
-        # Consigne déjà affichée → on ne répète pas « Enverra « … » ».
-        hint = delivery_hint(t)
-        if hint.startswith("Ping simple"):
-            parts.append(f"-# {hint}")
         parts.append(f"-# {_task_status_label(t)} · {compact_limits(t, price=price)}")
         if t.kind == KIND_WATCH and t.execute_at and t.status != STATUS_DRAFT:
             parts.append(f"-# Prochain check <t:{int(t.execute_at.timestamp())}:R>")
+        url = (t.trigger.get("url") or "").strip() if t.kind == KIND_WATCH else ""
         if url:
             short = url if len(url) <= 64 else url[:61] + "…"
             parts.append(f"-# {short}")
-        if t.last_error:
-            parts.append(f"-# Dernière erreur : {t.last_error}")
-        return "\n".join(parts) if parts else "-# (vide)"
-    # Rappel horloge / série
-    parts = []
-    if instr:
-        parts.append(instr)
-    ts = int(t.execute_at.timestamp())
-    rec = format_schedule(t)
-    if t.schedule_kind != SCHEDULE_ONCE:
-        rec = f"{REPEAT_REMINDER} {rec}"
-        if t.until_at:
-            rec += f" · jusqu'au <t:{int(t.until_at.timestamp())}:d>"
-    if t.deliver_dm:
-        rec += " · MP"
-    parts.append(f"-# {_task_status_label(t)} · {rec}")
-    parts.append(f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>)")
+    else:
+        ts = int(t.execute_at.timestamp())
+        dest = " · MP" if t.deliver_dm else ""
+        parts.append(f"-# {_task_status_label(t)}{dest}")
+        parts.append(f"-# Prochaine : <t:{ts}:f> (<t:{ts}:R>)")
     if t.last_error:
         parts.append(f"-# Dernière erreur : {t.last_error}")
     return "\n".join(parts)
@@ -1593,9 +1582,10 @@ class _OpenTaskSelect(discord.ui.Select):
     def __init__(self, hub: "TasksView", tasks: list[ScheduledTask]):
         options = [
             discord.SelectOption(
-                label=_clip(f"{_kind_prefix(t)}{_task_label(t)}", 100),
+                label=_clip(f"{_kind_prefix(t, plain=True)}{_task_label(t)}", 100),
                 value=str(t.id),
                 description=_clip(_task_meta_plain(t), 100),
+                emoji=_select_emoji(t),
             )
             for t in tasks
         ]
@@ -1871,13 +1861,10 @@ class ConfirmTaskCreateView(MariaLayout):
             body.append(discord.ui.TextDisplay(self.commentary))
         if self.state in ("pending", "confirmed"):
             body.append(discord.ui.TextDisplay(natural_summary(task, price=self.price)))
-            hint = delivery_hint(task)
-            if hint:
-                body.append(discord.ui.TextDisplay(f"-# {hint}"))
+            body.append(discord.ui.TextDisplay(f"```\n{render_pseudocode(task)}\n```"))
         if self.state == "pending":
             body.append(discord.ui.TextDisplay(
-                f"-# {compact_limits(task, price=self.price)}\n"
-                f"-# {self._quota_line()}\n"
+                f"-# {compact_limits(task, price=self.price)} · {self._quota_line()}\n"
                 "-# Confirme ici, ou réponds « oui » / « non » dans le tchat."
             ))
             self.set_layout(
