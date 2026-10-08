@@ -689,6 +689,47 @@ class MariaTypeSafeClient:
             return choice
         return None
 
+    async def judge_condition(self, condition: str, evidence: str) -> bool | None:
+        """La preuve satisfait-elle la condition ? None = JEV absent.
+
+        L'appelant reste silencieux si None : une suite « seulement si » ne part pas dans le doute.
+        """
+        cond = (condition or "").strip()
+        proof = (evidence or "").strip()
+        if not self.enabled or not cond or not proof:
+            return None
+        result = await self.system_one(
+            {"condition": cond[:240], "evidence": proof[:900]},
+            {
+                "holds": Choice(
+                    instructions=(
+                        "A bot already did its action. `evidence` is the result "
+                        "(page text, search snippets, or the triggering message). "
+                        "`condition` is what must be true before the bot speaks. "
+                        "Answer yes only if the evidence clearly satisfies the condition. "
+                        "If the evidence is missing, off-topic, or not enough, answer no."
+                    ),
+                    criteria={
+                        "yes": "The evidence clearly satisfies the condition",
+                        "no": "The condition is false, unclear, or the evidence is insufficient",
+                    },
+                ),
+            },
+        )
+        if result is None:
+            return None
+        try:
+            ans = result.choices["holds"]
+            choice = str(ans.choice or "")
+            conf = float(getattr(ans, "confidence", 0.0) or 0.0)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
+        if choice == "yes" and conf >= 0.62:
+            return True
+        if choice == "no" and conf >= 0.5:
+            return False
+        return None
+
     async def is_keyword_too_generic(self, keyword: str, intent: str = "") -> bool:
         """Mot-clé si banal qu'il alerterait en permanence ? Fail-open (False)."""
         word = (keyword or "").strip()

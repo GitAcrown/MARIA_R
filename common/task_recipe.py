@@ -7,6 +7,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from common.task_plan import (
+    condition_label,
+    describe_plan,
+    plan_of,
+    pseudo_lines,
+    watch_every_label,
+)
 from common.tasks import (
     EVENT_COOLDOWN_DEFAULT,
     EVENT_MAX_FIRES_DEFAULT,
@@ -277,37 +284,50 @@ def render_pseudocode(task) -> str:
             indent = "    "
         else:
             indent = "  "
-        say = (recipe.get("say") or getattr(task, "instruction", "") or "").strip()
-        short = say.replace("\n", " ")[:80] if say else ""
-        # Auto-écoute : juste DIRE, sans se ping soi-même.
-        if author_s != "self" and recipe.get("ping", True):
-            lines.append(f"{indent}PING moi")
-        if short:
-            lines.append(f'{indent}DIRE "{short}"')
-    elif kind == KIND_WATCH:
-        url = (trigger.get("url") or "")[:60]
-        op = trigger.get("op") or "lt"
-        thr = trigger.get("threshold")
-        op_fr = {"lt": "<", "lte": "≤", "gt": ">", "change": "change"}.get(op, op)
-        lines.append(f"QUAND prix sur {url or 'URL'} {op_fr} {thr}")
-        lines.append("  PING moi")
-        say = (recipe.get("say") or getattr(task, "instruction", "") or "").strip()
-        if say:
-            lines.append(f'  DIRE "{say[:80]}"')
-        interval = int(trigger.get("interval_minutes") or WATCH_INTERVAL_MIN_MINUTES)
-        if interval >= 60 and interval % 60 == 0:
-            lines.append(f"  VERIF toutes les {interval // 60}h")
+        plan = plan_of(
+            kind=kind,
+            instruction=getattr(task, "instruction", "") or "",
+            trigger=trigger,
+            recipe=recipe,
+        )
+        body = pseudo_lines(plan, indent=indent)
+        if body:
+            lines.extend(body)
         else:
-            lines.append(f"  VERIF toutes les {interval} min")
+            say = (recipe.get("say") or getattr(task, "instruction", "") or "").strip()
+            short = say.replace("\n", " ")[:80] if say else ""
+            # Auto-écoute : juste DIRE, sans se ping soi-même.
+            if author_s != "self" and recipe.get("ping", True):
+                lines.append(f"{indent}PING moi")
+            if short:
+                lines.append(f'{indent}DIRE "{short}"')
+    elif kind == KIND_WATCH:
+        lines.append(f"QUAND vérification ({watch_every_label(trigger)})")
+        lines.extend(pseudo_lines(plan_of(
+            kind=kind,
+            instruction=getattr(task, "instruction", "") or "",
+            trigger=trigger,
+            recipe=recipe,
+        )))
     else:
         sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
         if sk != SCHEDULE_ONCE or kind == KIND_RECURRING:
             lines.append(f"QUAND {format_schedule(task)}")
         else:
             lines.append("QUAND l'heure arrive")
-        instr = (getattr(task, "instruction", "") or "").strip()
-        if instr:
-            lines.append(f'  FAIRE "{instr[:100]}"')
+        plan = plan_of(
+            kind=kind,
+            instruction=getattr(task, "instruction", "") or "",
+            trigger=trigger,
+            recipe=recipe,
+        )
+        body = pseudo_lines(plan)
+        if body:
+            lines.extend(body)
+        else:
+            instr = (getattr(task, "instruction", "") or "").strip()
+            if instr:
+                lines.append(f'  FAIRE "{instr[:100]}"')
         until = getattr(task, "until_at", None)
         if until is not None:
             # Texte brut : aucun markdown Discord dans les codeblocks.
@@ -395,11 +415,23 @@ def build_watch_trigger(
     }
 
 
-def build_recipe(*, say: str = "", ping: bool = True, mode: str = "generate") -> dict:
-    """mode : generate (GPT rédige au déclenchement) | verbatim | ping_only (aucun appel GPT)."""
+def build_recipe(
+    *,
+    say: str = "",
+    ping: bool = True,
+    mode: str = "generate",
+    plan: Optional[dict] = None,
+) -> dict:
+    """mode : generate (GPT rédige au déclenchement) | verbatim | ping_only (aucun appel GPT).
+
+    `plan` : action + condition + suite. Absent = le message part à chaque déclenchement.
+    """
     if mode not in ("generate", "verbatim", "ping_only"):
         mode = "generate"
-    return {"say": (say or "").strip(), "ping": bool(ping), "mode": mode}
+    out: dict[str, Any] = {"say": (say or "").strip(), "ping": bool(ping), "mode": mode}
+    if isinstance(plan, dict) and (plan.get("primary") or plan.get("condition") or plan.get("secondary")):
+        out["plan"] = plan
+    return out
 
 
 def _fmt_duration_days(expires_at: Optional[datetime]) -> str:
@@ -471,6 +503,12 @@ def compact_limits(task, *, price: Optional[float] = None) -> str:
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     bits: list[str] = []
+    if kind not in (KIND_EVENT, KIND_WATCH):
+        if price is not None:
+            bits.append(f"actuellement {price:.2f} €")
+        if getattr(task, "deliver_dm", False):
+            bits.append("MP")
+        return " · ".join(bits)
     if kind == KIND_EVENT:
         bits.append(scope_label(task))
         author = str(trigger.get("author") or "not_self").casefold()
@@ -506,6 +544,24 @@ def confirm_title(task, state: str = "pending") -> tuple[str, str]:
     """(titre, sous-titre) pour la carte de confirmation — ex. « Écouter « Singe » ? »."""
     focus = focus_label(task, max_len=40) or "?"
     kind = getattr(task, "kind", None) or KIND_AT
+    plan = plan_of(
+        kind=kind,
+        instruction=getattr(task, "instruction", "") or "",
+        trigger=parse_trigger(getattr(task, "trigger_json", None) or {}),
+        recipe=parse_recipe(getattr(task, "recipe_json", None) or {}),
+    )
+    cond = plan.get("condition") if isinstance(plan, dict) else None
+    if isinstance(cond, dict) and kind not in (KIND_EVENT, KIND_WATCH):
+        sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
+        when = format_schedule(task) if sk != SCHEDULE_ONCE else "à cette heure"
+        label = condition_label(cond) or focus
+        if state == "pending":
+            return f"Vérifier {when} ?", label
+        if state == "confirmed":
+            return f"Je vérifie {when}", label
+        if state == "cancelled":
+            return "Vérification annulée", label
+        return "Vérification expirée", label
     if kind == KIND_EVENT:
         if state == "pending":
             return f"Écouter « {focus} » ?", f"#{getattr(task, 'id', '?')}"
@@ -523,6 +579,15 @@ def confirm_title(task, state: str = "pending") -> tuple[str, str]:
             return "Veille annulée", focus
         return "Veille expirée", focus
     return (kind_label(kind), f"#{getattr(task, 'id', '?')}")
+
+
+def _summary_plan(task, trigger: dict) -> dict:
+    return plan_of(
+        kind=getattr(task, "kind", None) or KIND_AT,
+        instruction=getattr(task, "instruction", "") or "",
+        trigger=trigger,
+        recipe=parse_recipe(getattr(task, "recipe_json", None) or {}),
+    )
 
 
 def natural_summary(task, *, price: Optional[float] = None) -> str:
@@ -547,13 +612,27 @@ def natural_summary(task, *, price: Optional[float] = None) -> str:
             who = "quelqu'un dit"
         else:
             who = "quelqu'un d'autre dit"
+        when = f"Quand {who} {about} {where}"
+        plan = _summary_plan(task, trigger)
+        if not plan.get("legacy"):
+            return describe_plan(plan, when=when, price=price)
         return f"Je réagis quand {who} {about} {where}."
+    plan = _summary_plan(task, trigger)
     if kind == KIND_WATCH:
+        when = watch_every_label(trigger)
+        when = when[:1].upper() + when[1:]
+        if not plan.get("legacy"):
+            return describe_plan(plan, when=when, price=price)
         thr = trigger.get("threshold")
         op = trigger.get("op") or "lt"
         op_fr = {"lt": "passe sous", "lte": "passe à", "gt": "dépasse", "change": "bouge de"}.get(op, "passe sous")
         now_bit = f" (actuellement {price:.2f} €)" if price is not None else ""
         return f"Je te ping si le prix {op_fr} {thr} €{now_bit}."
+    if not plan.get("legacy"):
+        sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
+        when = format_schedule(task) if sk != SCHEDULE_ONCE else "à l'heure dite"
+        when = when[:1].upper() + when[1:]
+        return describe_plan(plan, when=when, price=price)
     return ""
 
 

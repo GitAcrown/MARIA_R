@@ -15,6 +15,7 @@ from common.discord_ui import layout_with_commentary, member_accent_colour, memb
 from common.emojis import SMALL_TASK
 from common.layout_kit import sep_wide
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
+from common.task_plan import compile_plan
 from common.task_recipe import (
     build_event_trigger,
     build_recipe,
@@ -317,7 +318,7 @@ def _task_execute_ts(data: dict) -> Optional[int]:
 
 
 def make_schedule_widget_builder(store: TaskStore):
-    """Widget schedule_task : carte horloge ou ConfirmView event/watch."""
+    """Widget schedule_task : carte horloge ou ConfirmView si la tâche attend une confirmation."""
 
     def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
         if not isinstance(data, dict) or data.get("error") or not data.get("success"):
@@ -344,41 +345,16 @@ def make_schedule_widget_builder(store: TaskStore):
         via = (data.get("via") or "").strip().lower()
         dest = "en MP" if (data.get("deliver_dm") or via in ("mp", "dm", "private")) else "sur ce salon"
         foot = f"-# {SMALL_TASK} <t:{ts}:f> · <t:{ts}:R> · {dest}"
-        accent = data.get("accent_colour")
-        container = discord.ui.Container(
-            discord.ui.TextDisplay(head),
-            discord.ui.TextDisplay(foot),
-            **_accent_kwargs(accent),
+        return layout_with_commentary(
+            discord.ui.Container(
+                discord.ui.TextDisplay(head),
+                discord.ui.TextDisplay(foot),
+                **_accent_kwargs(data.get("accent_colour")),
+            ),
+            commentary,
         )
-        return layout_with_commentary(container, commentary)
 
     return build_scheduled_task_view
-
-
-# Compat import sites that still expect the bare name.
-def build_scheduled_task_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
-    if not isinstance(data, dict) or data.get("error") or not data.get("success"):
-        return None
-    if data.get("needs_confirm"):
-        return None
-    ts = _task_execute_ts(data)
-    if ts is None:
-        return None
-    desc = " ".join((data.get("instruction") or data.get("title") or "").split())
-    if len(desc) > 160:
-        desc = desc[:159] + "…"
-    head = f"**Programmé** · *{desc}*" if desc else "**Programmé**"
-    via = (data.get("via") or "").strip().lower()
-    dest = "en MP" if (data.get("deliver_dm") or via in ("mp", "dm", "private")) else "sur ce salon"
-    foot = f"-# {SMALL_TASK} <t:{ts}:f> · <t:{ts}:R> · {dest}"
-    return layout_with_commentary(
-        discord.ui.Container(
-            discord.ui.TextDisplay(head),
-            discord.ui.TextDisplay(foot),
-            **_accent_kwargs(data.get("accent_colour")),
-        ),
-        commentary,
-    )
 
 
 def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.LayoutView]:
@@ -627,27 +603,153 @@ def _quota_hint(store: TaskStore, user_id: int, kind: str | None = None) -> str:
     )
 
 
-async def _fetch_page_price(
+async def _fetch_page(
     ctx, store: TaskStore, guild_id: int, url: str, typesafe=None,
-) -> tuple[Optional[float], str, str]:
-    """(prix, ancre, erreur FR). Un fetch consomme le budget web du serveur."""
+) -> tuple[str, Optional[float], str, str]:
+    """(texte, prix ou None, ancre, erreur). Un fetch consomme le budget web du serveur."""
     if not await asyncio.to_thread(store.consume_watch_budget, guild_id, n=1):
-        return None, "", "Quota de veille du serveur atteint pour aujourd'hui, réessaie demain."
+        return "", None, "", "Quota de veille du serveur atteint pour aujourd'hui, réessaie demain."
     client = _discord_client(ctx)
     web = client.get_cog("Web") if client is not None else None
     if web is None or not hasattr(web, "_crawl_page"):
-        return None, "", "Lecture de page indisponible pour le moment."
+        return "", None, "", "Lecture de page indisponible pour le moment."
     try:
         text = await asyncio.to_thread(web._crawl_page, url) or ""
     except Exception:
         text = ""
+    if not text.strip():
+        return "", None, "", (
+            "Page illisible (site protégé ou contenu chargé en JS). "
+            "Essaie une autre URL."
+        )
     price, anchor = await pick_price(text[:8000], typesafe)
+    return text, price, anchor, ""
+
+
+async def _fetch_page_price(
+    ctx, store: TaskStore, guild_id: int, url: str, typesafe=None,
+) -> tuple[Optional[float], str, str]:
+    """(prix, ancre, erreur FR). Exige un prix en € lisible."""
+    _text, price, anchor, err = await _fetch_page(ctx, store, guild_id, url, typesafe)
+    if err:
+        return None, "", err
     if price is None:
         return None, "", (
-            "Je ne trouve pas de prix en € sur cette page (site protégé ou prix chargé en JS). "
+            "Je ne trouve pas de prix en € sur cette page. "
             "Essaie une autre URL de la même offre."
         )
     return price, anchor, ""
+
+
+def _optional_threshold(args: dict) -> tuple[Optional[float], str]:
+    if args.get("threshold") is None and args.get("price") is None:
+        return None, ""
+    raw = args.get("threshold") if args.get("threshold") is not None else args.get("price")
+    try:
+        return float(raw), ""
+    except (TypeError, ValueError):
+        return None, "Seuil de prix invalide."
+
+
+async def _compile_task_plan(
+    ctx,
+    store: TaskStore,
+    guild_id: int,
+    author_id: int,
+    args: dict,
+    *,
+    instruction: str,
+    mode: str,
+    typesafe=None,
+    dedup: bool = False,
+    url: str = "",
+    threshold: Optional[float] = None,
+    op: str = "",
+    anchor: str = "",
+    var_key: str = "",
+    price: Optional[float] = None,
+    force: bool = False,
+) -> tuple[Optional[dict], Optional[float], str]:
+    """(plan, prix, erreur). plan None = message à chaque déclenchement, sans pipeline."""
+    if threshold is None:
+        threshold, err = _optional_threshold(args)
+        if err:
+            return None, None, err
+    primary = (args.get("primary") or "").strip().lower()
+    query = (args.get("query") or "").strip()
+    condition = (args.get("condition") or "").strip()
+    condition_when = (args.get("condition_when") or "").strip().lower()
+    primary_prompt = (args.get("primary_prompt") or "").strip()
+    url = (url or args.get("url") or "").strip()
+    if not op:
+        op = (args.get("op") or "").strip().lower()
+    wants = force or bool(
+        primary or query or condition or condition_when or primary_prompt
+        or threshold is not None or (url and primary in ("", "read_url"))
+    )
+    if not wants:
+        return None, price, ""
+
+    need_page = primary == "read_url" or (bool(url) and primary in ("", "read_url")) or (
+        threshold is not None and bool(url)
+    )
+    if need_page:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None, None, (
+                "URL manquante ou invalide. Trouve la page avec search_web puis relance avec url."
+            )
+        if not guild_id:
+            return None, None, "Lire une page se fait sur un serveur."
+        if price is None:
+            _text, price, anchor, fetch_err = await _fetch_page(
+                ctx, store, guild_id, url, typesafe,
+            )
+            if fetch_err:
+                return None, None, fetch_err
+            if threshold is not None and price is None:
+                return None, None, (
+                    "Je ne trouve pas de prix en € sur cette page. Essaie une autre URL."
+                )
+            var_key = _watch_var_key(url)
+            if price is not None:
+                await asyncio.to_thread(
+                    store.set_var, guild_id, author_id, var_key, f"{price:.2f}",
+                )
+    elif primary == "web_search" or (query and primary in ("", "web_search")):
+        if not query:
+            return None, None, "web_search exige query."
+        if not guild_id:
+            return None, None, "Une recherche planifiée se fait sur un serveur."
+        if not await asyncio.to_thread(store.consume_watch_budget, guild_id, n=1):
+            return None, None, "Quota de veille du serveur atteint pour aujourd'hui, réessaie demain."
+        client = _discord_client(ctx)
+        web = client.get_cog("Web") if client is not None else None
+        if web is None or not hasattr(web, "_search"):
+            return None, None, "Recherche web indisponible pour le moment."
+        try:
+            found = await asyncio.to_thread(web._search, query, "fr", 4)
+        except Exception:
+            found = []
+        if not found:
+            return None, None, "Aucun résultat pour cette recherche. Reformule query et relance."
+
+    plan, err = compile_plan(
+        instruction=instruction,
+        mode=mode,
+        primary=primary,
+        primary_prompt=primary_prompt,
+        url=url,
+        query=query,
+        anchor=anchor,
+        var_key=var_key,
+        condition=condition,
+        condition_when=condition_when,
+        op=op,
+        threshold=threshold,
+        dedup=dedup,
+    )
+    return plan, price, err
 
 
 async def _tool_schedule_event_watch(
@@ -860,9 +962,16 @@ async def _tool_schedule_event_watch(
             topic=topic,
             owner_id=author.id,
         )
-        recipe = build_recipe(
-            say=instruction, ping=True, mode=await _delivery_mode(typesafe, instruction),
+        mode = await _delivery_mode(typesafe, instruction)
+        plan, plan_price, plan_err = await _compile_task_plan(
+            ctx, store, guild.id, author.id, args,
+            instruction=instruction, mode=mode, typesafe=typesafe,
         )
+        if plan_err:
+            return ToolResponseRecord(tc.id, {"error": plan_err}, now)
+        if plan_price is not None:
+            current_price = plan_price
+        recipe = build_recipe(say=instruction, ping=True, mode=mode, plan=plan)
         await asyncio.to_thread(store.cancel_drafts, author.id, kind)
         tid = await asyncio.to_thread(
             store.add,
@@ -885,6 +994,16 @@ async def _tool_schedule_event_watch(
             deliver_dm=deliver_dm,
         )
     else:
+        rec = (args.get("recurrence") or "").strip().lower()
+        if (args.get("time") or "").strip() or rec in ("daily", "weekly"):
+            return ToolResponseRecord(tc.id, {
+                "error": (
+                    "Heure fixe : n'utilise pas watch. "
+                    "kind=recurring (ou at), time=HH:MM, url, threshold, op. "
+                    "La suite (le message) ne part que si la condition est vraie. "
+                    "watch = boucle sans heure, au plus toutes les 6 h."
+                ),
+            }, now)
         n_w = await asyncio.to_thread(
             store.count_kind, author.id, KIND_WATCH, exclude_id=old_id,
         )
@@ -945,9 +1064,20 @@ async def _tool_schedule_event_watch(
             var_key=var_key,
             anchor=anchor,
         )
-        recipe = build_recipe(
-            say=instruction, ping=True, mode=await _delivery_mode(typesafe, instruction),
+        mode = await _delivery_mode(typesafe, instruction)
+        plan, plan_price, plan_err = await _compile_task_plan(
+            ctx, store, guild.id, author.id, args,
+            instruction=instruction, mode=mode, typesafe=typesafe,
+            dedup=True, url=url, threshold=threshold, op=op,
+            anchor=anchor, var_key=var_key, price=current_price, force=True,
         )
+        if plan_err or not plan:
+            return ToolResponseRecord(
+                tc.id, {"error": plan_err or "Plan de veille incomplet."}, now,
+            )
+        if plan_price is not None:
+            current_price = plan_price
+        recipe = build_recipe(say=instruction, ping=True, mode=mode, plan=plan)
         await asyncio.to_thread(store.cancel_drafts, author.id, kind)
         tid = await asyncio.to_thread(
             store.add,
@@ -1108,6 +1238,20 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
         title = (args.get("title") or "").strip()
         guild = ctx.trigger_message.guild
         task_kind_store = KIND_RECURRING if kind != SCHEDULE_ONCE else KIND_AT
+        mode = await _delivery_mode(typesafe, instruction)
+        plan, current_price, plan_err = await _compile_task_plan(
+            ctx, store, guild.id if guild else 0, ctx.trigger_message.author.id, args,
+            instruction=instruction, mode=mode, typesafe=typesafe,
+        )
+        if plan_err:
+            return ToolResponseRecord(tc.id, {"error": plan_err}, datetime.now(timezone.utc))
+        if plan and not title:
+            cond = plan.get("condition") or {}
+            title = str(cond.get("text") or "")[:80]
+        recipe = build_recipe(say=instruction, ping=True, mode=mode, plan=plan)
+        status = STATUS_DRAFT if plan else STATUS_PENDING
+        if plan:
+            await asyncio.to_thread(store.cancel_drafts, ctx.trigger_message.author.id, task_kind_store)
         tid = await asyncio.to_thread(
             store.add,
             channel_id=ctx.trigger_message.channel.id,
@@ -1123,11 +1267,13 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
             message_id=ctx.trigger_message.id,
             deliver_dm=deliver_dm,
             kind=task_kind_store,
+            recipe=recipe,
+            status=status,
         )
         created = await asyncio.to_thread(store.get, tid)
         label = format_schedule(created) if created else kind
         dest = "MP" if deliver_dm else "salon"
-        if deliver_dm:
+        if deliver_dm and not plan:
             dm_err = await _send_dm_confirm(
                 ctx.trigger_message.author,
                 label=label,
@@ -1148,31 +1294,43 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
             "schedule_kind": kind,
             "weekdays": days,
             "time_of_day": time_of_day,
-            "status": STATUS_PENDING,
+            "status": status,
             "schedule_label": label,
             "deliver_dm": deliver_dm,
             "kind": task_kind_store,
         }
         accent = member_accent_value(ctx.trigger_message.author)
         quotas = await asyncio.to_thread(store.quota_summary, ctx.trigger_message.author.id)
-        near = quotas["total"] >= TASK_MAX_PENDING - 1
-        quota_note = (
-            f" Quotas : {quotas['total']}/{quotas['max_total']} tâches."
-            if near else ""
-        )
+        summary_txt = natural_summary(created, price=current_price) if created and plan else ""
+        if plan:
+            llm_summary = (
+                f"Brouillon #{tid} en attente de confirmation. {summary_txt} "
+                "Boutons affichés. Une phrase : quand tu vérifies, et que tu te tais si la condition "
+                "est fausse. Oui / ok / vas-y → manage_task confirm."
+            )
+        else:
+            near = quotas["total"] >= TASK_MAX_PENDING - 1
+            quota_note = (
+                f" Quotas : {quotas['total']}/{quotas['max_total']} tâches."
+                if near else ""
+            )
+            llm_summary = (
+                f"Tâche #{tid} programmée ({label}, {dest}) : "
+                f"{_llm_task_line(payload)}.{quota_note}"
+            )
         return ToolResponseRecord(tc.id, {
             "_tool": "schedule_task",
             "success": True,
+            "needs_confirm": bool(plan),
             "task_id": tid,
             "schedule": label,
             "via": dest,
             "quotas": quotas,
+            "current_price": current_price,
+            "natural_summary": summary_txt,
             **payload,
             "accent_colour": accent,
-            "_llm_summary": (
-                f"Tâche #{tid} programmée ({label}, {dest}) : "
-                f"{_llm_task_line(payload)}.{quota_note}"
-            ),
+            "_llm_summary": llm_summary,
         }, datetime.now(timezone.utc))
 
     async def _tool_manage(tc: ToolCallRecord, ctx) -> ToolResponseRecord:
@@ -1507,40 +1665,35 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
         Tool(
             name="schedule_task",
             description=(
-                "Programme une tâche. Kinds : at/recurring (horloge), event (écoute mot-clé), "
-                "watch (veille prix URL). "
+                "Programme une tâche = déclencheur + action optionnelle + condition optionnelle + suite. "
+                "Déclencheur : at/recurring (heure fixe), event (message), watch (boucle ≥ 6 h, SANS heure). "
                 f"Max {TASK_MAX_PENDING} tâches, dont {TASK_MAX_EVENT} écoutes, "
-                f"{TASK_MAX_WATCH} veille, {TASK_MAX_RECURRING} répétitives. "
-                "event/watch → brouillon + Confirm View (le membre clique Confirmer, ou dit oui → "
-                "manage_task confirm). "
-                "TU gères tout : le membre ne précise presque jamais cooldown / max / durée. "
-                "Omets cooldown_hours / max_fires / ttl_days : l'outil les déduit (JEV + contexte) "
-                "— ne les passe que si le membre a été explicite. Ne demande JAMAIS « combien de fois ? ». "
-                "Écoute : si le membre cite un mot (« Singe », « ranked ») → pattern = ce mot "
-                "(obligatoire). topic seulement pour un sujet flou sans mot exact. "
-                "instruction = le message exact à envoyer (« STOPPPPP »), PAS une méta "
-                "« Répondre X quand Y ». author=self si « quand JE dis… », sinon not_self. "
-                "Veille : si pas d'URL, trouve la page produit avec search_web ; si pas de seuil, "
-                "omets threshold (seuil auto -10 %, ou drop_percent). La page est lue à la création. "
-                "Défauts si indécis : cd 3 h, 5 alertes, 7 j (veille : check ≥6 h). "
-                "Horloge : execute_at ISO / delay ; recurrence once|daily|weekly. "
-                f"Min ~{TASK_MIN_MINUTES} min, max {TASK_MAX_DAYS}j. "
-                "via=dm seulement si MP/DM demandé clairement. "
-                "Scope serveur (event) : modos + explicit_guild_scope=true seulement."
+                f"{TASK_MAX_WATCH} boucle, {TASK_MAX_RECURRING} répétitives. "
+                "Heure dite (« tous les jours à 20h ») → recurring/at + time, JAMAIS watch. "
+                "primary : read_url (url), web_search (query), prompt (primary_prompt), post (publier tout de suite). "
+                "Omets primary si c'est évident (url → lire la page, query → chercher). "
+                "condition : phrase jugée sur le résultat (condition_when=after) ou sur le déclencheur (before). "
+                "Prix chiffré : threshold + op + url, comparaison exacte. "
+                "instruction = message posté SEULEMENT si la condition est vraie. Sans condition, il part à chaque fois. "
+                "Une condition ou une lecture/recherche → brouillon à confirmer (oui → manage_task confirm). "
+                "Écoute : mot cité → pattern. « quand JE dis » → author=self. "
+                "Boucle prix sans heure : pas d'URL → search_web puis url ; pas de seuil → omets threshold (−10 %). "
+                "Omets cooldown / max_fires / ttl_days. Ne demande jamais « combien de fois ? ». "
+                f"Horloge : recurrence once|daily|weekly, time=HH:MM. Min ~{TASK_MIN_MINUTES} min, max {TASK_MAX_DAYS}j. "
+                "via=dm seulement si MP demandé. Scope serveur : modos + explicit_guild_scope."
             ),
             properties={
                 "instruction": {
                     "type": "string",
                     "description": (
-                        "Consigne à exécuter / message d'alerte. "
-                        "OK : « Rappelle d'aller à la salle ». "
-                        "Pour event/watch : ce que tu diras en alertant."
+                        "Message posté si la condition est vraie, ou à chaque déclenchement s'il n'y en a pas. "
+                        "Pas une méta « vérifie si… » : ça, c'est primary + condition."
                     ),
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["at", "recurring", "event", "watch"],
-                    "description": "at=unique, recurring=via recurrence, event=écoute, watch=prix URL",
+                    "description": "at/recurring=heure fixe, event=message, watch=boucle sans heure",
                 },
                 "title": {"type": "string", "description": "Libellé court UI (optionnel)"},
                 "execute_at": {"type": "string", "description": "Date/heure ISO 8601 (horloge)"},
@@ -1580,10 +1733,35 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                     "items": {"type": "string"},
                     "description": "1–3 variantes du mot-clé (event), mêmes règles que pattern",
                 },
-                "url": {"type": "string", "description": "URL à surveiller (watch)"},
+                "url": {"type": "string", "description": "Page à lire (primary read_url, ou veille)"},
+                "query": {"type": "string", "description": "Recherche web (primary web_search)"},
+                "primary": {
+                    "type": "string",
+                    "enum": ["read_url", "web_search", "prompt", "post"],
+                    "description": (
+                        "Action avant la condition. read_url, web_search, prompt, "
+                        "ou post (publier tout de suite, sans condition)."
+                    ),
+                },
+                "primary_prompt": {
+                    "type": "string",
+                    "description": "Consigne du prompt primaire (sa réponse sert de preuve, elle n'est pas postée telle quelle).",
+                },
+                "condition": {
+                    "type": "string",
+                    "description": (
+                        "Condition en une phrase. Vide = toujours poursuivre. "
+                        "Prix chiffré : préfère threshold + op."
+                    ),
+                },
+                "condition_when": {
+                    "type": "string",
+                    "enum": ["before", "after"],
+                    "description": "before = filtre le déclencheur, avant l'action. after = juge le résultat, puis la suite.",
+                },
                 "threshold": {
                     "type": "number",
-                    "description": "Seuil prix € (watch). Omettre = -10 % du prix actuel.",
+                    "description": "Seuil prix €. Avec url, comparaison exacte. Omettre sur une veille = −10 %.",
                 },
                 "drop_percent": {
                     "type": "number",
@@ -1641,7 +1819,8 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "title", "execute_at", "delay_minutes", "delay_hours", "recurrence",
                 "weekdays", "time", "until", "via", "kind", "pattern", "keyword",
                 "aliases", "drop_percent", "topic",
-                "url", "threshold", "op", "interval_minutes", "cooldown_hours",
+                "url", "query", "primary", "primary_prompt", "condition", "condition_when",
+                "threshold", "op", "interval_minutes", "cooldown_hours",
                 "max_fires", "ttl_days", "guild_scope", "explicit_guild_scope", "author",
             ],
             function=_tool_schedule,
@@ -1650,7 +1829,7 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
             name="manage_task",
             description=(
                 "Gère tes tâches : list, edit, confirm, pause, resume, skip, cancel, cancel_all. "
-                "confirm = active le brouillon écoute/veille quand le membre dit oui/ok/vas-y "
+                "confirm = active le brouillon (écoute, veille, ou horaire conditionnelle) "
                 "(sans task_id : le dernier brouillon). cancel sur un brouillon = il refuse. "
                 "Edit event/watch (même brouillon) : pattern, cooldown_hours, max_fires, "
                 "ttl_days, threshold. Si le membre dit « plutôt moins/plus… », édite toi-même. "

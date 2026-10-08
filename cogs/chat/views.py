@@ -1203,6 +1203,9 @@ def _task_catalog_text(t: ScheduledTask) -> discord.ui.TextDisplay:
             lines.append(_clip(instr, 160))
         elif instr and len(instr) > len(label) + 8:
             lines.append(_clip(instr, 160))
+    plan = t.recipe.get("plan") if isinstance(t.recipe, dict) else None
+    if isinstance(plan, dict) and plan.get("condition") and t.kind != KIND_WATCH:
+        lines.append("Silence si la condition est fausse")
     lines.append(f"-# {_task_meta(t)}")
     if t.last_error:
         lines.append(f"-# {_clip(t.last_error, 80)}")
@@ -1251,11 +1254,23 @@ def _format_task_body(t: ScheduledTask, *, store: Optional[TaskStore] = None) ->
         limits = compact_limits(t, price=price)
         if limits:
             foot.append(limits)
-        url = (t.trigger.get("url") or "").strip() if t.kind == KIND_WATCH else ""
+        url = ""
+        if t.kind == KIND_WATCH:
+            url = (t.trigger.get("url") or "").strip()
+        else:
+            primary = ((t.recipe or {}).get("plan") or {}).get("primary") or {}
+            if isinstance(primary, dict):
+                url = (primary.get("url") or "").strip()
         if url:
             foot.append(url if len(url) <= 64 else url[:61] + "…")
-    elif t.status == STATUS_DRAFT:
-        foot.append("brouillon")
+    else:
+        primary = ((t.recipe or {}).get("plan") or {}).get("primary") or {}
+        if isinstance(primary, dict):
+            url = (primary.get("url") or "").strip()
+            if url:
+                foot.append(url if len(url) <= 64 else url[:61] + "…")
+        if t.status == STATUS_DRAFT:
+            foot.append("brouillon")
     parts.append(" · ".join(foot))
     if t.last_error:
         parts.append(f"-# Dernière erreur : {t.last_error}")
@@ -1897,7 +1912,9 @@ class ConfirmTaskCreateView(MariaLayout):
         if self.state == "pending" and self.commentary:
             body.append(discord.ui.TextDisplay(self.commentary))
         if self.state in ("pending", "confirmed"):
-            body.append(discord.ui.TextDisplay(natural_summary(task, price=self.price)))
+            summary = natural_summary(task, price=self.price)
+            if summary:
+                body.append(discord.ui.TextDisplay(summary))
             body.append(discord.ui.TextDisplay(f"```\n{render_pseudocode(task)}\n```"))
         if self.state == "pending":
             body.append(discord.ui.TextDisplay(
