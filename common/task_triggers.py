@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
+from typesafe_sdk import Noul
+
 from common.task_recipe import (
     looks_like_noise,
     match_message_pattern,
@@ -121,7 +123,6 @@ async def jev_should_fire(
     """
     if typesafe is None or not getattr(typesafe, "enabled", False):
         return True
-    from typesafe_sdk import Noul
 
     result = await typesafe.system_one(
         {

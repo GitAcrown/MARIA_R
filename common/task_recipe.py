@@ -14,9 +14,11 @@ from common.tasks import (
     KIND_EVENT,
     KIND_RECURRING,
     KIND_WATCH,
+    SCHEDULE_ONCE,
     WATCH_INTERVAL_MIN_MINUTES,
     format_schedule,
 )
+from common.timezones import PARIS_TZ
 
 _GENERIC_PATTERNS = frozenset({
     "ok", "oui", "non", "lol", "mdr", "ptdr", "ouais", "ouai", "yes", "no",
@@ -298,8 +300,6 @@ def render_pseudocode(task) -> str:
         else:
             lines.append(f"  VERIF toutes les {interval} min")
     else:
-        # Horloge : once / daily / weekly (kind at|recurring).
-        from common.tasks import SCHEDULE_ONCE
         sk = getattr(task, "schedule_kind", SCHEDULE_ONCE) or SCHEDULE_ONCE
         if sk != SCHEDULE_ONCE or kind == KIND_RECURRING:
             lines.append(f"QUAND {format_schedule(task)}")
@@ -310,7 +310,9 @@ def render_pseudocode(task) -> str:
             lines.append(f'  FAIRE "{instr[:100]}"')
         until = getattr(task, "until_at", None)
         if until is not None:
-            lines.append(f"JUSQUAU <t:{int(until.timestamp())}:d>")
+            # Texte brut : aucun markdown Discord dans les codeblocks.
+            local = until.astimezone(PARIS_TZ) if until.tzinfo else until.replace(tzinfo=timezone.utc).astimezone(PARIS_TZ)
+            lines.append(f"JUSQUAU {local.strftime('%d/%m/%Y')}")
 
     if kind in (KIND_EVENT, KIND_WATCH):
         cd = int(getattr(task, "cooldown_seconds", 0) or EVENT_COOLDOWN_DEFAULT)
@@ -318,7 +320,7 @@ def render_pseudocode(task) -> str:
         exp = getattr(task, "expires_at", None)
         lines.append(f"COOLDOWN {_fmt_cooldown(cd)}")
         lines.append(f"MAX {mx} fois")
-        lines.append(f"EXPIRE {_fmt_expire(exp)}")
+        lines.append(f"EXPIRE {_fmt_expire(exp)}")  # « dans 3j », pas <t:…>
     return "\n".join(lines)
 
 
@@ -569,7 +571,6 @@ def human_status_line(task) -> str:
         fires = int(getattr(task, "fires_count", 0) or 0)
         mx = int(getattr(task, "max_fires", 0) or EVENT_MAX_FIRES_DEFAULT)
         return f"≤ {thr:g} € · {fires}/{mx}"
-    from common.tasks import SCHEDULE_ONCE
     if getattr(task, "schedule_kind", SCHEDULE_ONCE) != SCHEDULE_ONCE:
         return format_schedule(task)
     ts = int(task.execute_at.timestamp())

@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul, Score
+
 from common.ttl_cache import TTLCache
 
 logger = logging.getLogger("llm.typesafe")
@@ -30,8 +32,6 @@ REACT_VERDICT_CONFIDENCE = 0.62
 
 def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
     """Repli lexical (demain, jour de la semaine…) si JEV est off ou KO."""
-    import re
-
     msg = (message or "").casefold()
     if not msg or len(labels) < 2:
         return None
@@ -109,8 +109,6 @@ class MariaTypeSafeClient:
         if not self.enabled:
             return None
         if self._client is None:
-            from typesafe_sdk import AsyncTypeSafeClient
-
             self._client = AsyncTypeSafeClient(api_key=self._api_key, model=self._model)
         return self._client
 
@@ -142,10 +140,6 @@ class MariaTypeSafeClient:
         """Petit appel JEV pour vérifier la clé. (ok, détail)."""
         if not self.enabled:
             return False, "clé absente"
-        try:
-            from typesafe_sdk import Noul
-        except ImportError as e:
-            return False, f"SDK manquant ({e})"
         result = await self.system_one(
             {"ping": "ok"},
             {
@@ -188,8 +182,6 @@ class MariaTypeSafeClient:
         """
         if not self.enabled:
             return "respond"
-        from typesafe_sdk import Choice
-
         name = (bot_name or "Maria").strip() or "Maria"
         snippet = (message or "").strip()
         # Déjà fenêtré côté chat ; garde-fou si appelé ailleurs avec un pavé.
@@ -209,25 +201,25 @@ class MariaTypeSafeClient:
                 snippet = snippet[:500]
         if bias_respond:
             instructions = (
-                "The bot `bot_name` was named in `message` (greedy mode: she should "
-                "usually JOIN the chat with words). Prefer `respond` whenever she is "
-                "part of the bit — question, tease, opinion, joke about her, "
-                "« elle », « ta pote », comparing her, asking what she thinks, "
-                "or any clear hook. Use `ignore` ONLY for pure roll-call / name lists "
-                "with zero engagement expected. `react` is rare."
+                "The bot `bot_name` was named in `message` (greedy mode). "
+                "Prefer `respond` when she is clearly ADDRESSED (tu/toi, a question "
+                "or request TO her, greeting, « Maria ? », ask what she thinks). "
+                "`ignore` when people only talk ABOUT her in the 3rd person to each "
+                "other (« Maria devrait… », « faut que Maria… », « avec Maria… ») "
+                "— she must NOT jump into every gossip. `react` is rare."
             )
             criteria = {
                 "respond": (
-                    "She is involved: asked something, teased, joked about, "
-                    "opinion expected, talked to indirectly, or the bit lands better "
-                    "if she answers in words — default when unsure"
+                    "Directly addressed: question/request/greeting to her, "
+                    "tu/toi/te, or clear expectation that SHE answers in words"
                 ),
                 "react": (
                     "Tiny nod only; words would be overkill (very rare)"
                 ),
                 "ignore": (
-                    "Pure passive list/roll-call/invite tags — naming her among "
-                    "others with no joke, no ask, no reason to jump in"
+                    "Talking ABOUT her in 3rd person, roll-call, name list, "
+                    "suggestion for her without asking her (« devrait », « pourrait », "
+                    "« faut que… »), or no reason for her to jump in"
                 ),
             }
         else:
@@ -235,23 +227,23 @@ class MariaTypeSafeClient:
                 "The bot `bot_name` was named or mentioned in `message` "
                 "(may be a long preamble with her name mid/end — the `…` ellipsis "
                 "means truncated context). "
-                "How should she handle it in a casual Discord group chat?"
+                "How should she handle it in a casual Discord group chat? "
+                "Talking ABOUT her (3rd person) ≠ addressing her."
             )
             criteria = {
                 "respond": (
                     "Direct address: question, request, greeting to her, "
-                    "opinion asked of her, or clear expectation of a written reply "
-                    "— even if her name comes after a long setup"
+                    "opinion asked of her (tu/toi), or clear expectation of a "
+                    "written reply — even if her name comes after a long setup"
                 ),
                 "react": (
                     "Worth a light emoji ack without words: joke she is in, "
-                    "talking about her with room for a vibe reaction, "
                     "group banter she can nod to — NOT asking her to answer"
                 ),
                 "ignore": (
-                    "Passive name-drop only: listed among other members, "
-                    "roll call, invite list, tags list, or talking about her "
-                    "to someone else with no reason to acknowledge"
+                    "Passive: listed among others, roll call, OR 3rd-person talk "
+                    "about her to someone else (« Maria devrait… », « faut que Maria… ») "
+                    "with no ask directed at her"
                 ),
             }
         result = await self.system_one(
@@ -275,11 +267,12 @@ class MariaTypeSafeClient:
             return "respond"
 
         if bias_respond:
-            # Greedy : ignore seulement si JEV est vraiment sûr ; sinon répondre.
-            ignore_floor = CATEGORY_CONFIDENCE + 0.18  # ~0.68
-            if choice == "ignore" and conf >= ignore_floor:
-                return "ignore"
-            # react / respond / ignore douteux → vraie réponse.
+            # Greedy : on écoute JEV (y compris « parle d'elle » → ignore).
+            # Avant : ignore faute de conf → respond → elle répondait à chaque name-drop.
+            if choice == "ignore":
+                return "ignore" if conf >= 0.4 else "respond"
+            if choice == "react":
+                return "react" if conf >= REACT_VERDICT_CONFIDENCE else "ignore"
             return "respond"
 
         if choice == "react" and conf < REACT_VERDICT_CONFIDENCE:
@@ -324,8 +317,6 @@ class MariaTypeSafeClient:
         return result
 
     async def _resolve_intent_uncached(self, blob: str) -> IntentDecision | None:
-        from typesafe_sdk import Choice
-
         result = await self.system_one(
             {"message": blob},
             {
@@ -402,8 +393,6 @@ class MariaTypeSafeClient:
         """Score chaque candidat. None = ranking legacy."""
         if not self.enabled or not contents:
             return None
-        from typesafe_sdk import Score
-
         q = (query or "").strip()
         if not q:
             return None
@@ -450,8 +439,6 @@ class MariaTypeSafeClient:
         """True si le fait est durable. Sans JEV / erreur → True."""
         if not self.enabled:
             return True
-        from typesafe_sdk import Noul
-
         content = (action_content or "").strip()
         if not content:
             return False
@@ -501,8 +488,6 @@ class MariaTypeSafeClient:
         excerpt = (batch_excerpt or "").strip()
         if not excerpt:
             return False
-        from typesafe_sdk import Noul
-
         result = await self.system_one(
             {
                 "batch_excerpt": excerpt[:1200],
@@ -543,8 +528,6 @@ class MariaTypeSafeClient:
         """Filtre les actions d'extraction. Sans JEV → liste inchangée."""
         if not self.enabled or not actions:
             return list(actions)
-
-        from typesafe_sdk import Noul
 
         questions: dict = {}
         state: dict[str, Any] = {"batch_excerpt": (batch_excerpt or "")[:800]}
@@ -598,8 +581,6 @@ class MariaTypeSafeClient:
         text = (message or "").strip()
         if not self.enabled or not text or not topics:
             return set()
-        from typesafe_sdk import Noul
-
         questions = {
             f"t{tid}": Noul(
                 instructions=(
@@ -636,8 +617,6 @@ class MariaTypeSafeClient:
         body = (text or "").strip()
         if not self.enabled or not body:
             return "other"
-        from typesafe_sdk import Choice
-
         result = await self.system_one(
             {"reply": body[:160], "proposal": (summary or "")[:300]},
             {
@@ -679,8 +658,6 @@ class MariaTypeSafeClient:
         text = (instruction or "").strip()
         if not self.enabled or not text:
             return None
-        from typesafe_sdk import Choice
-
         result = await self.system_one(
             {"instruction": text[:300]},
             {
@@ -717,8 +694,6 @@ class MariaTypeSafeClient:
         word = (keyword or "").strip()
         if not self.enabled or not word:
             return False
-        from typesafe_sdk import Noul
-
         result = await self.system_one(
             {"keyword": word[:40], "intent": (intent or "")[:200]},
             {
@@ -748,8 +723,6 @@ class MariaTypeSafeClient:
         items = [c.strip()[:90] for c in candidates if c and c.strip()][:4]
         if not self.enabled or len(items) < 2:
             return None
-        from typesafe_sdk import Choice
-
         criteria = {f"c{i}": f"Snippet {i} is the product's main price" for i in range(len(items))}
         criteria["none"] = "None of them is the product's own price (shipping, savings, other item)"
         result = await self.system_one(
@@ -787,8 +760,6 @@ class MariaTypeSafeClient:
         text = (request or "").strip()
         if not self.enabled or not text:
             return None
-        from typesafe_sdk import Noul
-
         def _q(instructions: str, yes: str, no: str) -> Any:
             return Noul(instructions=instructions, criteria={"true": yes, "false": no})
 
@@ -854,8 +825,6 @@ class MariaTypeSafeClient:
         text = (message or "").strip()
         if not self.enabled or not text:
             return "ignore"
-        from typesafe_sdk import Choice
-
         # Paresse haute : follow-up rare — surtout ignore / react, respond seulement si clair.
         lazy = min(
             1.0,
@@ -939,8 +908,6 @@ class MariaTypeSafeClient:
             return None
         if not self.enabled:
             return _heuristic_tab(message, clean)
-        from typesafe_sdk import Choice
-
         criteria: dict[str, str] = {
             "none": "The message is not asking to show one of these tabs",
         }
@@ -993,8 +960,6 @@ class MariaTypeSafeClient:
             return None
         if not self.enabled:
             return None
-        from typesafe_sdk import Choice
-
         # Clés stables e0..eN (noms Discord peuvent coller / se répéter).
         criteria: dict[str, str] = {
             "none": "No reaction fits; stay silent",
@@ -1071,8 +1036,6 @@ class MariaTypeSafeClient:
         text = (message or "").strip()
         if not self.enabled or not text:
             return False
-        from typesafe_sdk import Noul
-
         result = await self.system_one(
             {"message": text[:500]},
             {
@@ -1110,8 +1073,6 @@ class MariaTypeSafeClient:
         """Pile-on : d'autres membres ont déjà mis cet emoji. True = MARIA le remet aussi."""
         if not self.enabled or human_count < 1:
             return False
-        from typesafe_sdk import Noul
-
         cut = BANDWAGON_CONFIDENCE if threshold is None else float(threshold)
         result = await self.system_one(
             {

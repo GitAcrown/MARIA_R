@@ -13,6 +13,7 @@ import discord
 
 from common.discord_ui import layout_with_commentary, member_accent_colour, member_accent_value
 from common.emojis import SMALL_TASK
+from common.layout_kit import sep_wide
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.task_recipe import (
     build_event_trigger,
@@ -25,6 +26,7 @@ from common.task_recipe import (
     pattern_ok,
     quick_delivery_mode,
 )
+from common.task_watch import pick_price
 from common.tasks import (
     EVENT_COOLDOWN_DEFAULT,
     EVENT_COOLDOWN_MIN,
@@ -64,7 +66,8 @@ from common.tasks import (
     snap_execute_at,
 )
 from common.timezones import PARIS_TZ
-from common.layout_kit import sep_wide
+
+from cogs.chat.views import ConfirmTaskCreateView, TasksManageButton
 
 TASK_MAX_MINUTES = TASK_MAX_DAYS * 24 * 60
 
@@ -320,7 +323,6 @@ def make_schedule_widget_builder(store: TaskStore):
         if not isinstance(data, dict) or data.get("error") or not data.get("success"):
             return None
         if data.get("needs_confirm") and data.get("task_id"):
-            from cogs.chat.views import ConfirmTaskCreateView
             task = store.get(int(data["task_id"]))
             if task is None:
                 return None
@@ -410,7 +412,6 @@ def build_tasks_view(data: dict, commentary: str = "") -> Optional[discord.ui.La
     )
     uid = data.get("user_id")
     if uid:
-        from cogs.chat.views import TasksManageButton
         view.add_item(discord.ui.ActionRow(TasksManageButton(int(uid))))
     return view
 
@@ -630,8 +631,6 @@ async def _fetch_page_price(
     ctx, store: TaskStore, guild_id: int, url: str, typesafe=None,
 ) -> tuple[Optional[float], str, str]:
     """(prix, ancre, erreur FR). Un fetch consomme le budget web du serveur."""
-    from common.task_watch import pick_price
-
     if not await asyncio.to_thread(store.consume_watch_budget, guild_id, n=1):
         return None, "", "Quota de veille du serveur atteint pour aujourd'hui, réessaie demain."
     client = _discord_client(ctx)

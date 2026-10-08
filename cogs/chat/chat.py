@@ -137,9 +137,10 @@ _SUMMON_NOT_FOLLOWED = r"(?!\s+(?:et|ou|&|\+|avec)\b)"
 
 
 def _name_is_direct_summon(content: str, bot_name: str) -> bool:
-    """Nom en tête de message (ou seul) : on s'adresse à elle, sans arbitrage JEV.
+    """Adresse structurellement évidente → réponse sans JEV.
 
-    Exclut les listes (« Maria et Paul… », « Maria, Paul, Jean… »).
+    Seulement : nom seul, ou nom (+ salut) suivi de tu/toi/te/?/!.
+    Le reste (« Maria devrait… », blagues, etc.) → JEV, pas de liste de phrases.
     """
     name = (bot_name or "").strip().lower()
     if not name:
@@ -159,7 +160,11 @@ def _name_is_direct_summon(content: str, bot_name: str) -> bool:
         return False
     if re.match(r"\s*,\s*[^,\n]{1,25},", rest):
         return False
-    return True
+    # Preuve positive d'adresse — pas une liste de verbes à exclure.
+    return bool(re.match(
+        r"\s*[,:]?\s*(?:tu\b|toi\b|te\b|t'|vous\b|[?!])",
+        rest,
+    ))
 
 
 def _greedy_name_addresses_bot(content: str, bot_name: str) -> bool:
@@ -1455,12 +1460,13 @@ class Chat(commands.Cog):
                     bias_respond=True,
                 )
                 verdict = decision
-                # Soften n'upgradera un ignore que si conf déjà haute (jamais un ignore « inventé »).
-                conf = 1.0 if decision in ("respond", "react") else 0.0
-                decision = self.focus.soften_mention(
-                    decision, attention=att, fatigue=fat,
-                    confidence=conf, react_min_conf=REACT_VERDICT_CONFIDENCE,
-                )
+                # Un ignore JEV reste un ignore (pas d'upgrade « attention hot » → respond,
+                # sinon elle répond à chaque « Maria devrait… » dès qu'on lui a parlé).
+                if decision != "ignore":
+                    decision = self.focus.soften_mention(
+                        decision, attention=att, fatigue=fat,
+                        confidence=1.0, react_min_conf=REACT_VERDICT_CONFIDENCE,
+                    )
                 logger.info(
                     "Nom cité dans #%s → JEV : %s%s (att %.1f, fat %.1f)",
                     message.channel.id, verdict,
