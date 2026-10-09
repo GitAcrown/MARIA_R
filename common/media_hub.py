@@ -206,6 +206,7 @@ def register_media_tabs() -> None:
     register_tabs(
         _KIND, media_tab_labels, media_tab_body,
         force_select=True, placeholder="Choisir un résultat",
+        select_as_title=True,
     )
     register_tabs(_GROUP_KIND, group_tab_labels, media_tab_body, buttons=True)
 

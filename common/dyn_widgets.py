@@ -42,6 +42,7 @@ BodyFn = Callable[[dict, int], discord.ui.Item]
 _RENDERERS: dict[str, tuple[LabelsFn, BodyFn]] = {}
 _FORCE_SELECT: set[str] = set()
 _BUTTON_KINDS: set[str] = set()
+_SELECT_AS_TITLE: set[str] = set()
 _PLACEHOLDERS: dict[str, str] = {}
 
 
@@ -66,8 +67,13 @@ def register_tabs(
     force_select: bool = False,
     buttons: bool = False,
     placeholder: str = "",
+    select_as_title: bool = False,
 ) -> None:
-    """`buttons` : onglets en boutons au-dessus de la carte (libellés tronqués)."""
+    """`buttons` : onglets en boutons au-dessus de la carte (libellés tronqués).
+
+    `select_as_title` : le select des résultats prend la place du titre `##`
+    dans la carte. Sans select (échéance, un seul résultat), le titre reste.
+    """
     _RENDERERS[kind] = (labels, body)
     if force_select:
         _FORCE_SELECT.add(kind)
@@ -77,6 +83,10 @@ def register_tabs(
         _BUTTON_KINDS.add(kind)
     else:
         _BUTTON_KINDS.discard(kind)
+    if select_as_title:
+        _SELECT_AS_TITLE.add(kind)
+    else:
+        _SELECT_AS_TITLE.discard(kind)
     if placeholder:
         _PLACEHOLDERS[kind] = placeholder
     else:
@@ -87,6 +97,7 @@ def unregister_tabs(kind: str) -> None:
     _RENDERERS.pop(kind, None)
     _FORCE_SELECT.discard(kind)
     _BUTTON_KINDS.discard(kind)
+    _SELECT_AS_TITLE.discard(kind)
     _PLACEHOLDERS.pop(kind, None)
 
 
@@ -294,6 +305,53 @@ def _tab_controls(
     return _tab_rows(wid, labels, selected)
 
 
+def _is_select_row(row: discord.ui.Item) -> bool:
+    if not isinstance(row, discord.ui.ActionRow):
+        return False
+    for child in row.children:
+        if isinstance(child, discord.ui.Select):
+            return True
+        if isinstance(getattr(child, "item", None), discord.ui.Select):
+            return True
+    return False
+
+
+def _strip_first_heading(item: discord.ui.Item) -> bool:
+    """Retire la première ligne `##` (le titre que le select reprend)."""
+    if isinstance(item, discord.ui.TextDisplay):
+        lines = item.content.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("##"):
+                del lines[i]
+                item.content = "\n".join(lines).strip()
+                return True
+        return False
+    children = getattr(item, "_children", None)
+    if not isinstance(children, list):
+        return False
+    for child in list(children):
+        if not _strip_first_heading(child):
+            continue
+        if isinstance(child, discord.ui.TextDisplay) and not child.content.strip():
+            section = getattr(type(item), "__discord_ui_section__", False)
+            if section and len(children) <= 1:
+                child.content = "-#"
+            elif hasattr(item, "remove_item"):
+                item.remove_item(child)
+            else:
+                children.remove(child)
+        return True
+    return False
+
+
+def _mount_select_as_title(
+    body: discord.ui.Container, row: discord.ui.ActionRow,
+) -> None:
+    _strip_first_heading(body)
+    row._parent = body
+    body._children.insert(0, row)
+
+
 def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView]:
     labels = _labels(rec.kind, rec.payload)
     if not labels:
@@ -314,8 +372,21 @@ def render_record(rec: _Record, *, live: bool) -> Optional[discord.ui.LayoutView
     if rec.commentary:
         view.add_item(discord.ui.TextDisplay(suppress_link_embeds(rec.commentary)))
         view.add_item(sep_tight())
+    rows: list[discord.ui.ActionRow] = []
     if live and len(labels) >= 2:
-        for row in _tab_controls(rec.id, labels, index, kind=rec.kind):
+        rows = _tab_controls(rec.id, labels, index, kind=rec.kind)
+    mounted = False
+    if (
+        rows
+        and rec.kind in _SELECT_AS_TITLE
+        and isinstance(body, discord.ui.Container)
+        and len(rows) == 1
+        and _is_select_row(rows[0])
+    ):
+        _mount_select_as_title(body, rows[0])
+        mounted = True
+    if not mounted:
+        for row in rows:
             view.add_item(row)
     view.add_item(body)
     if live:
