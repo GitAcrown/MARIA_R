@@ -1,7 +1,7 @@
-"""Attention par membre + fatigue salon.
+"""Attention par membre + fatigue par personne dans le salon.
 
-Remplace l'ancienne « température » de salon : le bot se tourne vers qui lui parle
-(attention), et devient fainéante si on la sollicite trop (fatigue).
+Le bot se tourne vers qui lui parle (attention). La fatigue ne s'additionne pas
+entre membres : un pic de demandes ne la coupe pas pour tout le monde.
 """
 
 from __future__ import annotations
@@ -17,12 +17,14 @@ ATTENTION_HOT = 1.8
 COMPETITIVE_DECAY = 0.85
 _MAX_MEMBERS = 2000
 
-# --- Fatigue salon -----------------------------------------------------------
-FATIGUE_HALF_LIFE = 150.0
-MAX_FATIGUE = 6.0
-FATIGUE_TIRED = 1.6
-FATIGUE_EXHAUSTED = 3.0
-_MAX_CHANNELS = 500
+# --- Fatigue (salon, membre) -------------------------------------------------
+# +0.4 par réponse, demi-vie 8 min. Une conversation normale reste sous « fatiguée ».
+FATIGUE_HALF_LIFE = 8 * 60.0
+FATIGUE_BUMP = 0.4
+MAX_FATIGUE = 10.0
+FATIGUE_TIRED = 5.0
+FATIGUE_EXHAUSTED = 8.0
+_MAX_FATIGUE_KEYS = 2000
 
 
 class MemberAttention:
@@ -71,37 +73,56 @@ class MemberAttention:
         return min(1.0, self.value(guild_id, user_id) / ATTENTION_HOT)
 
 
-class ChannelFatigue:
-    """Charge du bot sur un salon (bumpée à chaque vraie réponse texte)."""
+class MemberFatigue:
+    """Charge du bot envers une personne dans un salon.
+
+    Les autres membres du même salon ne font pas monter ce score.
+    """
 
     def __init__(self, half_life: float = FATIGUE_HALF_LIFE) -> None:
         self._half_life = max(1.0, half_life)
-        self._scores: OrderedDict[int, tuple[float, float]] = OrderedDict()
+        self._clock = time.monotonic
+        self._scores: OrderedDict[tuple[int, int], tuple[float, float]] = OrderedDict()
 
-    def value(self, channel_id: int) -> float:
-        entry = self._scores.get(channel_id)
+    def _now(self) -> float:
+        return self._clock()
+
+    def value(self, channel_id: int, user_id: int) -> float:
+        entry = self._scores.get((channel_id, user_id))
         if entry is None:
             return 0.0
         heat, at = entry
-        elapsed = max(0.0, time.monotonic() - at)
+        elapsed = max(0.0, self._now() - at)
         return heat * 0.5 ** (elapsed / self._half_life)
 
-    def bump(self, channel_id: int, amount: float = 1.0) -> float:
-        heat = min(MAX_FATIGUE, self.value(channel_id) + amount)
-        self._scores[channel_id] = (heat, time.monotonic())
-        self._scores.move_to_end(channel_id)
-        while len(self._scores) > _MAX_CHANNELS:
+    def bump(self, channel_id: int, user_id: int, amount: float = FATIGUE_BUMP) -> float:
+        heat = min(MAX_FATIGUE, self.value(channel_id, user_id) + amount)
+        key = (channel_id, user_id)
+        self._scores[key] = (heat, self._now())
+        self._scores.move_to_end(key)
+        while len(self._scores) > _MAX_FATIGUE_KEYS:
             self._scores.popitem(last=False)
         return heat
 
-    def is_tired(self, channel_id: int) -> bool:
-        return self.value(channel_id) >= FATIGUE_TIRED
+    def is_tired(self, channel_id: int, user_id: int) -> bool:
+        return self.value(channel_id, user_id) >= FATIGUE_TIRED
 
-    def is_exhausted(self, channel_id: int) -> bool:
-        return self.value(channel_id) >= FATIGUE_EXHAUSTED
+    def is_exhausted(self, channel_id: int, user_id: int) -> bool:
+        return self.value(channel_id, user_id) >= FATIGUE_EXHAUSTED
 
-    def normalized(self, channel_id: int) -> float:
-        return min(1.0, self.value(channel_id) / FATIGUE_EXHAUSTED)
+    def normalized(self, channel_id: int, user_id: int) -> float:
+        return min(1.0, self.value(channel_id, user_id) / FATIGUE_EXHAUSTED)
+
+
+def mention_becomes_emoji(fatigue: float, *, hot: bool, question: bool) -> bool:
+    """Épuisée et pas hot : un pseudo cité peut finir en emoji.
+
+    Une question reste en texte. Les autres membres ne sont pas concernés :
+    `fatigue` est déjà le score de cette personne.
+    """
+    if question or hot:
+        return False
+    return fatigue >= FATIGUE_EXHAUSTED
 
 
 class SocialFocus:
@@ -109,7 +130,7 @@ class SocialFocus:
 
     def __init__(self) -> None:
         self.attention = MemberAttention()
-        self.fatigue = ChannelFatigue()
+        self.fatigue = MemberFatigue()
 
     def soften_mention(
         self,
@@ -162,7 +183,9 @@ class SocialFocus:
                 ) else "ignore"
             return "ignore"
         if verdict == "respond":
-            # Fatigue ou chaîne → downgrade ; 1er tour garde respond seulement si pas fatiguée.
+            # Une question du destinataire ne descend que s'il est épuisé.
+            if is_question and fatigue < FATIGUE_EXHAUSTED:
+                return "respond"
             if fatigue >= FATIGUE_TIRED or chain_depth >= 1:
                 if confidence >= react_min_conf + 0.08:
                     return "react"
@@ -182,14 +205,14 @@ class SocialFocus:
             return "react"
         return "ignore"
 
-    def followup_deadline_factor(self, channel_id: int) -> float:
-        return 0.6 if self.fatigue.is_tired(channel_id) else 1.0
+    def followup_deadline_factor(self, channel_id: int, user_id: int) -> float:
+        return 0.6 if self.fatigue.is_tired(channel_id, user_id) else 1.0
 
-    def followup_max_checks(self, channel_id: int, default: int = 2) -> int:
-        return 1 if self.fatigue.is_tired(channel_id) else default
+    def followup_max_checks(self, channel_id: int, user_id: int, default: int = 2) -> int:
+        return 1 if self.fatigue.is_tired(channel_id, user_id) else default
 
-    def allow_typing_extend(self, channel_id: int) -> bool:
-        return not self.fatigue.is_tired(channel_id)
+    def allow_typing_extend(self, channel_id: int, user_id: int) -> bool:
+        return not self.fatigue.is_tired(channel_id, user_id)
 
     def allow_ambient_react(
         self, guild_id: int, user_id: int, *, human_reacts: int = 0,

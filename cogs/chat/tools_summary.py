@@ -26,8 +26,11 @@ logger = logging.getLogger("MARIA.Chat.Summary")
 # Sans fenêtre horaire : un extrait récent, pas tout l'historique du salon.
 _DEFAULT_LIMIT = 60
 _MAX_LIMIT = 500
-# Avec hours : la fenêtre de temps borne la lecture. Filet anti-emballement seulement.
-_WINDOW_SAFETY_CAP = 4000
+# Filet anti-emballement. L'heure demandée borne la lecture : ce plafond
+# ne doit pas couper un pic. 2 000 messages / 24 h arrivent, souvent
+# concentrés sur la soirée (« depuis 16h »).
+_WINDOW_CAP_SHORT = 2500
+_WINDOW_CAP_DAY = 4000
 _MAX_CHARS = 200_000
 # Lots larges : moins d'appels. Le cache de lot évite de les refaire si seul
 # le bout du fil a changé.
@@ -69,9 +72,13 @@ _summary_cache: dict[tuple, _SummaryCacheEntry] = {}
 _partial_cache: dict[str, tuple[datetime, str]] = {}
 
 
-def _cache_key(channel_id: int, hours: Optional[float], limit: int, focus: str) -> tuple:
-    hours_key = round(hours, 2) if hours is not None else None
-    return (channel_id, hours_key, limit, focus.lower())
+def _cache_key(
+    channel_id: int, after: Optional[datetime], limit: int, focus: str,
+) -> tuple:
+    after_key = (
+        after.astimezone(timezone.utc).strftime("%Y%m%d%H%M") if after is not None else None
+    )
+    return (channel_id, after_key, limit, focus.lower())
 
 
 def _cache_get(key: tuple, tip_id: int) -> Optional[_SummaryCacheEntry]:
@@ -171,19 +178,205 @@ def build_channel_summary_view(data: dict, commentary: str = "") -> Optional[dis
     return render_free_widget(data.get("spec"), commentary=commentary)
 
 
-def _history_limit(raw: Any, *, hours: Optional[float]) -> int:
-    """Avec une fenêtre horaire, on lit tout l'intervalle (filet haut seulement).
-
-    Le défaut 60 ne s'applique que sans `hours` — sinon le modèle l'envoie
-    et coupe une journée au 60e message.
-    """
-    if hours is not None and hours > 0:
-        return _WINDOW_SAFETY_CAP
+def _history_limit(raw: Any) -> int:
+    """Plafond sans fenêtre de temps. Défaut 60."""
     try:
         n = int(raw)
     except (TypeError, ValueError):
         return _DEFAULT_LIMIT
     return max(5, min(n, _MAX_LIMIT))
+
+
+def _limit_for_span(span_hours: float) -> int:
+    if span_hours <= 8:
+        return _WINDOW_CAP_SHORT
+    return _WINDOW_CAP_DAY
+
+
+@dataclass(frozen=True)
+class SummaryWindow:
+    """Borne de lecture. `after` est en UTC ; None = les derniers `limit` messages."""
+
+    after: Optional[datetime]
+    limit: int
+    source: str
+    label: str
+
+
+_CLOCK_RE = re.compile(
+    r"(?:depuis|dès|des|à partir de|a partir de)\s+"
+    r"(\d{1,2})\s*(?:h(?!eures?\b)|:)\s*(\d{2})?",
+    re.IGNORECASE,
+)
+_DURATION_RE = re.compile(
+    r"(?:depuis|pendant|sur|ces|les)\s+(\d+(?:[.,]\d+)?)\s*heures?\b"
+    r"|(\d+(?:[.,]\d+)?)\s*derni[eè]res?\s+heures?\b",
+    re.IGNORECASE,
+)
+_TODAY_RE = re.compile(
+    r"\b(?:aujourd['’]hui|la journ[ée]e|cette journ[ée]e|la journ[ée]e enti[eè]re)\b",
+    re.IGNORECASE,
+)
+_YESTERDAY_RE = re.compile(r"\bdepuis hier\b", re.IGNORECASE)
+_PERIOD_RES: tuple[tuple[re.Pattern[str], int, int], ...] = (
+    (re.compile(r"\bce matin\b", re.IGNORECASE), 8, 0),
+    (re.compile(r"\bce midi\b", re.IGNORECASE), 12, 0),
+    (re.compile(r"\b(?:cet apr[eè]s[- ]midi|cette apr[eè]m)\b", re.IGNORECASE), 14, 0),
+    (re.compile(r"\bce soir\b", re.IGNORECASE), 18, 0),
+)
+
+
+def _as_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=PARIS_TZ)
+    return moment.astimezone(timezone.utc)
+
+
+def _paris_now(now: Optional[datetime]) -> datetime:
+    if now is None:
+        return datetime.now(PARIS_TZ)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=PARIS_TZ)
+    return now.astimezone(PARIS_TZ)
+
+
+def _clock_on(day: datetime, hour: int, minute: int) -> datetime:
+    return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _last_clock(now_paris: datetime, hour: int, minute: int) -> Optional[datetime]:
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    candidate = _clock_on(now_paris, hour, minute)
+    if candidate > now_paris:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _parse_clock_token(raw: str) -> Optional[tuple[int, int]]:
+    text = (raw or "").strip().lower().replace(" ", "")
+    m = re.fullmatch(r"(\d{1,2})(?:h(?!eures?\b)|:)(\d{2})?", text)
+    if m is None:
+        m = re.fullmatch(r"(\d{1,2})h(\d{2})?", text)
+    if m is None:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def _duration_hours(text: str) -> Optional[float]:
+    m = _DURATION_RE.search(text or "")
+    if m is None:
+        return None
+    raw = (m.group(1) or m.group(2) or "").replace(",", ".")
+    try:
+        hours = float(raw)
+    except ValueError:
+        return None
+    if hours <= 0:
+        return None
+    return min(hours, 72.0)
+
+
+def _clock_from_text(text: str, now_paris: datetime) -> Optional[datetime]:
+    m = _CLOCK_RE.search(text or "")
+    if m is None:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    # « depuis 2h » = 2 heures. « depuis 16h » / « 16h30 » = l'heure.
+    if m.group(2) is None and hour <= 6:
+        return None
+    return _last_clock(now_paris, hour, minute)
+
+
+def _period_from_text(text: str, now_paris: datetime) -> Optional[datetime]:
+    if _YESTERDAY_RE.search(text or ""):
+        start = _clock_on(now_paris - timedelta(days=1), 0, 0)
+        return start
+    for pattern, hour, minute in _PERIOD_RES:
+        if pattern.search(text or ""):
+            return _last_clock(now_paris, hour, minute)
+    if _TODAY_RE.search(text or ""):
+        return _clock_on(now_paris, 0, 0)
+    return None
+
+
+def resolve_summary_window(
+    text: str,
+    *,
+    since: Optional[str] = None,
+    hours: Optional[float] = None,
+    limit: Any = None,
+    now: Optional[datetime] = None,
+) -> SummaryWindow:
+    """Choisit la borne. Le texte (« depuis 16h ») prime sur un hours=24 du modèle."""
+    now_paris = _paris_now(now)
+    blob = text or ""
+
+    clock = _clock_from_text(blob, now_paris)
+    if clock is not None:
+        span = max(0.25, (now_paris - clock).total_seconds() / 3600)
+        label = clock.strftime("%H:%M")
+        return SummaryWindow(
+            after=_as_utc(clock),
+            limit=_limit_for_span(span),
+            source="clock",
+            label=f"depuis {label}",
+        )
+
+    period = _period_from_text(blob, now_paris)
+    if period is not None:
+        span = max(0.25, (now_paris - period).total_seconds() / 3600)
+        return SummaryWindow(
+            after=_as_utc(period),
+            limit=_limit_for_span(span),
+            source="period",
+            label=f"depuis {period.strftime('%d/%m %H:%M')}",
+        )
+
+    duration = _duration_hours(blob)
+    if duration is None:
+        short = _CLOCK_RE.search(blob)
+        if short is not None and short.group(2) is None:
+            hour = int(short.group(1))
+            if 1 <= hour <= 6:
+                duration = float(hour)
+    if duration is None and since:
+        parsed = _parse_clock_token(since)
+        if parsed is not None:
+            moment = _last_clock(now_paris, parsed[0], parsed[1])
+            if moment is not None:
+                span = max(0.25, (now_paris - moment).total_seconds() / 3600)
+                return SummaryWindow(
+                    after=_as_utc(moment),
+                    limit=_limit_for_span(span),
+                    source="since",
+                    label=f"depuis {moment.strftime('%H:%M')}",
+                )
+        duration = _duration_hours(since)
+
+    if duration is None and hours is not None and 0 < hours <= 12:
+        duration = hours
+    if duration is not None:
+        after = now_paris - timedelta(hours=duration)
+        shown = int(duration) if duration == int(duration) else round(duration, 1)
+        return SummaryWindow(
+            after=_as_utc(after),
+            limit=_limit_for_span(duration),
+            source="duration",
+            label=f"{shown} h",
+        )
+
+    return SummaryWindow(
+        after=None,
+        limit=_history_limit(limit),
+        source="recent",
+        label=f"{_history_limit(limit)} derniers",
+    )
 
 
 def _resolve_channel(ctx, arguments: dict) -> tuple[Optional[discord.abc.Messageable], Optional[str]]:
@@ -236,12 +429,8 @@ async def _fetch_transcript(
     channel: discord.abc.Messageable,
     *,
     limit: int,
-    hours: Optional[float],
+    after: Optional[datetime],
 ) -> tuple[list[str], int, Optional[datetime], Optional[datetime]]:
-    after = None
-    if hours is not None and hours > 0:
-        after = datetime.now(timezone.utc) - timedelta(hours=hours)
-
     lines: list[str] = []
     oldest: Optional[datetime] = None
     newest: Optional[datetime] = None
@@ -519,10 +708,30 @@ def build_channel_summary_tools(
             elif hours is not None:
                 hours = min(hours, 72.0)
 
-        limit = _history_limit(args.get("limit"), hours=hours)
-        focus = (args.get("focus") or "").strip()
+        focus = (args.get("focus") or "").strip() if isinstance(args.get("focus"), str) else ""
+        since_raw = args.get("since")
+        since = since_raw.strip() if isinstance(since_raw, str) and since_raw.strip() else None
+        trigger = getattr(ctx, "trigger_message", None)
+        user_text = ""
+        if trigger is not None:
+            user_text = (
+                getattr(trigger, "clean_content", None)
+                or getattr(trigger, "content", "")
+                or ""
+            )
+        window = resolve_summary_window(
+            f"{user_text}\n{focus}",
+            since=since,
+            hours=hours,
+            limit=args.get("limit"),
+        )
+        limit = window.limit
         name = getattr(channel, "name", None) or str(channel.id)
-        cache_key = _cache_key(channel.id, hours, limit, focus)
+        logger.info(
+            "Résumé salon #%s fenêtre=%s source=%s limit=%d (modèle hours=%s since=%s)",
+            name, window.label, window.source, limit, hours, since,
+        )
+        cache_key = _cache_key(channel.id, window.after, limit, focus)
 
         tip_id = await _channel_tip_id(channel)
         if tip_id is not None:
@@ -546,7 +755,7 @@ def build_channel_summary_tools(
 
         try:
             lines, raw_count, oldest, newest = await _fetch_transcript(
-                channel, limit=limit, hours=hours,
+                channel, limit=limit, after=window.after,
             )
         except discord.Forbidden:
             return ToolResponseRecord(
@@ -613,12 +822,15 @@ def build_channel_summary_tools(
         Tool(
             name="summarize_channel",
             description=(
-                "Résume la conversation récente d'un salon/thread Discord et l'affiche "
-                "en widget. « résume le salon » / « récap » sans angle → résumé général. "
-                "Demande précise (« ce qu'a dit X », « les décisions », « le plan soirée ») "
-                "→ focus = cette demande, pas un récap global. "
-                "Défaut : salon actuel. Pour une journée : hours=24, sans limit "
-                "(la fenêtre couvre tous les messages de l'intervalle). "
+                "Résume un salon/thread Discord et l'affiche en widget. "
+                "« résume le salon » sans borne → ne pas passer since ni hours "
+                "(les derniers messages suffisent). "
+                "« depuis 16h » ou « depuis 16h30 » est une heure, pas une durée : "
+                "since=\"16:00\" ou \"16:30\". Jamais hours=24 pour ça. "
+                "« les 3 dernières heures » ou « depuis 3 heures » → hours=3. "
+                "« aujourd'hui » ou « la journée » → since=\"00:00\". "
+                "Demande précise (« ce qu'a dit X », « les décisions ») → focus, "
+                "pas un récap global. Défaut : salon actuel. "
                 "Après l'appel : aucun texte autour — le widget contient déjà le résumé."
             ),
             properties={
@@ -626,19 +838,27 @@ def build_channel_summary_tools(
                     "type": "string",
                     "description": "ID du salon/thread (optionnel, défaut = salon actuel)",
                 },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Heure de départ à Paris, pas une durée. "
+                        "« depuis 16h » → \"16:00\", « depuis 16h30 » → \"16:30\", "
+                        "« aujourd'hui » → \"00:00\". Ne pas combiner avec hours."
+                    ),
+                },
                 "limit": {
                     "type": "integer",
                     "description": (
-                        "Sans hours seulement : nombre max de messages "
-                        f"(défaut {_DEFAULT_LIMIT}, max {_MAX_LIMIT}). "
-                        "Ne pas passer si hours est défini."
+                        "Sans since ni hours : nombre max de messages "
+                        f"(défaut {_DEFAULT_LIMIT}, max {_MAX_LIMIT})."
                     ),
                 },
                 "hours": {
                     "type": "number",
                     "description": (
-                        "Messages des N dernières heures (max 72). "
-                        "hours=24 lit toute la journée, pas un plafond de 60 messages."
+                        "Durée glissante, seulement pour « les N dernières heures » "
+                        "ou « depuis N heures ». Max 12. "
+                        "Interdit pour une heure (« depuis 16h ») et pour une journée."
                     ),
                 },
                 "focus": {
@@ -650,7 +870,7 @@ def build_channel_summary_tools(
                     ),
                 },
             },
-            optional_props=["channel_id", "limit", "hours", "focus"],
+            optional_props=["channel_id", "since", "limit", "hours", "focus"],
             function=_tool_summarize_channel,
         ),
     ]

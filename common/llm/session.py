@@ -24,6 +24,7 @@ from .context import (
     TextComponent,
     ImageComponent,
     MetadataComponent,
+    TOKENIZER,
 )
 from .tools import ToolRegistry
 from .attachments import AttachmentCache, process_attachment
@@ -127,7 +128,7 @@ FOCUS_CONTENT = 240
 ARTIFACT_CAP = 800
 HINT_PART_CAP = 220
 HINT_MAX_PARTS = 3
-SYSTEM_NOTE_HISTORY_CAP = 400
+SYSTEM_NOTE_HISTORY_CAP = 160
 
 _VOICE_FLAG = 1 << 13
 
@@ -787,6 +788,7 @@ class ChannelSession:
             self._web_searches_this_turn = 0
             self._web_search_reformulate = False
             self._cap_decision = None
+            self.context.compact_tool_history()
 
         # Ne pas écraser le trigger entre tours d'outils (depth>0 passe souvent None).
         if trigger is not None:
@@ -832,6 +834,8 @@ class ChannelSession:
                 prompt_ctx["capability_ctx"] = build_capability_ctx_from(
                     self._cap_decision.flags, self._cap_decision.force_level,
                 )
+                if "tasks" in self._cap_decision.flags:
+                    prompt_ctx["include_tasks"] = True
             else:
                 from .capabilities import build_capability_ctx
                 prompt_ctx["capability_ctx"] = build_capability_ctx(focus_msg, cited)
@@ -930,11 +934,21 @@ class ChannelSession:
                     int((datetime.now(timezone.utc) - _oldest).total_seconds() // 60)
                     if _oldest is not None else 0
                 )
+                n_msgs, ctx_tok, tool_tok, sys_tok = self.context.history_mix()
+                dev_tok = (
+                    len(TOKENIZER.encode(self.context.developer_prompt))
+                    if self.context.developer_prompt else 0
+                )
                 logger.info(
                     "Tour #%s ← %s (%d msgs en contexte, le plus ancien : %d min)",
                     getattr(getattr(trigger, "channel", None), "id", "?"),
                     getattr(getattr(trigger, "author", None), "name", "?"),
-                    len(_msgs), _age,
+                    n_msgs, _age,
+                )
+                logger.info(
+                    "Contexte #%s : prompt %d tok · %d msgs · [contexte] %d · outils %d · [SYSTEM] %d",
+                    getattr(getattr(trigger, "channel", None), "id", "?"),
+                    dev_tok, n_msgs, ctx_tok, tool_tok, sys_tok,
                 )
             except Exception:
                 logger.debug("log tour échoué", exc_info=True)

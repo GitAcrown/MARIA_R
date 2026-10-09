@@ -11,6 +11,7 @@ from typing import Any, Optional, Sequence
 from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul, Score
 
 from common.ttl_cache import TTLCache
+from common.greedy_address import finalize_greedy_choice, is_question
 
 logger = logging.getLogger("llm.typesafe")
 
@@ -28,6 +29,17 @@ REACTION_CONFIDENCE = 0.68
 BANDWAGON_CONFIDENCE = 0.55
 # React JEV (mention / follow-up) sous ce seuil → traité comme ignore.
 REACT_VERDICT_CONFIDENCE = 0.62
+# Paresse follow-up : part de la fatigue (0–1) dans le score de laziness.
+FOLLOWUP_FATIGUE_LAZY = 0.20
+
+
+@dataclass
+class MentionVerdict:
+    """Décision d'adresse. `raw` / `confidence` sont le choix JEV avant filtre."""
+
+    decision: str
+    raw: str | None = None
+    confidence: float | None = None
 
 
 def _heuristic_tab(message: str, labels: Sequence[str]) -> int | None:
@@ -164,8 +176,8 @@ class MariaTypeSafeClient:
         bot_name: str,
     ) -> bool:
         """True si l'auteur s'adresse au bot. Sans JEV / erreur → True."""
-        decision = await self.classify_bot_mention(message, bot_name=bot_name)
-        return decision == "respond"
+        verdict = await self.classify_bot_mention(message, bot_name=bot_name)
+        return verdict.decision == "respond"
 
     async def classify_bot_mention(
         self,
@@ -173,15 +185,16 @@ class MariaTypeSafeClient:
         *,
         bot_name: str,
         bias_respond: bool = False,
-    ) -> str:
+    ) -> MentionVerdict:
         """Mention / nom du bot : respond | react | ignore.
 
         Sans JEV / erreur → respond (fail-open comme avant).
-        `bias_respond` (mode greedy) : préfère fortement une vraie réponse ;
-        ignore seulement si JEV est sûr que c'est un name-drop passif.
+        `bias_respond` (mode greedy) : ignore seulement si JEV est sûr
+        (confiance haute) que c'est un name-drop passif. Une question
+        classée react reste une réponse texte.
         """
         if not self.enabled:
-            return "respond"
+            return MentionVerdict("respond")
         name = (bot_name or "Maria").strip() or "Maria"
         snippet = (message or "").strip()
         # Déjà fenêtré côté chat ; garde-fou si appelé ailleurs avec un pavé.
@@ -256,35 +269,35 @@ class MariaTypeSafeClient:
             },
         )
         if result is None:
-            return "respond"
+            return MentionVerdict("respond")
         try:
             ans = result.choices["mention"]
             choice = str(ans.choice or "respond")
             conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         except (KeyError, AttributeError, TypeError, ValueError):
-            return "respond"
+            return MentionVerdict("respond")
         if choice not in ("respond", "react", "ignore"):
-            return "respond"
+            return MentionVerdict("respond", raw=choice, confidence=conf)
 
         if bias_respond:
-            # Greedy : on écoute JEV (y compris « parle d'elle » → ignore).
-            # Avant : ignore faute de conf → respond → elle répondait à chaque name-drop.
-            if choice == "ignore":
-                return "ignore" if conf >= 0.4 else "respond"
-            if choice == "react":
-                return "react" if conf >= REACT_VERDICT_CONFIDENCE else "ignore"
-            return "respond"
+            decision = finalize_greedy_choice(
+                choice,
+                conf,
+                question=is_question(snippet),
+                react_min=REACT_VERDICT_CONFIDENCE,
+            )
+            return MentionVerdict(decision, raw=choice, confidence=conf)
 
         if choice == "react" and conf < REACT_VERDICT_CONFIDENCE:
             # React forcé = spam : conf basse → silence.
-            return "ignore"
+            return MentionVerdict("ignore", raw=choice, confidence=conf)
         if conf < CATEGORY_CONFIDENCE:
             # Incertain : respond léger si le modèle penche vraiment, sinon silence
             # (plus de react par défaut — trop bruyant).
             if choice == "respond" and conf >= 0.35:
-                return "respond"
-            return "ignore"
-        return choice
+                return MentionVerdict("respond", raw=choice, confidence=conf)
+            return MentionVerdict("ignore", raw=choice, confidence=conf)
+        return MentionVerdict(choice, raw=choice, confidence=conf)
 
     def prefetch_intent(self, text: str) -> None:
         """Démarre resolve_intent en arrière-plan (même clé = même tâche)."""
@@ -886,7 +899,7 @@ class MariaTypeSafeClient:
                 0.0,
                 0.22
                 + 0.25 * max(0, chain_depth)
-                + 0.50 * fatigue
+                + FOLLOWUP_FATIGUE_LAZY * fatigue
                 + 0.28 * (1.0 - attention)
                 + (0.40 if not is_addressee else 0.0),
             ),
@@ -936,13 +949,13 @@ class MariaTypeSafeClient:
             },
         )
         if result is None:
-            return "ignore"
+            return "respond" if (is_addressee and is_question) else "ignore"
         try:
             ans = result.choices["followup"]
             choice = str(ans.choice or "ignore")
             conf = float(getattr(ans, "confidence", 0.0) or 0.0)
         except (KeyError, AttributeError, TypeError, ValueError):
-            return "ignore"
+            return "respond" if (is_addressee and is_question) else "ignore"
         if choice == "respond" and conf >= min_conf:
             return "respond"
         if choice == "react" and conf >= react_min:

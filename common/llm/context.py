@@ -14,7 +14,7 @@ DEFAULT_WINDOW = 8192
 DEFAULT_AGE = timedelta(hours=2)
 SESSION_MSG_SHARE = 0.60
 SESSION_SUMMARY_CHARS = 1200
-CONTEXT_KEEP_RECENT = 8
+CONTEXT_KEEP_RECENT = 4
 CONTEXT_CHATTER_MAX_WORDS = 3
 CONTEXT_CHATTER_MAX_CHARS = 20
 TIME_GAP_MARKER = timedelta(minutes=20)
@@ -160,6 +160,30 @@ class ToolResponseRecord(MessageRecord):
         self.tool_call_id = tool_call_id
         self.response_data = response_data
 
+    def compact_for_history(self, *, cap: int = 160) -> None:
+        """Ne garde qu'une ligne : le tour suivant n'a plus le JSON complet."""
+        data = self.response_data or {}
+        if data.get("_history_compacted"):
+            return
+        tool = str(data.get("_tool") or "outil")
+        summary = (data.get("_llm_summary") or "").strip()
+        if not summary:
+            err = data.get("error")
+            if err:
+                summary = f"{tool}: {err}"
+            else:
+                bits = _short_result_bits(data)
+                summary = f"{tool}: {bits}" if bits else f"{tool}: résultat utilisé."
+        summary = re.sub(r"\s+", " ", summary).strip()
+        if len(summary) > cap:
+            summary = summary[: cap - 1].rstrip() + "…"
+        self.response_data = {
+            "_tool": tool,
+            "_llm_summary": summary,
+            "_history_compacted": True,
+        }
+        self.components = [TextComponent(summary)]
+
     def to_payload(self) -> dict:
         summary = self.response_data.get("_llm_summary")
         content = summary if summary else json.dumps(self.response_data, ensure_ascii=False)
@@ -168,6 +192,30 @@ class ToolResponseRecord(MessageRecord):
             "content": content,
             "tool_call_id": self.tool_call_id,
         }
+
+
+def _short_result_bits(data: dict, *, cap: int = 120) -> str:
+    """Morceaux courts d'un résultat d'outil (titres), pas le corps."""
+    bits: list[str] = []
+
+    def walk(obj, depth: int = 0) -> None:
+        if sum(len(b) for b in bits) >= cap or depth > 3:
+            return
+        if isinstance(obj, str):
+            text = obj.strip()
+            if 2 < len(text) <= 80:
+                bits.append(text)
+        elif isinstance(obj, dict):
+            for key, val in obj.items():
+                if str(key).startswith("_"):
+                    continue
+                walk(val, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj[:4]:
+                walk(item, depth + 1)
+
+    walk(data)
+    return " · ".join(bits)[:cap]
 
 
 def _is_context_chatter(message: "MessageRecord") -> bool:
@@ -369,6 +417,28 @@ class ConversationContext:
         self._messages = self._sanitize_tool_pairs(kept)
         self._needs_trim = False
 
+    def compact_tool_history(self) -> None:
+        """Résume les résultats d'outils déjà consommés, avant le prochain tour."""
+        for m in self._messages:
+            compact = getattr(m, "compact_for_history", None)
+            if m.role == "tool" and callable(compact):
+                compact()
+
+    def history_mix(self) -> tuple[int, int, int, int]:
+        """(messages, tokens [contexte], tokens outils, tokens [SYSTEM])."""
+        ctx = tool = system = 0
+        for m in self._messages:
+            tokens = m.token_count
+            if m.role == "tool" or getattr(m, "tool_calls", None):
+                tool += tokens
+            elif (m.metadata or {}).get("context_only"):
+                ctx += tokens
+            elif m.role == "user" and getattr(m, "name", None) == "system":
+                system += tokens
+            elif (m.full_text or "").lstrip().startswith("[SYSTEM]"):
+                system += tokens
+        return len(self._messages), ctx, tool, system
+
     @staticmethod
     def _record_gaps(before: list["MessageRecord"], kept: list["MessageRecord"]) -> None:
         """Cumule `gap_before` sur le message gardé qui suit un trou (hors tête de fenêtre)."""
@@ -460,14 +530,14 @@ class ConversationContext:
     def _fold_evicted(self, messages: list["MessageRecord"]) -> None:
         bits: list[str] = []
         for m in messages:
-            if m.role == "tool":
+            if m.role == "tool" or getattr(m, "tool_calls", None):
                 continue
             if m.role == "user" and getattr(m, "name", None) == "system":
                 continue
+            if (m.metadata or {}).get("context_only"):
+                continue
             text = (m.full_text or "").strip()
             if not text or text.startswith("[SYSTEM]"):
-                continue
-            if _is_context_chatter(m):
                 continue
             text = re.sub(r"\s+", " ", text)
             if len(text) > 180:
