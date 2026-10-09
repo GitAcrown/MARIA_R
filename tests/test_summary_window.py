@@ -7,6 +7,7 @@ from datetime import datetime
 
 from common.timezones import PARIS_TZ
 from cogs.chat.tools_summary import (
+    _DEFAULT_LIMIT,
     _WINDOW_CAP_DAY,
     _WINDOW_CAP_SHORT,
     build_channel_summary_tools,
@@ -81,7 +82,8 @@ class SummaryWindowTests(unittest.TestCase):
         window = _window("résume le salon", hours=24, limit=60)
         self.assertEqual(window.source, "recent")
         self.assertIsNone(window.after)
-        self.assertEqual(window.limit, 60)
+        self.assertGreaterEqual(window.limit, 180)
+        self.assertEqual(window.limit, _DEFAULT_LIMIT)
 
     def test_modest_model_hours_without_text(self):
         window = _window("", hours=4)

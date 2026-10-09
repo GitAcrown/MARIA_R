@@ -23,8 +23,9 @@ from common.widget_catalog import render_free_widget
 
 logger = logging.getLogger("MARIA.Chat.Summary")
 
-# Sans fenêtre horaire : un extrait récent, pas tout l'historique du salon.
-_DEFAULT_LIMIT = 60
+# Sans fenêtre horaire : les derniers messages. 60 en coupe un débat
+# (20 min peuvent en faire le triple).
+_DEFAULT_LIMIT = 250
 _MAX_LIMIT = 500
 # Filet anti-emballement. L'heure demandée borne la lecture : ce plafond
 # ne doit pas couper un pic. 2 000 messages / 24 h arrivent, souvent
@@ -179,12 +180,12 @@ def build_channel_summary_view(data: dict, commentary: str = "") -> Optional[dis
 
 
 def _history_limit(raw: Any) -> int:
-    """Plafond sans fenêtre de temps. Défaut 60."""
+    """Sans fenêtre de temps. Un `limit` plus bas que le défaut ne rétrécit pas."""
     try:
         n = int(raw)
     except (TypeError, ValueError):
         return _DEFAULT_LIMIT
-    return max(5, min(n, _MAX_LIMIT))
+    return max(_DEFAULT_LIMIT, min(n, _MAX_LIMIT))
 
 
 def _limit_for_span(span_hours: float) -> int:
@@ -823,8 +824,7 @@ def build_channel_summary_tools(
             name="summarize_channel",
             description=(
                 "Résume un salon/thread Discord et l'affiche en widget. "
-                "« résume le salon » sans borne → ne pas passer since ni hours "
-                "(les derniers messages suffisent). "
+                "« résume le salon » sans borne → ne pas passer since, hours ni limit. "
                 "« depuis 16h » ou « depuis 16h30 » est une heure, pas une durée : "
                 "since=\"16:00\" ou \"16:30\". Jamais hours=24 pour ça. "
                 "« les 3 dernières heures » ou « depuis 3 heures » → hours=3. "
@@ -849,8 +849,9 @@ def build_channel_summary_tools(
                 "limit": {
                     "type": "integer",
                     "description": (
-                        "Sans since ni hours : nombre max de messages "
-                        f"(défaut {_DEFAULT_LIMIT}, max {_MAX_LIMIT})."
+                        "Sans since ni hours, omettre : la lecture prend déjà "
+                        f"les {_DEFAULT_LIMIT} derniers messages. "
+                        f"Pour aller plus loin seulement, max {_MAX_LIMIT}."
                     ),
                 },
                 "hours": {
