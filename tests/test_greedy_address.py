@@ -196,6 +196,7 @@ class HistoryTests(unittest.TestCase):
         self.assertNotIn("schedule_task", rendered)
         self.assertNotIn("pointe sassy", rendered)
         self.assertIn("Pas de vanne", rendered)
+        self.assertIn("search_memory avant de répondre", rendered)
         self.assertNotIn("ajoute le détail", rendered)
         with_tasks = DEV_PROMPT_BASE.format(
             bot_name="Maria",

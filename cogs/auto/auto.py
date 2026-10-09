@@ -62,12 +62,9 @@ class Auto(commands.Cog):
         chat = self.bot.get_cog("Chat")
         if chat is None or not hasattr(chat, "gpt_api"):
             return
-        author = getattr(source.author, "display_name", None) or getattr(source.author, "name", "?")
-        note = f"[vocal transcrit] {author} : {transcript.strip()[:1200]}"
         try:
-            await chat.gpt_api.inject_context_note_async(source.channel, note)
             session = chat.gpt_api.session_manager.get_or_create(source.channel)
-            session.record_artifact("transcript", note)
+            await session.attach_voice_transcript(source, transcript)
         except Exception:
             logger.debug("Ingest transcription ignoré", exc_info=True)
 

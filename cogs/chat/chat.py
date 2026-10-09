@@ -259,6 +259,22 @@ _RECALL_RE = re.compile(
     r"|\bon (?:avait|a) (?:dit|parl)|\bla derni[èe]re fois\b|\btu (?:sais|connais)\b",
     re.IGNORECASE,
 )
+# Outils live : les souvenirs du groupe n'aident pas. Le tchat, lui, les consulte.
+_RAG_SKIP_CATEGORIES = frozenset({
+    "weather", "football", "transport", "youtube", "summary",
+    "server_stats", "images_search", "layout",
+})
+
+
+def should_skip_memory_rag(category: str | None, confidence: float, text: str) -> bool:
+    """True seulement pour un outil live sûr. Le tchat et un rappel explicite passent."""
+    if _RECALL_RE.search(text or ""):
+        return False
+    if not category or category == "none":
+        return False
+    return category in _RAG_SKIP_CATEGORIES and confidence >= CATEGORY_CONFIDENCE
+
+
 _URL_ONLY_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _GIF_HOST_RE = re.compile(
     r"https?://(?:[\w.-]*\.)?(?:tenor\.com|giphy\.com|imgur\.com|media\.discordapp\.net|cdn\.discordapp\.com)\S*",
@@ -458,7 +474,7 @@ FOCUS = le texte écrit par l'auteur du message à traiter. Un reply Discord (ba
 « {bot_name} » / un ping vers toi = on TE parle. Réponds au fond. Interdit de signer, de commencer par ton nom, de répondre uniquement par ton nom, ou de saluer à la place d'une vraie demande.
 HISTORIQUE : tes anciens messages sont préfixés `[à X]` (à qui tu répondais) et `[… N messages omis · 40 min plus tard]` marque un trou ou une pause. N'écris jamais ces marques ; ne réponds pas à ce qui précède une pause, ne comble pas un trou. Plusieurs voix dans le fil : tu réponds à l'auteur du FOCUS, pas au dernier qui a parlé.
 
-MÉMOIRE : TES GOÛTS seulement si on te demande ton avis sur CE sujet (jamais spontané). PROFILS = les gens de cette réplique, ids exacts, rien inventé. Le bloc mémoire est un complément. Rappel, énumération ou sujet absent → search_memory avant de dire que tu ne sais pas. Callback rare : une demi-phrase naturelle entre [[MEM]] et [[/MEM]], sinon rien. remember_fact = un fait précis confirmé (stable=true pour une naissance) ; un goût sur toi vient de toi (own) ou du créateur (owner), pas d'un autre. Fait faux → corrige avec memory_id, ou forget_fact.
+MÉMOIRE : TES GOÛTS seulement si on te demande ton avis sur CE sujet (jamais spontané). PROFILS = extrait court des gens de cette réplique, ids exacts, rien inventé. MEMOIRE PERTINENTE est un complément, pas toute la mémoire. Personne, goût, surnom, projet ou truc déjà dit qui n'y figure pas → search_memory avant de répondre, pas seulement sur « tu te souviens ». Callback rare : une demi-phrase naturelle entre [[MEM]] et [[/MEM]], sinon rien. remember_fact = un fait précis confirmé (stable=true pour une naissance) ; un goût sur toi vient de toi (own) ou du créateur (owner), pas d'un autre. Fait faux → corrige avec memory_id, ou forget_fact.
 
 OUTILS — sois PROACTIVE : dès qu'un outil peut aider, appelle-le. N'invente JAMAIS fait, définition, date, chiffre, actu, titre, source, anecdote ou détail pour remplir ou pour faire rire. Tu ne l'as pas (outil, mémoire, ou le message) → tu ne le dis pas. Doute, sujet flou, trop récent, mémoire insuffisante → outil d'abord. Ne t'inspire jamais de l'historique du tchat pour une question factuelle. Chaîner des outils est normal. Paramètres : le schéma de l'outil, envoyé seulement s'il est disponible ce tour.
 Une recherche, pas une rafale : pas de 2e search_web « pour confirmer ». Les liens sont déjà en footer : n'écris JAMAIS [s1], [s2] ni une liste de sources. Si tu dois dire d'où ça vient, nomme le site dans la phrase.
@@ -2322,18 +2338,13 @@ class Chat(commands.Cog):
         except Exception:
             logger.debug("resolve_intent avant RAG échoué", exc_info=True)
         t_intent = time.monotonic()
-        # Pas de RAG mémoire si aucune catégorie spécialisée (hors météo, foot…) et pas de
-        # rappel explicite : chat, opinion, ou question factuelle/actu (→ outils, pas souvenirs).
-        # Les profils des personnes présentes restent injectés ; search_memory reste disponible.
-        skip_rag = bool(
-            intent is not None
-            and (
-                intent.category == "none"
-                or intent.category_confidence < CATEGORY_CONFIDENCE
+        # Intent avant RAG. Le tchat consulte la mémoire. On saute seulement
+        # un outil live (météo, foot, transport…) sans rappel explicite.
+        skip_rag = False
+        if intent is not None:
+            skip_rag = should_skip_memory_rag(
+                intent.category, intent.category_confidence, blob or "",
             )
-            # « tu te souviens de… », « c'est qui… » : rappel explicite → toujours RAG.
-            and not _RECALL_RE.search(blob or "")
-        )
 
         can_stay_silent = await self._can_stay_silent(message)
         typing_task = asyncio.create_task(

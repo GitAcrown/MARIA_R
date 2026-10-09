@@ -223,8 +223,9 @@ _HINTS: tuple[tuple[str, str], ...] = (
 )
 _GROUNDING_HINT = (
     "- Un fait à jour (actu, prix, score, météo) : tu PEUX search_web ou l'outil "
-    "dédié, n'invente pas — une seule recherche, pas une rafale. Un avis, un goût, "
-    "du tchat : réponds toi-même, aucun outil, et sans vanne ni détail inventé. Cherche seulement si iel "
+    "dédié, n'invente pas — une seule recherche, pas une rafale. "
+    "Personne, goût, surnom ou truc déjà dit absent du prompt → search_memory, "
+    "pas search_web. Cherche sur le web seulement si iel "
     "le demande ou si tu es déjà en train de chercher. Pas de [s1] dans le tchat."
 )
 

@@ -129,6 +129,8 @@ ARTIFACT_CAP = 800
 HINT_PART_CAP = 220
 HINT_MAX_PARTS = 3
 SYSTEM_NOTE_HISTORY_CAP = 160
+VOICE_HISTORY_CAP = 1200
+_VOICE_KEPT = 200
 
 _VOICE_FLAG = 1 << 13
 
@@ -498,6 +500,7 @@ class ChannelSession:
         self._ingested_ids: set[int] = set()
         self._ingested_order: deque[int] = deque(maxlen=INGESTED_IDS_MAX)
         self._ingested_records: dict[int, MessageRecord] = {}
+        self._voice_texts: dict[int, str] = {}
         self._recent_system_notes: deque[tuple[datetime, str]] = deque(maxlen=6)
         self.artifacts = WorkingArtifacts()
 
@@ -568,11 +571,13 @@ class ChannelSession:
         text = message.content or ""
         api_name = _api_message_name(message)
         display_name = _display_user_label(message)
+        voice = self._voice_texts.get(getattr(message, "id", None), "")
 
         # Contexte-seul sans texte ni contenu textuel riche → ignorer (évite le bruit).
         # Les embeds / LayoutView ont du texte exploitable : on les garde.
+        # Un vocal déjà transcrit a un texte : il reste dans l'historique.
         has_rich_text = bool(getattr(message, "embeds", None) or getattr(message, "components", None))
-        if is_context_only and not text.strip() and not has_rich_text:
+        if is_context_only and not text.strip() and not voice and not has_rich_text:
             return MessageRecord(
                 role="user",
                 components=[],
@@ -649,6 +654,8 @@ class ChannelSession:
         msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
         ctx_tag = "[contexte] " if is_context_only else ""
         shown = (message.clean_content or text).strip()
+        if voice and (not shown or _is_voice_message(message)):
+            shown = f"(vocal) {voice}"
         if not is_context_only:
             bot_id, bot_names = _bot_identity(message)
             shown = _strip_bot_address(shown, bot_id=bot_id, names=bot_names)
@@ -751,6 +758,50 @@ class ChannelSession:
             record.metadata["discord_message"] = message
         self._remember_ingested(message.id, record)
         return record
+
+    def _remember_voice(self, message_id: int, text: str) -> None:
+        self._voice_texts[message_id] = text
+        overflow = len(self._voice_texts) - _VOICE_KEPT
+        if overflow <= 0:
+            return
+        for old in list(self._voice_texts)[:overflow]:
+            self._voice_texts.pop(old, None)
+
+    def _voice_history_line(self, message: discord.Message, text: str, *, context_only: bool) -> str:
+        msg_time = message.created_at.astimezone(_PARIS_TZ).strftime("%H:%M")
+        ctx_tag = "[contexte] " if context_only else ""
+        return f"{ctx_tag}[{msg_time}] {_display_user_label(message)}: (vocal) {text}"
+
+    def _replace_body_line(self, record: MessageRecord, message: discord.Message, line: str) -> None:
+        label = _display_user_label(message)
+        for i, comp in enumerate(record.components):
+            if getattr(comp, "type", None) != "text":
+                continue
+            raw = (comp.data or {}).get("text") or ""
+            if raw.startswith(("[Cité", "[EMBED]", "[LAYOUT]", "[Transfère")):
+                continue
+            if f"] {label}:" in raw or raw.rstrip().endswith(": [vocal]"):
+                record.components[i] = TextComponent(line)
+                return
+        record.components.append(TextComponent(line))
+
+    async def attach_voice_transcript(self, message: discord.Message, transcript: str) -> None:
+        """Pose la transcription sur le message vocal déjà dans l'historique du salon."""
+        text = (transcript or "").strip()
+        if not text or message is None:
+            return
+        if len(text) > VOICE_HISTORY_CAP:
+            text = text[:VOICE_HISTORY_CAP].rstrip() + "…"
+        async with self._lock:
+            self._remember_voice(message.id, text)
+            existing = self._ingested_records.get(message.id)
+            if existing is not None and self._still_in_context(message.id) and existing.components:
+                ctx = bool((existing.metadata or {}).get("context_only"))
+                self._replace_body_line(
+                    existing, message, self._voice_history_line(message, text, context_only=ctx),
+                )
+                return
+            self._ingest_locked(message, True, resolved_ref=None)
 
     async def run_completion(
         self,

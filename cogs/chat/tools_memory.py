@@ -568,10 +568,10 @@ def build_memory_tools(
         Tool(
             name="search_memory",
             description=(
-                "Mémoire long terme (lecture seule). Les PROFILS + TES GOÛTS du prompt "
-                "couvrent déjà auteur/mentions et toi — ne pas rappeler pour ça. "
-                "Pour : membre/sujet ABSENT, énumérer, category=self pour tes goûts. "
-                "Renvoie aussi l'id (utile pour remember_fact). Pas d'écriture."
+                "Mémoire long terme (lecture seule). PROFILS et TES GOÛTS du prompt "
+                "sont un extrait court : cherche si la question porte sur une personne, "
+                "un goût, un surnom, un projet ou un fait passé qui n'y figure pas. "
+                "semantic=true si le mot exact rate. Renvoie aussi l'id. Pas d'écriture."
             ),
             properties={
                 "query": {

@@ -321,7 +321,7 @@ async def retrieve_memories_async(
         kept.append((hit.score, candidates[hit.index]))
 
     if not kept:
-        return candidates[:top_k]
+        return []
 
     kept.sort(key=lambda pair: -pair[0])
     return [m for _, m in kept[:top_k]]
