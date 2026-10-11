@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 from typesafe_sdk import Noul
 
 from common.task_recipe import (
+    discord_signal,
     looks_like_noise,
     match_message_pattern,
     parse_trigger,
@@ -90,6 +91,8 @@ def _author_allowed(task, author_id: int) -> bool:
 def cheap_match(task, message: "discord.Message") -> bool:
     if task.kind != KIND_EVENT:
         return False
+    if discord_signal(parse_trigger(task.trigger_json)):
+        return False
     if not _channel_allowed(task, message.channel.id):
         return False
     if not _author_allowed(task, message.author.id):
@@ -99,6 +102,78 @@ def cheap_match(task, message: "discord.Message") -> bool:
         return False
     text = message.clean_content or message.content or ""
     return any(match_message_pattern(text, term, whole_word=True) for term in terms)
+
+
+def voice_transitions(
+    before_channel_id: int,
+    after_channel_id: int,
+    before_stream: bool,
+    after_stream: bool,
+) -> list[tuple[str, int]]:
+    """Signaux vocaux d'un voice_state_update. Un mute ou un déplacement de caméra ne compte pas.
+
+    Rejoindre (y compris changer de salon) et quitter pour de bon sont distincts.
+    Le stream est le Go Live Discord (self_stream), pas le statut Twitch.
+    """
+    out: list[tuple[str, int]] = []
+    before_id = int(before_channel_id or 0)
+    after_id = int(after_channel_id or 0)
+    if before_id != after_id:
+        if after_id:
+            out.append(("voice_join", after_id))
+        if before_id and not after_id:
+            out.append(("voice_leave", before_id))
+    if after_id and not before_stream and after_stream:
+        out.append(("voice_stream", after_id))
+    return out
+
+
+def signal_fact(signal: str, who: str, place: str = "") -> str:
+    name = (who or "quelqu'un").strip()
+    spot = (place or "").strip()
+    if signal == "voice_join":
+        return f"{name} a rejoint {spot or 'un vocal'}"
+    if signal == "voice_leave":
+        return f"{name} a quitté {spot or 'le vocal'}"
+    if signal == "voice_stream":
+        return f"{name} a lancé un stream dans {spot or 'un vocal'}"
+    if signal == "member_join":
+        return f"{name} a rejoint le serveur"
+    return f"{name} : {signal}"
+
+
+def signal_matches(
+    task,
+    *,
+    signal: str,
+    user_id: int,
+    channel_id: int | None = None,
+) -> bool:
+    """Vrai si cette tâche armée attend exactement ce signal, cette personne, ce salon."""
+    if getattr(task, "kind", "") != KIND_EVENT:
+        return False
+    trig = parse_trigger(getattr(task, "trigger_json", None) or {})
+    if discord_signal(trig) != signal:
+        return False
+    raw = str(trig.get("user_id") or "").strip()
+    if raw in ("self", "me", "moi"):
+        if int(user_id) != int(task.user_id):
+            return False
+    else:
+        try:
+            if int(raw) != int(user_id):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if signal == "member_join":
+        return True
+    try:
+        want = int(trig.get("voice_channel_id") or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want:
+        return int(channel_id or 0) == want
+    return True
 
 
 def cooldown_ok(task) -> bool:
@@ -203,6 +278,31 @@ async def _budget_ok(store: TaskStore, task) -> bool:
         return False
     storm = await asyncio.to_thread(store.fires_last_hour, task.user_id)
     return storm < FIRE_STORM_MAX_PER_HOUR
+
+
+async def find_signal_tasks(
+    cache: EventTriggerCache,
+    store: TaskStore,
+    *,
+    guild_id: int,
+    signal: str,
+    user_id: int,
+    channel_id: int | None = None,
+) -> list:
+    """Tâches armées dont le signal Discord vient de se produire. Pas de JEV : l'événement est le filtre."""
+    try:
+        armed = await cache.armed(guild_id)
+    except Exception:
+        logger.exception("Signaux Discord : liste des écoutes échouée")
+        return []
+    out = []
+    for task in armed:
+        if not signal_matches(task, signal=signal, user_id=user_id, channel_id=channel_id):
+            continue
+        if not await _budget_ok(store, task):
+            continue
+        out.append(task)
+    return out
 
 
 async def find_firing_tasks(

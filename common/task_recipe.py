@@ -32,6 +32,77 @@ _GENERIC_PATTERNS = frozenset({
     "hi", "hey", "salut", "a", "b", "??", "...",
 })
 
+# (2e personne, 3e personne) — une alerte, pas une écoute de salon.
+SIGNAL_VERBS = {
+    "voice_join": ("rejoins un vocal", "rejoint un vocal"),
+    "voice_leave": ("quittes un vocal", "quitte un vocal"),
+    "voice_stream": ("lances un stream", "lance un stream"),
+    "member_join": ("rejoins le serveur", "rejoint le serveur"),
+}
+_SIGNAL_ALIASES = {
+    "stream": "voice_stream",
+    "golive": "voice_stream",
+    "go_live": "voice_stream",
+    "live": "voice_stream",
+    "join_voice": "voice_join",
+    "leave_voice": "voice_leave",
+}
+
+
+def normalize_discord_signal(raw: Any) -> str:
+    """Nom canonique, ou '' si ce n'est pas un signal Discord."""
+    sig = str(raw or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    sig = _SIGNAL_ALIASES.get(sig, sig)
+    return sig if sig in SIGNAL_VERBS else ""
+
+
+def discord_signal(trigger: dict) -> str:
+    if not isinstance(trigger, dict):
+        return ""
+    sig = normalize_discord_signal(trigger.get("signal"))
+    if sig:
+        return sig
+    return normalize_discord_signal(trigger.get("type"))
+
+
+def signal_phrase(trigger: dict, *, owner_id: int = 0) -> str:
+    """« tu rejoins un vocal » / « <@id> lance un stream »."""
+    sig = discord_signal(trigger)
+    if not sig:
+        return ""
+    uid = str(trigger.get("user_id") or "").strip()
+    self_target = uid in ("self", "me", "moi") or (
+        uid.isdigit() and owner_id and int(uid) == int(owner_id)
+    )
+    tu, other = SIGNAL_VERBS[sig]
+    who = "tu" if self_target else (f"<@{uid}>" if uid.isdigit() else "quelqu'un")
+    where = ""
+    if sig != "member_join":
+        try:
+            ch_id = int(trigger.get("voice_channel_id") or 0)
+        except (TypeError, ValueError):
+            ch_id = 0
+        if ch_id:
+            where = f" (<#{ch_id}>)"
+    return f"{who} {tu if self_target else other}{where}"
+
+
+def build_discord_trigger(
+    *,
+    signal: str,
+    user_id: int,
+    voice_channel_id: int = 0,
+) -> dict:
+    uid = str(int(user_id))
+    return {
+        "type": "discord",
+        "signal": signal,
+        "user_id": uid,
+        "pattern": f"{signal}:{uid}:{int(voice_channel_id or 0)}",
+        "voice_channel_id": int(voice_channel_id or 0),
+        "author": "any",
+    }
+
 
 def pattern_ok(pattern: str) -> str | None:
     """None si OK, sinon message d'erreur FR."""
@@ -199,7 +270,10 @@ def keyword_is_specific(pattern: str) -> bool:
 
 
 def event_label(trigger: dict) -> str:
-    """Libellé court d'une écoute : mots-clés, sinon le sujet en clair."""
+    """Libellé court d'une écoute : signal Discord, mots-clés, sinon le sujet."""
+    sig = discord_signal(trigger)
+    if sig:
+        return SIGNAL_VERBS[sig][1]
     terms = trigger_terms(trigger)
     if terms:
         return " / ".join(terms)
@@ -265,25 +339,34 @@ def render_pseudocode(task) -> str:
     lines: list[str] = []
 
     if kind == KIND_EVENT:
-        terms = trigger_terms(trigger)
-        topic = str(trigger.get("topic") or "").strip()
-        scope = getattr(task, "scope", "channel") or "channel"
-        where = "tout le serveur" if scope == "guild" else "salon(s) choisi(s)"
-        author = trigger.get("author") or "any"
-        if terms:
-            pat = '" ou "'.join(terms)
-            lines.append(f'QUAND message contient "{pat}" ({where})')
-        else:
-            lines.append(f'QUAND on parle de "{topic or "?"}" ({where})')
-        author_s = str(author).casefold()
-        if author_s == "self":
-            lines.append("  SI auteur = moi")
-            indent = "    "
-        elif author_s == "not_self":
-            lines.append("  SI auteur ≠ moi")
-            indent = "    "
-        else:
+        sig = discord_signal(trigger)
+        if sig:
+            lines.append(
+                "QUAND "
+                + signal_phrase(trigger, owner_id=int(getattr(task, "user_id", 0) or 0))
+            )
             indent = "  "
+            author_s = ""
+        else:
+            terms = trigger_terms(trigger)
+            topic = str(trigger.get("topic") or "").strip()
+            scope = getattr(task, "scope", "channel") or "channel"
+            where = "tout le serveur" if scope == "guild" else "salon(s) choisi(s)"
+            author = trigger.get("author") or "any"
+            if terms:
+                pat = '" ou "'.join(terms)
+                lines.append(f'QUAND message contient "{pat}" ({where})')
+            else:
+                lines.append(f'QUAND on parle de "{topic or "?"}" ({where})')
+            author_s = str(author).casefold()
+            if author_s == "self":
+                lines.append("  SI auteur = moi")
+                indent = "    "
+            elif author_s == "not_self":
+                lines.append("  SI auteur ≠ moi")
+                indent = "    "
+            else:
+                indent = "  "
         plan = plan_of(
             kind=kind,
             instruction=getattr(task, "instruction", "") or "",
@@ -454,16 +537,20 @@ def focus_label(task, *, max_len: int = 60) -> str:
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     if kind == KIND_EVENT:
-        terms = trigger_terms(trigger)
-        topic = str(trigger.get("topic") or "").strip()
-        # Préférer le mot-clé net ; un topic long type « X dit le mot Y » est mauvais en titre.
-        if terms:
-            raw = " / ".join(terms)
-        elif topic and len(topic) <= 40:
-            raw = topic
+        sig = discord_signal(trigger)
+        if sig:
+            raw = signal_phrase(trigger, owner_id=int(getattr(task, "user_id", 0) or 0))
         else:
-            raw = topic or (getattr(task, "title", "") or "")
-        raw = re.sub(r"^Écoute\s*[·•\-:]?\s*", "", raw, flags=re.IGNORECASE).strip(" «»\"'")
+            terms = trigger_terms(trigger)
+            topic = str(trigger.get("topic") or "").strip()
+            # Préférer le mot-clé net ; un topic long type « X dit le mot Y » est mauvais en titre.
+            if terms:
+                raw = " / ".join(terms)
+            elif topic and len(topic) <= 40:
+                raw = topic
+            else:
+                raw = topic or (getattr(task, "title", "") or "")
+            raw = re.sub(r"^Écoute\s*[·•\-:]?\s*", "", raw, flags=re.IGNORECASE).strip(" «»\"'")
     elif kind == KIND_WATCH:
         thr = trigger.get("threshold")
         raw = f"≤ {thr:g} €" if thr is not None else (getattr(task, "title", "") or "prix")
@@ -510,12 +597,20 @@ def compact_limits(task, *, price: Optional[float] = None) -> str:
             bits.append("MP")
         return " · ".join(bits)
     if kind == KIND_EVENT:
-        bits.append(scope_label(task))
-        author = str(trigger.get("author") or "not_self").casefold()
-        if author == "self":
-            bits.append("toi seulement")
-        elif author not in ("not_self", "any") and author.isdigit():
-            bits.append(f"<@{author}>")
+        if discord_signal(trigger):
+            try:
+                ch_id = int(trigger.get("voice_channel_id") or 0)
+            except (TypeError, ValueError):
+                ch_id = 0
+            if ch_id:
+                bits.append(f"<#{ch_id}>")
+        else:
+            bits.append(scope_label(task))
+            author = str(trigger.get("author") or "not_self").casefold()
+            if author == "self":
+                bits.append("toi seulement")
+            elif author not in ("not_self", "any") and author.isdigit():
+                bits.append(f"<@{author}>")
     elif kind == KIND_WATCH:
         if price is not None:
             bits.append(f"actuellement {price:.2f} €")
@@ -565,6 +660,16 @@ def confirm_title(task, state: str = "pending") -> tuple[str, str]:
             return "Vérification annulée", ""
         return "Vérification expirée", ""
     if kind == KIND_EVENT:
+        sig = discord_signal(parse_trigger(getattr(task, "trigger_json", None) or {}))
+        if sig:
+            once = "une fois" if int(getattr(task, "max_fires", 1) or 1) == 1 else ""
+            if state == "pending":
+                return f"Prévenir quand {focus} ?", once
+            if state == "confirmed":
+                return f"Je préviens quand {focus}", once
+            if state == "cancelled":
+                return "Alerte annulée", focus
+            return "Alerte expirée", focus
         if state == "pending":
             return f"Écouter « {focus} » ?", f"#{getattr(task, 'id', '?')}"
         if state == "confirmed":
@@ -597,6 +702,16 @@ def natural_summary(task, *, price: Optional[float] = None) -> str:
     kind = getattr(task, "kind", None) or KIND_AT
     trigger = parse_trigger(getattr(task, "trigger_json", None) or {})
     if kind == KIND_EVENT:
+        sig = discord_signal(trigger)
+        if sig:
+            phrase = signal_phrase(trigger, owner_id=int(getattr(task, "user_id", 0) or 0))
+            once = int(getattr(task, "max_fires", 1) or 1) == 1
+            when = f"Quand {phrase}"
+            plan = _summary_plan(task, trigger)
+            if not plan.get("legacy"):
+                return describe_plan(plan, when=when, price=price)
+            lead = "Je te préviens une fois quand" if once else "Je te préviens quand"
+            return f"{lead} {phrase}."
         terms = trigger_terms(trigger)
         topic = str(trigger.get("topic") or "").strip()
         # Afficher le mot-clé en priorité (clair) ; topic seulement s'il n'y a pas de mot.

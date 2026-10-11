@@ -50,7 +50,13 @@ from common.task_plan import plan_of_task
 from common.task_recipe import (
     event_label, natural_summary, parse_trigger, quick_delivery_mode, quick_reply_verdict,
 )
-from common.task_triggers import EventTriggerCache, find_firing_tasks
+from common.task_triggers import (
+    EventTriggerCache,
+    find_firing_tasks,
+    find_signal_tasks,
+    signal_fact,
+    voice_transitions,
+)
 from common.task_watch import condition_met, extract_price_eur
 from common.tasks import (
     DRAFT_TTL_MINUTES,
@@ -429,6 +435,42 @@ def _foot_tag(title: str, detail: str = "") -> str:
     return f"**{title}**" if title else detail
 
 
+def _task_subtext(task, footer_detail: str = "") -> str:
+    """Sous-texte Discord (`-#`) sous chaque message issu d'une tâche."""
+    kind = getattr(task, "kind", "") or ""
+    detail = (footer_detail or "").strip()
+    if detail:
+        if kind == KIND_EVENT:
+            label = "Écoute"
+        elif kind == KIND_WATCH:
+            label = "Veille"
+        else:
+            label = "Vérifié"
+        return f"-# {_foot_tag(label, detail)}"
+    if kind == KIND_EVENT:
+        return f"-# {_foot_tag('Écoute')}"
+    if kind == KIND_WATCH:
+        return f"-# {_foot_tag('Veille')}"
+    try:
+        stamp = f"<t:{int(task.execute_at.timestamp())}:f>"
+    except (AttributeError, TypeError, ValueError, OSError):
+        stamp = ""
+    return f"-# {_foot_tag('Programmé', stamp)}"
+
+
+_TASK_SUBTEXT_LABELS = ("**Écoute**", "**Veille**", "**Programmé**", "**Vérifié**", "**Rappel**")
+
+
+def _strip_task_subtext(text: str) -> str:
+    """Retire le pied de tâche du commentaire, pour le recoller sous la vue."""
+    kept = []
+    for ln in (text or "").splitlines():
+        if ln.startswith("-# ") and any(tag in ln for tag in _TASK_SUBTEXT_LABELS):
+            continue
+        kept.append(ln)
+    return "\n".join(kept).strip()
+
+
 def _source_footer_line(tool_responses) -> str:
     """Une ligne de domaines cliquables (max 3) — jamais d'URL inventée par le modèle."""
     seen_host: set[str] = set()
@@ -506,6 +548,10 @@ ou boucle sans heure (kind=watch, vérif ≥ 6 h). Une heure dite (« tous les j
   jugée sans rédaction (JEV, ou le chiffre).
 - cooldown / nombre d'alertes / durée : OMETS-les. Interdit de demander « combien de fois ? ».
 Écoute : mot cité → pattern. « quand JE dis… » → author=self. topic seulement si sujet flou.
+Signal Discord (kind=event, sans pattern) : quelqu'un de précis rejoint un vocal → signal=voice_join ;
+quitte un vocal → voice_leave ; lance un stream (Go Live) → voice_stream ; rejoint le serveur → member_join.
+target_user_id = son id, ou self. Une fois (défaut). repeat=true seulement s'il veut chaque fois.
+voice_channel_id si un salon vocal précis.
 Veille continue (pas d'heure) : pas d'URL → search_web puis url. Pas de seuil → omets threshold (seuil auto).
 Le résultat conditionnel est un brouillon à confirmer. Une phrase : quand tu vérifies, ce que tu fais,
 et que tu te tais si la condition est fausse. Oui / ok / vas-y → manage_task confirm. Ajustement → manage_task edit.
@@ -1090,6 +1136,7 @@ class Chat(commands.Cog):
         threshold: Optional[float],
         url: str,
         trigger_message: Optional[discord.Message],
+        signal_note: str = "",
     ) -> bool:
         mode = str(secondary.get("mode") or "generate")
         say = str(secondary.get("say") or "")
@@ -1112,6 +1159,12 @@ class Chat(commands.Cog):
                 f"[message](<{trigger_message.jump_url}>) · "
                 f"alerte {fires_after}/{task.max_fires or '∞'}"
             )
+            if done:
+                footer += " · écoute terminée"
+        elif signal_note:
+            fires_after = task.fires_count + 1
+            done = bool(task.max_fires and fires_after >= task.max_fires)
+            footer = signal_note[:120]
             if done:
                 footer += " · écoute terminée"
         if relay:
@@ -1145,6 +1198,8 @@ class Chat(commands.Cog):
                     excerpt = (trigger_message.clean_content or trigger_message.content or "")[:160]
                     if excerpt:
                         text = f"{text}\n> {excerpt}"
+                elif signal_note:
+                    text = f"{text}\n> {signal_note[:160]}"
             else:
                 clip = say or " ".join(evidence.split())[:180]
                 text = f"{mention} {clip}".strip()
@@ -1174,6 +1229,7 @@ class Chat(commands.Cog):
         task: ScheduledTask,
         *,
         trigger_message: Optional[discord.Message] = None,
+        signal_note: str = "",
     ) -> bool:
         """Déclencheur déjà parti. Action, condition, suite. False = silence.
 
@@ -1210,6 +1266,8 @@ class Chat(commands.Cog):
                     task.guild_id, task.user_id, _last_result_key(task.id), snapshot[:500],
                 )
 
+        if signal_note:
+            evidence = f"{signal_note}\n\n{evidence}".strip()
         try:
             if cond and cond.get("when") == "before":
                 if not await self._condition_holds(task, cond, evidence, None, None, var_key):
@@ -1244,6 +1302,7 @@ class Chat(commands.Cog):
                 threshold=threshold,
                 url=url,
                 trigger_message=trigger_message,
+                signal_note=signal_note,
             )
             if delivered and cond and cond.get("dedup") and price is not None and var_key:
                 await asyncio.to_thread(
@@ -1254,10 +1313,21 @@ class Chat(commands.Cog):
         finally:
             await _keep()
 
-    async def _fire_event_task(self, task: ScheduledTask, message: discord.Message) -> None:
+    async def _fire_event_task(
+        self,
+        task: ScheduledTask,
+        message: Optional[discord.Message] = None,
+        *,
+        fact: str = "",
+    ) -> None:
+        if message is None and not fact:
+            self._event_firing.discard(task.id)
+            return
         if not plan_of_task(task).get("legacy"):
             try:
-                delivered = await self._run_plan(task, trigger_message=message)
+                delivered = await self._run_plan(
+                    task, trigger_message=message, signal_note=fact,
+                )
                 if delivered:
                     await asyncio.to_thread(self.tasks.record_fire, task.id)
                 else:
@@ -1271,9 +1341,22 @@ class Chat(commands.Cog):
         try:
             await asyncio.to_thread(self.tasks.touch_last_fired, task.id)
             self.event_triggers.invalidate(task.guild_id)
-            excerpt = (message.clean_content or message.content or "")[:200]
-            author = getattr(message.author, "display_name", None) or message.author.name
-            chan = getattr(message.channel, "name", "?")
+            fires_after = task.fires_count + 1
+            last = bool(task.max_fires and fires_after >= task.max_fires)
+            if message is not None:
+                excerpt = (message.clean_content or message.content or "")[:200]
+                author = getattr(message.author, "display_name", None) or message.author.name
+                chan = getattr(message.channel, "name", "?")
+                context = f"(Déclenché par {author} dans #{chan} : « {excerpt} »)"
+                detail = (
+                    f"[message](<{message.jump_url}>) · alerte {fires_after}/{task.max_fires or '∞'}"
+                    + (" · écoute terminée" if last else "")
+                )
+            else:
+                excerpt = fact[:200]
+                author = ""
+                context = f"({fact})"
+                detail = fact[:120] + (" · écoute terminée" if last else "")
             fast = self._fast_alert_text(task, message=message, author=author, excerpt=excerpt)
             if fast is None:
                 mode = await self._cheap_post_mode(task.instruction)
@@ -1282,15 +1365,7 @@ class Chat(commands.Cog):
                         task, message=message, author=author, excerpt=excerpt, mode=mode,
                     )
             enriched = ScheduledTask(
-                **{**task.__dict__, "instruction": (
-                    f"{task.instruction}\n"
-                    f"(Déclenché par {author} dans #{chan} : « {excerpt} »)"
-                )},
-            )
-            fires_after = task.fires_count + 1
-            last = bool(task.max_fires and fires_after >= task.max_fires)
-            detail = f"[message](<{message.jump_url}>) · alerte {fires_after}/{task.max_fires or '∞'}" + (
-                " · écoute terminée" if last else ""
+                **{**task.__dict__, "instruction": f"{task.instruction}\n{context}"},
             )
             await self._exec_task_llm(
                 enriched, trigger_message=message, footer_detail=detail, fast_text=fast,
@@ -1432,8 +1507,8 @@ class Chat(commands.Cog):
     async def _post_fast_alert(
         self, task: ScheduledTask, dest, text: str, footer_detail: str,
     ) -> None:
-        label = "Écoute" if task.kind == KIND_EVENT else ("Veille" if task.kind == KIND_WATCH else "Rappel")
-        body = f"{text}\n-# {_foot_tag(label, footer_detail)}" if footer_detail else text
+        sub = _task_subtext(task, footer_detail)
+        body = text if sub and sub in text else (f"{text}\n{sub}" if text else sub)
         posted = await dest.send(
             suppress_link_embeds(body),
             allowed_mentions=discord.AllowedMentions(
@@ -1467,6 +1542,73 @@ class Chat(commands.Cog):
         t = asyncio.create_task(self._scan_event_tasks(message))
         self._bg_tasks.add(t)
         t.add_done_callback(self._bg_tasks.discard)
+
+    async def _scan_signal_tasks(
+        self,
+        guild_id: int,
+        signal: str,
+        user_id: int,
+        channel_id: int | None,
+        fact: str,
+    ) -> None:
+        try:
+            firing = await find_signal_tasks(
+                self.event_triggers,
+                self.tasks,
+                guild_id=guild_id,
+                signal=signal,
+                user_id=user_id,
+                channel_id=channel_id,
+            )
+        except Exception:
+            logger.exception("Signaux Discord : scan échoué")
+            return
+        for task in firing:
+            if task.id in self._event_firing:
+                continue
+            self._event_firing.add(task.id)
+            t = asyncio.create_task(self._fire_event_task(task, fact=fact))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+
+    def _queue_signal(self, guild_id: int, signal: str, user_id: int, channel_id: int | None, fact: str) -> None:
+        t = asyncio.create_task(
+            self._scan_signal_tasks(guild_id, signal, user_id, channel_id, fact),
+        )
+        self._bg_tasks.add(t)
+        t.add_done_callback(self._bg_tasks.discard)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        if member.bot or member.guild is None:
+            return
+        events = voice_transitions(
+            getattr(before.channel, "id", 0) or 0,
+            getattr(after.channel, "id", 0) or 0,
+            bool(before.self_stream),
+            bool(after.self_stream),
+        )
+        if not events:
+            return
+        who = member.display_name
+        for signal, cid in events:
+            channel = before.channel if signal == "voice_leave" else after.channel
+            place = getattr(channel, "name", "") or "vocal"
+            self._queue_signal(
+                member.guild.id, signal, member.id, cid, signal_fact(signal, who, place),
+            )
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        if member.bot or member.guild is None:
+            return
+        self._queue_signal(
+            member.guild.id,
+            "member_join",
+            member.id,
+            None,
+            signal_fact("member_join", member.display_name, member.guild.name),
+        )
 
     async def _exec_task_llm(
         self,
@@ -1632,32 +1774,19 @@ class Chat(commands.Cog):
                 origin = await origin_channel.fetch_message(task.message_id)
             except (discord.NotFound, discord.HTTPException, discord.Forbidden):
                 origin = None
-        if footer_detail:
-            if task.kind == KIND_EVENT:
-                label = "Écoute"
-            elif task.kind == KIND_WATCH:
-                label = "Veille"
-            else:
-                label = "Vérifié"
-            programmed = _foot_tag(label, footer_detail)
-        else:
-            stamp = f"<t:{int(task.execute_at.timestamp())}:f>"
-            programmed = _foot_tag("Programmé", stamp)
+        footer = _task_subtext(task, footer_detail)
         if via_dm:
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# {programmed}"
         elif origin is not None:
             text = re.sub(rf"<@!?{task.user_id}>\s*", "", text).strip()
             if not text:
                 text = _spoken_task_line(action)
-            footer = f"-# {programmed}"
         else:
             if not text:
                 text = f"{mention} {_spoken_task_line(action)}"
             elif mention not in text and f"<@!{task.user_id}>" not in text:
                 text = f"{mention} {text}"
-            footer = f"-# {programmed}"
         if footer not in text:
             text = f"{text}\n{footer}"
 
@@ -1684,10 +1813,18 @@ class Chat(commands.Cog):
             )
 
         for tool_name, datas in _group_tool_responses(resp):
+            mount_footer = bool(footer) and not sent_tools
             commentary = _widget_commentary(text, tool_name) if not sent_tools else ""
+            if mount_footer:
+                commentary = _strip_task_subtext(commentary)
             view = build_widget_group(tool_name, datas, commentary=commentary)
             if view is None:
                 continue
+            if mount_footer:
+                try:
+                    view.add_item(discord.ui.TextDisplay(footer))
+                except Exception:
+                    logger.debug("Tâche #%s : pied de page sous la vue impossible", task.id)
             posted = await _post(view=view, first=not sent_messages)
             await bind_dyn_widget(view, posted)
             await bind_bookmark(view, posted)

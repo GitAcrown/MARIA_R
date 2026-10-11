@@ -17,6 +17,7 @@ from common.layout_kit import sep_wide
 from common.llm import Tool, ToolCallRecord, ToolResponseRecord
 from common.task_plan import compile_plan
 from common.task_recipe import (
+    build_discord_trigger,
     build_event_trigger,
     build_recipe,
     build_watch_trigger,
@@ -24,8 +25,10 @@ from common.task_recipe import (
     keyword_is_specific,
     natural_summary,
     normalize_author_filter,
+    normalize_discord_signal,
     pattern_ok,
     quick_delivery_mode,
+    signal_phrase,
 )
 from common.task_watch import pick_price
 from common.tasks import (
@@ -773,6 +776,143 @@ async def _compile_task_plan(
     return plan, price, err
 
 
+async def _commit_discord_signal(
+    tc: ToolCallRecord,
+    ctx,
+    store: TaskStore,
+    typesafe,
+    *,
+    author,
+    guild,
+    msg,
+    now: datetime,
+    args: dict,
+    instruction: str,
+    title: str,
+    expires_at: datetime,
+    deliver_dm: bool,
+    accent: int,
+    signal: str,
+) -> ToolResponseRecord:
+    """Écoute kind=event branchée sur un signal Discord (vocal, stream, arrivée). Une fois par défaut."""
+    raw = str(args.get("target_user_id") or "").strip()
+    if raw.casefold() in ("self", "me", "moi"):
+        target_id = author.id
+    elif raw.isdigit():
+        target_id = int(raw)
+    else:
+        return ToolResponseRecord(tc.id, {
+            "error": (
+                "Il me faut la personne précise (target_user_id, ou self si c'est le membre). "
+                "Un pseudo seul ne suffit pas."
+            ),
+        }, now)
+    ch_id = 0
+    raw_ch = args.get("voice_channel_id")
+    if raw_ch not in (None, "", 0):
+        try:
+            ch_id = int(raw_ch)
+        except (TypeError, ValueError):
+            return ToolResponseRecord(tc.id, {
+                "error": "voice_channel_id doit être l'identifiant du salon vocal.",
+            }, now)
+        channel = guild.get_channel(ch_id)
+        if channel is not None and not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            return ToolResponseRecord(tc.id, {
+                "error": "Ce salon n'est pas un vocal.",
+            }, now)
+    repeat = bool(args.get("repeat"))
+    if repeat:
+        try:
+            max_fires = int(args.get("max_fires") or 5)
+        except (TypeError, ValueError):
+            max_fires = 5
+    elif args.get("max_fires") is not None:
+        try:
+            max_fires = int(args["max_fires"])
+        except (TypeError, ValueError):
+            max_fires = 1
+    else:
+        max_fires = 1
+    max_fires = max(1, min(20, max_fires))
+    if args.get("cooldown_hours") is not None:
+        try:
+            cd = int(float(args["cooldown_hours"]) * 3600)
+        except (TypeError, ValueError):
+            cd = EVENT_COOLDOWN_MIN
+    else:
+        cd = EVENT_COOLDOWN_MIN
+    cd = max(EVENT_COOLDOWN_MIN, cd)
+    dup = await asyncio.to_thread(
+        store.find_event_duplicate, author.id, guild.id,
+        f"{signal}:{target_id}:{ch_id}",
+    )
+    if dup is not None:
+        return ToolResponseRecord(tc.id, {
+            "error": (
+                f"Tu as déjà cette alerte (tâche #{dup.id}). "
+                "Dis-lui qu'elle est active ; pour la changer, utilise manage_task edit."
+            ),
+        }, now)
+    trigger = build_discord_trigger(
+        signal=signal, user_id=target_id, voice_channel_id=ch_id,
+    )
+    phrase = signal_phrase(trigger, owner_id=author.id)
+    mode = await _delivery_mode(
+        typesafe, instruction, facts_ready=_facts_will_be_ready(args),
+    )
+    plan, plan_price, plan_err = await _compile_task_plan(
+        ctx, store, guild.id, author.id, args,
+        instruction=instruction, mode=mode, typesafe=typesafe,
+    )
+    if plan_err:
+        return ToolResponseRecord(tc.id, {"error": plan_err}, now)
+    recipe = build_recipe(say=instruction, ping=True, mode=mode, plan=plan)
+    await asyncio.to_thread(store.cancel_drafts, author.id, KIND_EVENT)
+    tid = await asyncio.to_thread(
+        store.add,
+        channel_id=msg.channel.id,
+        user_id=author.id,
+        guild_id=guild.id,
+        instruction=instruction,
+        execute_at=now,
+        title=title or phrase,
+        kind=KIND_EVENT,
+        trigger=trigger,
+        recipe=recipe,
+        scope=SCOPE_GUILD,
+        channel_ids=[],
+        cooldown_seconds=cd,
+        max_fires=max_fires,
+        expires_at=expires_at,
+        status=STATUS_DRAFT,
+        message_id=msg.id,
+        deliver_dm=deliver_dm,
+    )
+    created = await asyncio.to_thread(store.get, tid)
+    quotas = await asyncio.to_thread(store.quota_summary, author.id)
+    payload = _serialize_task(created) if created else {"id": tid}
+    summary_txt = natural_summary(created, price=plan_price) if created else ""
+    return ToolResponseRecord(tc.id, {
+        "_tool": "schedule_task",
+        "success": True,
+        "needs_confirm": True,
+        "task_id": tid,
+        "kind": KIND_EVENT,
+        "quotas": quotas,
+        "current_price": plan_price,
+        "natural_summary": summary_txt,
+        **payload,
+        "accent_colour": accent,
+        "_llm_summary": (
+            f"Brouillon alerte #{tid} prêt, en attente de confirmation (boutons affichés ; "
+            f"si le membre répond oui/ok/vas-y, appelle manage_task action=confirm). "
+            f"Résumé : {summary_txt} "
+            "Dis-le en une phrase naturelle, sans lister les plafonds comme un règlement."
+        ),
+    }, now)
+
+
 async def _tool_schedule_event_watch(
     tc: ToolCallRecord,
     ctx,
@@ -848,6 +988,14 @@ async def _tool_schedule_event_watch(
             return ToolResponseRecord(tc.id, {
                 "error": f"Tu as déjà {TASK_MAX_EVENT} écoutes (max).{hint}",
             }, now)
+        signal = normalize_discord_signal(args.get("signal"))
+        if signal:
+            return await _commit_discord_signal(
+                tc, ctx, store, typesafe,
+                author=author, guild=guild, msg=msg, now=now, args=args,
+                instruction=instruction, title=title, expires_at=expires_at,
+                deliver_dm=deliver_dm, accent=accent, signal=signal,
+            )
         topic = (args.get("topic") or "").strip()[:160]
         pattern = _pick_event_pattern(
             (args.get("pattern") or args.get("keyword") or "").strip(),
@@ -1696,7 +1844,12 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
             name="schedule_task",
             description=(
                 "Programme une tâche = déclencheur + action optionnelle + condition optionnelle + suite. "
-                "Déclencheur : at/recurring (heure fixe), event (message), watch (boucle ≥ 6 h, SANS heure). "
+                "Déclencheur : at/recurring (heure fixe), event (message OU signal Discord), "
+                "watch (boucle ≥ 6 h, SANS heure). "
+                "Signal : voice_join, voice_leave, voice_stream (Go Live), member_join. "
+                "target_user_id obligatoire (self si c'est lui). Une fois par défaut ; "
+                "repeat=true ou max_fires>1 seulement s'il veut chaque fois. "
+                "voice_channel_id si un salon vocal précis. Pas de pattern dans ce cas. "
                 f"Max {TASK_MAX_PENDING} tâches, dont {TASK_MAX_EVENT} écoutes, "
                 f"{TASK_MAX_WATCH} boucle, {TASK_MAX_RECURRING} répétitives. "
                 "Heure dite (« tous les jours à 20h ») → recurring/at + time, JAMAIS watch. "
@@ -1728,7 +1881,10 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "kind": {
                     "type": "string",
                     "enum": ["at", "recurring", "event", "watch"],
-                    "description": "at/recurring=heure fixe, event=message, watch=boucle sans heure",
+                    "description": (
+                        "at/recurring=heure fixe, event=message ou signal Discord, "
+                        "watch=boucle sans heure"
+                    ),
                 },
                 "title": {"type": "string", "description": "Libellé court UI (optionnel)"},
                 "execute_at": {"type": "string", "description": "Date/heure ISO 8601 (horloge)"},
@@ -1855,6 +2011,35 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                         "À INFÉRER : « quand je dis X » → self."
                     ),
                 },
+                "signal": {
+                    "type": "string",
+                    "enum": ["voice_join", "voice_leave", "voice_stream", "member_join"],
+                    "description": (
+                        "Signal Discord, kind=event, sans mot-clé. "
+                        "voice_join = rejoint un vocal, voice_leave = quitte un vocal, "
+                        "voice_stream = lance un stream (Go Live), "
+                        "member_join = rejoint le serveur. "
+                        "Une fois sauf repeat=true."
+                    ),
+                },
+                "target_user_id": {
+                    "type": "string",
+                    "description": (
+                        "Personne du signal : son id numérique, ou self si c'est le membre. "
+                        "Obligatoire avec signal."
+                    ),
+                },
+                "voice_channel_id": {
+                    "type": "string",
+                    "description": "Salon vocal précis (id). Omettre = n'importe quel vocal.",
+                },
+                "repeat": {
+                    "type": "boolean",
+                    "description": (
+                        "true seulement s'il veut être prévenu à chaque fois. "
+                        "Défaut : une seule fois, puis la tâche se termine."
+                    ),
+                },
             },
             optional_props=[
                 "title", "execute_at", "delay_minutes", "delay_hours", "recurrence",
@@ -1863,6 +2048,7 @@ def build_task_tools(store: TaskStore, typesafe=None) -> list[Tool]:
                 "url", "query", "primary", "primary_prompt", "condition", "condition_when",
                 "threshold", "op", "interval_minutes", "cooldown_hours",
                 "max_fires", "ttl_days", "guild_scope", "explicit_guild_scope", "author",
+                "signal", "target_user_id", "voice_channel_id", "repeat",
             ],
             function=_tool_schedule,
         ),
